@@ -1,4 +1,5 @@
 {
+  "schema_version": 1,
   "id": "torana/intent",
   "name": "intent",
   "version": "0.1.0",

@@ -8,6 +8,7 @@ import (
 )
 
 type manifest struct {
+	SchemaVersion        int    `json:"schema_version"`
 	ID                   string `json:"id"`
 	Name                 string `json:"name"`
 	Version              string `json:"version"`
@@ -32,7 +33,7 @@ func main() {
 		dir := filepath.Join(os.Args[1], entry.Name())
 		var m manifest
 		readJSON(filepath.Join(dir, "plugin.json"), &m)
-		if m.ID != "torana/"+entry.Name() || m.Name != entry.Name() || m.Version == "" || m.ABIVersion != "v1" || m.MinimumToranaVersion == "" {
+		if m.SchemaVersion != 1 || m.ID != "torana/"+entry.Name() || m.Name != entry.Name() || m.Version == "" || m.ABIVersion != "v1" || m.MinimumToranaVersion == "" {
 			panic(fmt.Sprintf("%s: incomplete v1 manifest", entry.Name()))
 		}
 		if m.FailureMode != "pass" && m.FailureMode != "block" {

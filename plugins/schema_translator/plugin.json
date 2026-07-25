@@ -1,4 +1,5 @@
 {
+  "schema_version": 1,
   "id": "torana/schema_translator",
   "name": "schema_translator",
   "version": "0.3.0",
