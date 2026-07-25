@@ -15,8 +15,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: torana-edge/torana-plugin-sdk
-          ref: feat/sdk-v1
+          ref: fc3399a7daa09c1f453da99518bc78a404089c7b
           path: torana-plugin-sdk
+      - uses: actions/checkout@v4
+        with:
+          repository: torana-edge/torana-edge
+          ref: d325cfbe9d78d0534fab04138982c65eb86da5dd
+          path: torana-edge
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24.x'
@@ -27,3 +32,7 @@ jobs:
           for plugin in auth compactor intent keyword_compactor otel pii schema_translator; do
             ./scripts/build.sh "$plugin"
           done
+      - working-directory: torana-edge
+        run: go test ./internal/plugin -run TestExternalBundlesConformToCurrentHost -count=1
+        env:
+          TORANA_PLUGIN_BUNDLES_DIR: ${{ github.workspace }}/torana-plugins/dist

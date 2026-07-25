@@ -12,6 +12,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -32,7 +34,14 @@ jobs:
         run: ./scripts/test.sh
       - working-directory: torana-plugins
         run: ./scripts/package.sh '${{ inputs.plugin }}' '${{ inputs.version }}'
+      - uses: anchore/sbom-action@v0
+        with:
+          path: torana-plugins/dist/${{ inputs.plugin }}
+          output-file: torana-plugins/dist/${{ inputs.plugin }}/${{ inputs.plugin }}-${{ inputs.version }}.spdx.json
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: '${{ inputs.plugin }}/v${{ inputs.version }}'
           files: torana-plugins/dist/${{ inputs.plugin }}/*
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: torana-plugins/dist/${{ inputs.plugin }}/${{ inputs.plugin }}-${{ inputs.version }}.tar.gz

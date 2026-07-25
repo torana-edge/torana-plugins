@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -14,7 +15,7 @@ import (
 
 func main() {}
 
-const cleanCachePrefix = "pii_clean"
+const cleanCachePrefix = "pii_clean:v2"
 
 // pii scans tool results (grep/bash/etc. output) before they are forwarded to
 // the cloud upstream. A deterministic regex pre-filter catches high-precision
@@ -90,10 +91,9 @@ func init() {
 				continue
 			}
 			// Skip results cleared on a prior turn (avoids re-scanning history).
-			if msg.ToolCallId != "" {
-				if clean, _ := sdk.HostCall("env.cache_get", cleanCachePrefix+":"+msg.ToolCallId); clean != "" {
-					continue
-				}
+			cacheKey := piiCleanCacheKey(msg.ToolCallId, toolName, msg.Content)
+			if clean, _ := sdk.HostCall("env.cache_get", cacheKey); clean != "" {
+				continue
 			}
 
 			findings, err := scan(msg.Content, toolName)
@@ -111,12 +111,43 @@ func init() {
 				sdk.BlockRequest(req, 422, "pii_detected", blockMessage(toolName, msg.ToolCallId, findings))
 				return req, nil
 			}
-			if msg.ToolCallId != "" {
-				sdk.HostCall("env.cache_set", fmt.Sprintf(`{"key":"%s:%s","value":"1"}`, cleanCachePrefix, msg.ToolCallId))
-			}
+			keyJSON, _ := json.Marshal(map[string]string{"key": cacheKey, "value": "1"})
+			_, _ = sdk.HostCall("env.cache_set", string(keyJSON))
 		}
 		return nil, nil
 	})
+}
+
+func piiCleanCacheKey(toolCallID, toolName, content string) string {
+	policy, _ := json.Marshal(struct {
+		Version      int      `json:"version"`
+		Provider     string   `json:"provider"`
+		Model        string   `json:"model"`
+		Tools        []string `json:"tools"`
+		OnError      string   `json:"on_error"`
+		MaxScanChars int      `json:"max_scan_chars"`
+	}{
+		Version:      2,
+		Provider:     cfg.Provider,
+		Model:        cfg.Model,
+		Tools:        cfg.Tools,
+		OnError:      cfg.OnError,
+		MaxScanChars: cfg.MaxScanChars,
+	})
+	digest := sha256.New()
+	_, _ = digest.Write([]byte(toolCallID))
+	_, _ = digest.Write([]byte{0})
+	_, _ = digest.Write([]byte(toolName))
+	_, _ = digest.Write([]byte{0})
+	_, _ = digest.Write(contentDigestBytes(content))
+	_, _ = digest.Write([]byte{0})
+	_, _ = digest.Write(policy)
+	return fmt.Sprintf("%s:%x", cleanCachePrefix, digest.Sum(nil))
+}
+
+func contentDigestBytes(content string) []byte {
+	sum := sha256.Sum256([]byte(content))
+	return sum[:]
 }
 
 func toolAllowed(name string) bool {

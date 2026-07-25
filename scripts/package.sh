@@ -9,6 +9,7 @@ fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 plugin=$1
 version=$2
+go run "$root/scripts/validate_release.go" "$root/plugins/$plugin/plugin.json" "$plugin" "$version"
 "$root/scripts/build.sh" "$plugin" >/dev/null
 staging=$(mktemp -d)
 trap 'rm -rf "$staging"' EXIT
@@ -17,5 +18,9 @@ cp "$root/plugins/$plugin/plugin.json" "$staging/plugin.json"
 cp "$root/plugins/$plugin/schema.json" "$staging/schema.json"
 cp "$root/LICENSE" "$staging/LICENSE"
 cp "$root/README.md" "$staging/README.md"
-(cd "$staging" && sha256sum plugin.wasm > SHA256SUMS && tar -czf "$root/dist/$plugin/$plugin-$version.tar.gz" plugin.wasm plugin.json schema.json LICENSE README.md SHA256SUMS)
-sha256sum "$root/dist/$plugin/$plugin-$version.tar.gz"
+(cd "$staging" && sha256sum plugin.wasm plugin.json schema.json > SHA256SUMS)
+go run "$root/scripts/bundle_digest.go" "$staging/plugin.json" "$staging/plugin.wasm" "$staging/schema.json" > "$staging/BUNDLE_DIGEST"
+archive="$root/dist/$plugin/$plugin-$version.tar.gz"
+(cd "$staging" && tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner -cf - plugin.wasm plugin.json schema.json LICENSE README.md SHA256SUMS BUNDLE_DIGEST | gzip -n > "$archive")
+(cd "$(dirname "$archive")" && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256")
+cat "$archive.sha256"
