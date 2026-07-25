@@ -1,0 +1,29 @@
+name: Release plugin
+
+on:
+  workflow_dispatch:
+    inputs:
+      plugin:
+        description: Plugin directory name
+        required: true
+      version:
+        description: Semver release version
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+      - run: ./scripts/test.sh
+      - run: ./scripts/package.sh '${{ inputs.plugin }}' '${{ inputs.version }}'
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: '${{ inputs.plugin }}/v${{ inputs.version }}'
+          files: dist/${{ inputs.plugin }}/*
