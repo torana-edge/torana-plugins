@@ -16,11 +16,18 @@ trap 'rm -rf "$staging"' EXIT
 cp "$root/dist/$plugin/plugin.wasm" "$staging/plugin.wasm"
 cp "$root/plugins/$plugin/plugin.json" "$staging/plugin.json"
 cp "$root/plugins/$plugin/schema.json" "$staging/schema.json"
+bundle_files=(plugin.wasm plugin.json schema.json)
+digest_args=("$staging/plugin.json" "$staging/plugin.wasm" "$staging/schema.json")
+if [[ -f "$root/plugins/$plugin/agent.json" ]]; then
+  cp "$root/plugins/$plugin/agent.json" "$staging/agent.json"
+  bundle_files+=(agent.json)
+  digest_args+=("$staging/agent.json")
+fi
 cp "$root/LICENSE" "$staging/LICENSE"
 cp "$root/README.md" "$staging/README.md"
-(cd "$staging" && sha256sum plugin.wasm plugin.json schema.json > SHA256SUMS)
-go run "$root/scripts/bundle_digest.go" "$staging/plugin.json" "$staging/plugin.wasm" "$staging/schema.json" > "$staging/BUNDLE_DIGEST"
+(cd "$staging" && sha256sum "${bundle_files[@]}" > SHA256SUMS)
+go run "$root/scripts/bundle_digest.go" "${digest_args[@]}" > "$staging/BUNDLE_DIGEST"
 archive="$root/dist/$plugin/$plugin-$version.tar.gz"
-(cd "$staging" && tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner -cf - plugin.wasm plugin.json schema.json LICENSE README.md SHA256SUMS BUNDLE_DIGEST | gzip -n > "$archive")
+(cd "$staging" && tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner -cf - "${bundle_files[@]}" LICENSE README.md SHA256SUMS BUNDLE_DIGEST | gzip -n > "$archive")
 (cd "$(dirname "$archive")" && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256")
 cat "$archive.sha256"
