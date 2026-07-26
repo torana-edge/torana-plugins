@@ -1,4 +1,4 @@
-module github.com/torana-edge/torana-plugins/plugins/auth
+module github.com/torana-edge/torana-plugins/plugins/cache_tier_selector
 
 go 1.25.0
 

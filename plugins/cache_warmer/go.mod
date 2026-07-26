@@ -1,4 +1,4 @@
-module github.com/torana-edge/torana-plugins/plugins/auth
+module github.com/torana-edge/torana-plugins/plugins/cache_warmer
 
 go 1.25.0
 
