@@ -50,18 +50,36 @@ type agentOperation struct {
 	OutputSchema json.RawMessage `json:"output_schema"`
 }
 
+// knownHooks and knownPermissions mirror supportedHooks and supportedPermissions
+// in torana-edge's internal/plugin/discovery.go. The host is authoritative; this
+// copy exists so a bad manifest fails here rather than at load time in someone's
+// proxy.
+//
+// Because it is a copy it can drift, and it did: every capability added for the
+// cache plugins was rejected here while being perfectly valid to the host.
+// Adding a capability upstream means updating this list in the same change.
 var knownHooks = map[string]bool{
 	"run_before_request": true, "run_after_response": true,
 	"run_on_stream_chunk": true, "run_on_http_request": true,
+	"run_on_tick": true,
 }
 
 var knownPermissions = map[string]bool{
-	"env.block_request": true, "env.cache_get": true, "env.cache_set": true,
-	"env.emit_metric": true, "env.host_call.torana_evaluate_compaction": true,
-	"env.host_call.torana_offload_completion": true,
-	"env.host_call.torana_record_savings":     true, "env.host_call.verify_virtual_key": true,
-	"env.log": true, "env.meta_get": true, "env.meta_set": true,
-	"env.plugin_config": true, "env.request_headers": true, "env.serve_http": true,
+	"env.background_tick": true,
+	"env.block_request":   true, "env.cache_get": true, "env.cache_set": true,
+	"env.emit_metric":                          true,
+	"env.host_call.torana_cache_pricing":       true,
+	"env.host_call.torana_evaluate_compaction": true,
+	"env.host_call.torana_offload_completion":  true,
+	"env.host_call.torana_plugin_counter":      true,
+	"env.host_call.torana_record_savings":      true,
+	"env.host_call.torana_send_request":        true,
+	"env.host_call.verify_virtual_key":         true,
+	"env.log":                                  true, "env.meta_get": true, "env.meta_set": true,
+	"env.now": true, "env.original_request": true, "env.original_response": true,
+	"env.plugin_config": true, "env.request_headers": true,
+	"env.respond_request": true, "env.route_request": true, "env.serve_http": true,
+	"env.state_get": true, "env.state_keys": true, "env.state_set": true,
 }
 
 func main() {
