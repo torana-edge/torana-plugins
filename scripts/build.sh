@@ -24,4 +24,8 @@ fi
 GOCACHE="$cache" GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -buildvcs=false -o "$root/dist/$plugin/plugin.wasm" "$source"
 cp "$source/plugin.json" "$root/dist/$plugin/plugin.json"
 cp "$source/schema.json" "$root/dist/$plugin/schema.json"
+rm -f "$root/dist/$plugin/agent.json"
+if [[ -f "$source/agent.json" ]]; then
+  cp "$source/agent.json" "$root/dist/$plugin/agent.json"
+fi
 echo "$root/dist/$plugin/plugin.wasm"

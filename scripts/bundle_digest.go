@@ -8,12 +8,13 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 4 {
-		fmt.Fprintln(os.Stderr, "usage: bundle_digest <plugin.json> <plugin.wasm> <schema.json>")
+	if len(os.Args) != 4 && len(os.Args) != 5 {
+		fmt.Fprintln(os.Stderr, "usage: bundle_digest <plugin.json> <plugin.wasm> <schema.json> [agent.json]")
 		os.Exit(2)
 	}
 	h := sha256.New()
-	for _, path := range os.Args[1:] {
+	paths := os.Args[1:]
+	for _, path := range paths {
 		part, err := os.ReadFile(path)
 		if err != nil {
 			panic(err)
