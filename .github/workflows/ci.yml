@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: torana-edge/torana-edge
-          ref: c0f19aaa653a87d48c24b28b7febc5055d218be0
+          ref: bdbb68bfd3921f1e79120a0d2a749ebe52100200
           path: torana-edge
       - uses: actions/setup-go@v5
         with:
