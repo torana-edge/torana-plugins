@@ -1,0 +1,47 @@
+name: Release plugin
+
+on:
+  workflow_dispatch:
+    inputs:
+      plugin:
+        description: Plugin directory name
+        required: true
+      version:
+        description: Semver release version
+        required: true
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: torana-plugins
+      - uses: actions/checkout@v4
+        with:
+          repository: torana-edge/torana-plugin-sdk
+          ref: main
+          path: torana-plugin-sdk
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+      - working-directory: torana-plugins
+        run: ./scripts/test.sh
+      - working-directory: torana-plugins
+        run: ./scripts/package.sh '${{ inputs.plugin }}' '${{ inputs.version }}'
+      - uses: anchore/sbom-action@v0
+        with:
+          path: torana-plugins/dist/${{ inputs.plugin }}
+          output-file: torana-plugins/dist/${{ inputs.plugin }}/${{ inputs.plugin }}-${{ inputs.version }}.spdx.json
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: '${{ inputs.plugin }}/v${{ inputs.version }}'
+          files: torana-plugins/dist/${{ inputs.plugin }}/*
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: torana-plugins/dist/${{ inputs.plugin }}/${{ inputs.plugin }}-${{ inputs.version }}.tar.gz
