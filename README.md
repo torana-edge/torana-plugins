@@ -29,3 +29,15 @@ artifacts are written to `dist/` and are deliberately not committed.
 - `otel` — request metrics and a minimal plugin HTTP endpoint.
 - `pii` — local-model and regex PII request guard.
 - `schema_translator` — translates map schemas for constrained providers.
+
+## A note on `auth`
+
+`plugins/auth` ships in this repository but is **deliberately excluded from the public
+registry** at torana.sh. It is a reference for the capability surface — how a plugin
+requests `env.host_call.verify_virtual_key` and `env.request_headers` — not a
+general-purpose authentication plugin, and it should not be deployed as an access
+control.
+
+An earlier iteration of this plugin shipped hardcoded stubs that returned a dummy
+tenant for every request. Those were removed (torana-edge#130) precisely because a
+security stub that returns success is worse than no stub at all.
