@@ -52,7 +52,11 @@ jobs:
           for dir in plugins/*/; do
             ./scripts/build.sh "$(basename "$dir")"
           done
-      - working-directory: torana-edge
-        run: go test ./internal/plugin -run TestExternalBundlesConformToCurrentHost -count=1
-        env:
-          TORANA_PLUGIN_BUNDLES_DIR: ${{ github.workspace }}/torana-plugins/dist
+      # torana-edge tests the host with fixtures and keeps no copy of these
+      # plugins, so its own suite skips every assertion about plugin behaviour.
+      # This job is the only place they run. The script fails if they skip
+      # rather than run — otherwise a broken gate is indistinguishable from a
+      # green build, and pii would stop being tested without anyone noticing.
+      - name: Official-plugin behaviour suite
+        working-directory: torana-plugins
+        run: ./scripts/verify-behaviour.sh ../torana-edge dist
