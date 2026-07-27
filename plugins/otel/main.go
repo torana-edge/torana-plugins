@@ -27,43 +27,8 @@ func init() {
 	})
 
 	sdk.OnAfterResponse(func(ctx context.Context, resp *pb.ChatRequest) (*pb.ChatRequest, error) {
-		labels := map[string]string{"model": resp.Model}
-
-		var meta struct {
-			Response *struct {
-				DurationMs     float64 `json:"duration_ms"`
-				UpstreamStatus int     `json:"upstream_status"`
-				Usage          struct {
-					InputTokens  int `json:"input_tokens"`
-					OutputTokens int `json:"output_tokens"`
-				} `json:"usage"`
-			} `json:"_response"`
-		}
-		if len(resp.ToranaMetaJson) > 0 {
-			_ = json.Unmarshal(resp.ToranaMetaJson, &meta)
-		}
-		if meta.Response == nil {
-			sdk.EmitMetric("torana_plugin_responses_total", sdk.MetricCounter, 1, labels)
-			return nil, nil
-		}
-
-		r := meta.Response
-		labels["status_class"] = statusClass(r.UpstreamStatus)
-
-		// status_class goes on every series, not just the counter. It used to
-		// be computed here and then dropped, because the duration and token
-		// metrics built fresh label maps holding only the model — so latency
-		// and token spend could not be split by outcome. "How slow are the
-		// 5xx?" and "how many tokens did failed requests burn?" are the first
-		// two questions anyone asks of these metrics, and neither was
-		// answerable.
-		sdk.EmitMetric("torana_plugin_responses_total", sdk.MetricCounter, 1, labels)
-		sdk.EmitMetric("torana_plugin_request_duration_ms", sdk.MetricHistogram, r.DurationMs, labels)
-		if r.Usage.InputTokens > 0 {
-			sdk.EmitMetric("torana_plugin_tokens", sdk.MetricCounter, float64(r.Usage.InputTokens), withLabel(labels, "direction", "input"))
-		}
-		if r.Usage.OutputTokens > 0 {
-			sdk.EmitMetric("torana_plugin_tokens", sdk.MetricCounter, float64(r.Usage.OutputTokens), withLabel(labels, "direction", "output"))
+		for _, m := range responseMetrics(resp.Model, parseResponseMeta(resp.ToranaMetaJson)) {
+			sdk.EmitMetric(m.Name, m.Kind, m.Value, m.Labels)
 		}
 		return nil, nil
 	})
@@ -124,5 +89,76 @@ func withLabel(base map[string]string, key, value string) map[string]string {
 		out[k] = v
 	}
 	out[key] = value
+	return out
+}
+
+// responseMeta is the slice of ToranaMeta._response these metrics are built
+// from.
+type responseMeta struct {
+	DurationMs     float64 `json:"duration_ms"`
+	UpstreamStatus int     `json:"upstream_status"`
+	Usage          struct {
+		InputTokens  int `json:"input_tokens"`
+		OutputTokens int `json:"output_tokens"`
+	} `json:"usage"`
+}
+
+func parseResponseMeta(raw []byte) *responseMeta {
+	if len(raw) == 0 {
+		return nil
+	}
+	var meta struct {
+		Response *responseMeta `json:"_response"`
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return nil
+	}
+	return meta.Response
+}
+
+// emission is one metric series, built but not yet sent.
+type emission struct {
+	Name   string
+	Kind   int32
+	Value  float64
+	Labels map[string]string
+}
+
+// responseMetrics builds every series for a completed response.
+//
+// It is separate from the hook so the LABELS can be tested. sdk.EmitMetric is a
+// host call, so anything assembled inline in the closure is unobservable from a
+// test — which is why the bug this fixes (status_class computed and then
+// dropped from the duration and token series) survived with a green suite, and
+// why the first attempt at a test for it also passed against the broken code.
+func responseMetrics(model string, r *responseMeta) []emission {
+	labels := map[string]string{"model": model}
+
+	// No per-response metadata: the only honest series is that a response
+	// happened. It carries no status_class because none was observed —
+	// labelling it "2xx" would invent a measurement.
+	if r == nil {
+		return []emission{{"torana_plugin_responses_total", sdk.MetricCounter, 1, labels}}
+	}
+
+	labels["status_class"] = statusClass(r.UpstreamStatus)
+
+	// status_class belongs on EVERY series, not just the counter. The duration
+	// and token metrics used to build fresh label maps holding only the model,
+	// so latency and token spend could not be split by outcome — "how slow are
+	// the 5xx?" and "how many tokens did failed requests burn?" are the first
+	// two questions anyone asks of these, and neither was answerable.
+	out := []emission{
+		{"torana_plugin_responses_total", sdk.MetricCounter, 1, labels},
+		{"torana_plugin_request_duration_ms", sdk.MetricHistogram, r.DurationMs, labels},
+	}
+	if r.Usage.InputTokens > 0 {
+		out = append(out, emission{"torana_plugin_tokens", sdk.MetricCounter,
+			float64(r.Usage.InputTokens), withLabel(labels, "direction", "input")})
+	}
+	if r.Usage.OutputTokens > 0 {
+		out = append(out, emission{"torana_plugin_tokens", sdk.MetricCounter,
+			float64(r.Usage.OutputTokens), withLabel(labels, "direction", "output")})
+	}
 	return out
 }
