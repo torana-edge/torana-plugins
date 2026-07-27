@@ -11,6 +11,7 @@ import (
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	"github.com/torana-edge/torana-plugin-sdk/pb"
+	"unicode/utf8"
 )
 
 func main() {}
@@ -202,7 +203,10 @@ Never include the actual PII values — only the category and line number. If th
 func modelScan(content, toolName string) ([]finding, error) {
 	scanContent := content
 	if cfg.MaxScanChars > 0 && len(scanContent) > cfg.MaxScanChars {
-		scanContent = scanContent[:cfg.MaxScanChars]
+		// A mid-rune cut here does not trap — json.Marshal substitutes U+FFFD
+		// rather than failing — but it silently corrupts the last character of
+		// the text a PII detector is about to read. Cut cleanly.
+		scanContent = truncHead(scanContent, cfg.MaxScanChars)
 	}
 	payload, _ := json.Marshal(map[string]any{
 		"provider":      cfg.Provider,
@@ -283,4 +287,38 @@ func toolLabel(toolName, id string) string {
 	default:
 		return "a tool result"
 	}
+}
+
+// Torana truncates tool output by byte budget, but a byte index can land in
+// the middle of a UTF-8 rune. The resulting string is invalid UTF-8, and the
+// SDK marshals it into a proto3 string field — which enforces UTF-8 and
+// panics, trapping the plugin for the entire request. Any non-ASCII tool
+// output was enough to trigger it.
+//
+// These back the cut off to the nearest rune boundary, so the result is always
+// within budget and always valid UTF-8.
+
+// truncHead returns the longest prefix of s that is at most n bytes and does
+// not split a rune.
+func truncHead(s string, n int) string {
+	if n >= len(s) {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// truncTail returns the longest suffix of s that is at most n bytes and does
+// not split a rune.
+func truncTail(s string, n int) string {
+	if n >= len(s) {
+		return s
+	}
+	i := len(s) - n
+	for i < len(s) && !utf8.RuneStart(s[i]) {
+		i++
+	}
+	return s[i:]
 }

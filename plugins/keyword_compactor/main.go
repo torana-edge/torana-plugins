@@ -9,6 +9,7 @@ import (
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	"github.com/torana-edge/torana-plugin-sdk/pb"
+	"unicode/utf8"
 )
 
 func main() {}
@@ -277,15 +278,23 @@ func extractKeywords(intent string) []string {
 	return kw
 }
 
-// truncateHeadTail keeps the first and last N characters of content.
+// truncateHeadTail caps content at a total of n bytes, keeping the first and
+// last n/2.
+//
+// The threshold used to disagree with itself three ways: the doc comment said
+// "first and last N characters" (2n), the guard fired at n*2, and the body
+// kept n/2+n/2 (n). Content between n and 2n bytes therefore passed through
+// untouched, and anything larger was cut to half the size the caller asked
+// for. n is the total budget.
 func truncateHeadTail(content string, n int) string {
-	if len(content) <= n*2 {
+	if len(content) <= n {
 		return content
 	}
-	half := n / 2
-	head := content[:half]
-	tail := content[len(content)-half:]
-	return head + "\n\n... [" + itoa(len(content)-n) + " bytes truncated by Torana] ...\n\n" + tail
+	head := truncHead(content, n/2)
+	tail := truncTail(content, n/2)
+	// Counted from what was actually kept, so the notice stays exact when a
+	// rune boundary shortens either half.
+	return head + "\n\n... [" + itoa(len(content)-len(head)-len(tail)) + " bytes truncated by Torana] ...\n\n" + tail
 }
 
 func itoa(n int) string {
@@ -305,4 +314,38 @@ func itoa(n int) string {
 		digits = append([]byte{'-'}, digits...)
 	}
 	return string(digits)
+}
+
+// Torana truncates tool output by byte budget, but a byte index can land in
+// the middle of a UTF-8 rune. The resulting string is invalid UTF-8, and the
+// SDK marshals it into a proto3 string field — which enforces UTF-8 and
+// panics, trapping the plugin for the entire request. Any non-ASCII tool
+// output was enough to trigger it.
+//
+// These back the cut off to the nearest rune boundary, so the result is always
+// within budget and always valid UTF-8.
+
+// truncHead returns the longest prefix of s that is at most n bytes and does
+// not split a rune.
+func truncHead(s string, n int) string {
+	if n >= len(s) {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// truncTail returns the longest suffix of s that is at most n bytes and does
+// not split a rune.
+func truncTail(s string, n int) string {
+	if n >= len(s) {
+		return s
+	}
+	i := len(s) - n
+	for i < len(s) && !utf8.RuneStart(s[i]) {
+		i++
+	}
+	return s[i:]
 }
