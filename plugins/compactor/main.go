@@ -439,18 +439,25 @@ func truncateForPrompt(content string, maxChars int) string {
 	return truncHead(content, half) + "\n\n... [truncated] ...\n\n" + truncTail(content, half)
 }
 
-// Torana truncates tool output by byte budget, but a byte index can land in
-// the middle of a UTF-8 rune. The resulting string is invalid UTF-8, and the
-// SDK marshals it into a proto3 string field — which enforces UTF-8 and
-// panics, trapping the plugin for the entire request. Any non-ASCII tool
-// output was enough to trigger it.
+// Torana truncates by byte budget, but a byte index can land in the middle of a
+// UTF-8 rune. These back the cut off to the nearest boundary, so the result is
+// always within budget and always valid UTF-8.
 //
-// These back the cut off to the nearest rune boundary, so the result is always
-// within budget and always valid UTF-8.
+// Here the truncated text goes into a JSON payload for an offload completion,
+// not into a proto3 string, so a mid-rune cut does not trap — json.Marshal
+// substitutes U+FFFD. It silently corrupts the last character of the text a
+// model is about to summarise instead. (In keyword_compactor the same cut DOES
+// trap, because the result is assigned to Message.Content.)
 
 // truncHead returns the longest prefix of s that is at most n bytes and does
 // not split a rune.
 func truncHead(s string, n int) string {
+	// A negative budget would reach s[:n] and panic, and a panic inside a
+	// plugin traps the whole request. No caller passes one today; the helper
+	// is copied into three modules and states no precondition.
+	if n <= 0 {
+		return ""
+	}
 	if n >= len(s) {
 		return s
 	}
@@ -463,6 +470,9 @@ func truncHead(s string, n int) string {
 // truncTail returns the longest suffix of s that is at most n bytes and does
 // not split a rune.
 func truncTail(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	if n >= len(s) {
 		return s
 	}

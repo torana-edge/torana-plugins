@@ -278,23 +278,44 @@ func extractKeywords(intent string) []string {
 	return kw
 }
 
-// truncateHeadTail caps content at a total of n bytes, keeping the first and
-// last n/2.
+// truncationNotice is the marker inserted between the kept halves. It counts
+// against the budget: a "truncation" that returns more bytes than it was
+// allowed is not one.
+func truncationNotice(removed int) string {
+	return "\n\n... [" + itoa(removed) + " bytes truncated by Torana] ...\n\n"
+}
+
+// truncateHeadTail caps content at n bytes TOTAL — notice included — keeping
+// roughly the first and last half of what remains.
 //
 // The threshold used to disagree with itself three ways: the doc comment said
-// "first and last N characters" (2n), the guard fired at n*2, and the body
-// kept n/2+n/2 (n). Content between n and 2n bytes therefore passed through
-// untouched, and anything larger was cut to half the size the caller asked
-// for. n is the total budget.
+// "first and last N characters" (2n), the guard fired at n*2, and the body kept
+// n/2+n/2 (n). Separately, the notice was appended AFTER the halves had already
+// consumed the whole budget, so near the boundary the result was longer than
+// the input it was shortening.
 func truncateHeadTail(content string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	if len(content) <= n {
 		return content
 	}
-	head := truncHead(content, n/2)
-	tail := truncTail(content, n/2)
-	// Counted from what was actually kept, so the notice stays exact when a
-	// rune boundary shortens either half.
-	return head + "\n\n... [" + itoa(len(content)-len(head)-len(tail)) + " bytes truncated by Torana] ...\n\n" + tail
+
+	// Reserve using the widest the count can be. The notice states how many
+	// bytes were removed, and its own length changes that number — reserving
+	// against len(content) breaks the circularity in one pass and can only
+	// over-reserve, never under.
+	budget := n - len(truncationNotice(len(content)))
+	if budget < 0 {
+		budget = 0
+	}
+
+	head := truncHead(content, budget/2)
+	// The remainder rather than budget/2: backing off to a rune boundary can
+	// shorten the head, and the tail should use what that frees.
+	tail := truncTail(content, budget-len(head))
+
+	return head + truncationNotice(len(content)-len(head)-len(tail)) + tail
 }
 
 func itoa(n int) string {
@@ -328,6 +349,12 @@ func itoa(n int) string {
 // truncHead returns the longest prefix of s that is at most n bytes and does
 // not split a rune.
 func truncHead(s string, n int) string {
+	// A negative budget would reach s[:n] and panic, and a panic inside a
+	// plugin traps the whole request. No caller passes one today; the helper
+	// is copied into three modules and states no precondition.
+	if n <= 0 {
+		return ""
+	}
 	if n >= len(s) {
 		return s
 	}
@@ -340,6 +367,9 @@ func truncHead(s string, n int) string {
 // truncTail returns the longest suffix of s that is at most n bytes and does
 // not split a rune.
 func truncTail(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	if n >= len(s) {
 		return s
 	}

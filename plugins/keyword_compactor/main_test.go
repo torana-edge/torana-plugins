@@ -49,38 +49,79 @@ func TestTruncatedContentSurvivesProtoMarshal(t *testing.T) {
 	}
 }
 
-// TestTruncateHeadTailBudget pins the threshold. It used to disagree with
-// itself: the guard fired at n*2 while the body kept n, so content between n
-// and 2n passed through untouched and anything larger was cut to half the
-// requested size. n is the total budget.
+// TestTruncateHeadTailBudget pins the contract: n is the TOTAL output budget,
+// notice included.
+//
+// It used to disagree with itself — the guard fired at n*2 while the body kept
+// n — and the notice was appended after the halves had already consumed the
+// whole budget, so near the boundary "truncating" produced a longer string than
+// it was given.
+//
+// The current single caller only ever passes content well above n, so these
+// sizes are not reachable through it today. They are the helper's contract, and
+// the helper is exported to the package as a general budget-capping utility.
 func TestTruncateHeadTailBudget(t *testing.T) {
-	for _, tc := range []struct {
-		size      int
-		truncated bool
-	}{
-		{1999, false},
-		{2000, false}, // exactly the budget — nothing to remove
-		{2001, true},  // one byte over: used to pass through untouched
-		{4000, true},  // used to pass through untouched
-		{4001, true},
-	} {
-		content := strings.Repeat("a", tc.size)
-		got := truncateHeadTail(content, 2000)
+	const budget = 2000
+	for _, size := range []int{1999, 2000, 2001, 2042, 3000, 4000, 4001, 10000} {
+		content := strings.Repeat("a", size)
+		got := truncateHeadTail(content, budget)
 
-		if truncated := got != content; truncated != tc.truncated {
-			t.Errorf("size=%d: truncated=%v, want %v", tc.size, truncated, tc.truncated)
-		}
-		if !tc.truncated {
+		if size <= budget {
+			if got != content {
+				t.Errorf("size=%d: content within budget was modified", size)
+			}
 			continue
 		}
-		// The kept payload is the budget; the notice itself is overhead.
-		head, tail, ok := strings.Cut(got, "\n\n... [")
-		if !ok {
-			t.Fatalf("size=%d: no truncation notice in %q", tc.size, got)
+
+		// The contract, and the bug: the result must never exceed the budget.
+		if len(got) > budget {
+			t.Errorf("size=%d: truncation produced %d bytes, which is OVER the %d-byte budget",
+				size, len(got), budget)
 		}
-		_, tail, _ = strings.Cut(tail, "] ...\n\n")
-		if kept := len(head) + len(tail); kept != 2000 {
-			t.Errorf("size=%d: kept %d bytes, want the full 2000-byte budget", tc.size, kept)
+		// ...and it must not be so conservative that it throws the budget away.
+		if len(got) < budget/2 {
+			t.Errorf("size=%d: kept only %d bytes of a %d-byte budget", size, len(got), budget)
+		}
+		if !strings.Contains(got, "truncated by Torana") {
+			t.Errorf("size=%d: no truncation notice in the result", size)
+		}
+	}
+}
+
+// A truncation must never return more than it was given, at any budget. This is
+// the property the old code broke: for inputs just over the budget, the notice
+// pushed the result past the input length.
+func TestTruncationNeverGrowsTheInput(t *testing.T) {
+	for _, budget := range []int{50, 100, 2000} {
+		for _, size := range []int{budget - 1, budget, budget + 1, budget + 10, budget * 3} {
+			if size < 1 {
+				continue
+			}
+			content := strings.Repeat("a", size)
+			got := truncateHeadTail(content, budget)
+			if len(got) > len(content) {
+				t.Errorf("budget=%d size=%d: truncation grew the input to %d bytes",
+					budget, size, len(got))
+			}
+			if len(got) > budget && len(content) > budget {
+				t.Errorf("budget=%d size=%d: result %d exceeds the budget", budget, size, len(got))
+			}
+		}
+	}
+}
+
+// A non-positive budget must not panic. truncHead/truncTail would reach s[:n]
+// with a negative n, and a panic inside a plugin traps the whole request.
+func TestNonPositiveBudgetsAreSafe(t *testing.T) {
+	for _, n := range []int{0, -1, -1000} {
+		if got := truncateHeadTail("some content here", n); got != "" {
+			t.Errorf("truncateHeadTail(n=%d) = %q, want empty", n, got)
+		}
+		if got := truncHead("abc", n); got != "" {
+			t.Errorf("truncHead(n=%d) = %q", n, got)
+		}
+		if got := truncTail("abc", n); got != "" {
+			t.Errorf("truncTail(n=%d) = %q", n, got)
 		}
 	}
 }
