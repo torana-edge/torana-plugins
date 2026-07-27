@@ -49,13 +49,21 @@ func init() {
 
 		r := meta.Response
 		labels["status_class"] = statusClass(r.UpstreamStatus)
+
+		// status_class goes on every series, not just the counter. It used to
+		// be computed here and then dropped, because the duration and token
+		// metrics built fresh label maps holding only the model — so latency
+		// and token spend could not be split by outcome. "How slow are the
+		// 5xx?" and "how many tokens did failed requests burn?" are the first
+		// two questions anyone asks of these metrics, and neither was
+		// answerable.
 		sdk.EmitMetric("torana_plugin_responses_total", sdk.MetricCounter, 1, labels)
-		sdk.EmitMetric("torana_plugin_request_duration_ms", sdk.MetricHistogram, r.DurationMs, map[string]string{"model": resp.Model})
+		sdk.EmitMetric("torana_plugin_request_duration_ms", sdk.MetricHistogram, r.DurationMs, labels)
 		if r.Usage.InputTokens > 0 {
-			sdk.EmitMetric("torana_plugin_tokens", sdk.MetricCounter, float64(r.Usage.InputTokens), map[string]string{"model": resp.Model, "direction": "input"})
+			sdk.EmitMetric("torana_plugin_tokens", sdk.MetricCounter, float64(r.Usage.InputTokens), withLabel(labels, "direction", "input"))
 		}
 		if r.Usage.OutputTokens > 0 {
-			sdk.EmitMetric("torana_plugin_tokens", sdk.MetricCounter, float64(r.Usage.OutputTokens), map[string]string{"model": resp.Model, "direction": "output"})
+			sdk.EmitMetric("torana_plugin_tokens", sdk.MetricCounter, float64(r.Usage.OutputTokens), withLabel(labels, "direction", "output"))
 		}
 		return nil, nil
 	})
@@ -105,4 +113,16 @@ func statusClass(status int) string {
 	default:
 		return fmt.Sprintf("%d", status)
 	}
+}
+
+// withLabel returns a copy of base with one extra label. A copy, because the
+// base map is emitted with several series: mutating it would leak "direction"
+// onto every metric emitted after the first token count.
+func withLabel(base map[string]string, key, value string) map[string]string {
+	out := make(map[string]string, len(base)+1)
+	for k, v := range base {
+		out[k] = v
+	}
+	out[key] = value
+	return out
 }
