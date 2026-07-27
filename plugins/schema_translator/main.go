@@ -168,21 +168,32 @@ func translateSchema(toolName string, schema map[string]any, path string, isRoot
 	// root parameters to an array made every such tool uncallable on all three
 	// major providers.
 	if !isRoot && schemaType == "object" && !hasProps && !hasExplicitAP {
-		convertToKVArray(schema, "string")
+		convertToKVArray(schema, "string", nil)
 		mutations = append(mutations, path)
 		return mutations
 	}
 
-	// The open-map rescue below lived only inside the property loop, so an open
-	// map declared at the ROOT fell through and was silently closed. Converting
-	// the root to a KV array is not available to us either, so the only correct
-	// move is to leave the author's declaration exactly as written.
-	if isRoot && hasAdditionalProperties(schema) {
-		if !hasProps {
+	// An author-declared open map. Below the root it becomes a KV array, which
+	// preserves the intent in a shape a model can emit. At the root it cannot —
+	// the root type must stay "object" — so the declaration is left exactly as
+	// written.
+	//
+	// This check used to live only inside the property loop, so an open map at
+	// the root, or on an array's item schema, fell through to the blanket close
+	// below and was silently made stricter than its author wrote it.
+	if hasAdditionalProperties(schema) {
+		if isRoot {
+			if !hasProps {
+				return mutations
+			}
+			// Properties sit alongside the open map: translate them, but leave
+			// additionalProperties as declared.
+		} else {
+			valueSchema, _ := schema["additionalProperties"].(map[string]any)
+			convertToKVArray(schema, extractAdditionalPropertiesType(schema), valueSchema)
+			mutations = append(mutations, path)
 			return mutations
 		}
-		// Properties sit alongside the open map: translate them, but leave
-		// additionalProperties as declared.
 	} else {
 		schema["additionalProperties"] = false
 	}
@@ -201,23 +212,29 @@ func translateSchema(toolName string, schema map[string]any, path string, isRoot
 		_, propHasAP := propSchema["additionalProperties"]
 
 		if propType == "object" && !propHasProps && !propHasAP {
-			convertToKVArray(propSchema, "string")
+			convertToKVArray(propSchema, "string", nil)
 			mutations = append(mutations, currentPath)
 			continue
 		}
 		if hasAdditionalProperties(propSchema) {
-			valueType := extractAdditionalPropertiesType(propSchema)
-			convertToKVArray(propSchema, valueType)
+			valueSchema, _ := propSchema["additionalProperties"].(map[string]any)
+			convertToKVArray(propSchema, extractAdditionalPropertiesType(propSchema), valueSchema)
 			mutations = append(mutations, currentPath)
 			continue
 		}
-		propSchema["additionalProperties"] = false
+
+		// additionalProperties is meaningful only on an object. Setting it on a
+		// string or a number is noise that every tool schema then carries
+		// upstream.
 		switch propType {
 		case "object":
+			propSchema["additionalProperties"] = false
 			mutations = append(mutations, translateSchema(toolName, propSchema, currentPath, false)...)
 		case "array":
 			if items, ok := propSchema["items"].(map[string]any); ok {
 				if itemType, _ := items["type"].(string); itemType == "object" {
+					// isRoot=false: an item schema is not a tool's root, so an
+					// open map on it converts rather than being closed.
 					mutations = append(mutations, translateSchema(toolName, items, currentPath+"[]", false)...)
 				}
 			}
@@ -249,7 +266,14 @@ func extractAdditionalPropertiesType(schema map[string]any) string {
 	return "string"
 }
 
-func convertToKVArray(schema map[string]any, valueType string) {
+// convertToKVArray rewrites an open map into an array of {key, value} pairs, so
+// a model that cannot emit free-form object keys can still populate it.
+//
+// valueSchema is the author's declared schema for the map's values, when there
+// was one. It used to be discarded and replaced with a bare {"type": <name>},
+// so a map declared as {"type":"object","properties":{...}} told the model only
+// "value is an object" — with none of its shape.
+func convertToKVArray(schema map[string]any, valueType string, valueSchema map[string]any) {
 	desc := ""
 	if d, ok := schema["description"].(string); ok {
 		desc = d
@@ -257,13 +281,27 @@ func convertToKVArray(schema map[string]any, valueType string) {
 	for k := range schema {
 		delete(schema, k)
 	}
+
+	value := map[string]any{"type": valueType, "description": "the value"}
+	if valueSchema != nil {
+		// Preserve the declared shape, copied so later mutation of the result
+		// cannot reach back into the caller's map.
+		value = make(map[string]any, len(valueSchema)+1)
+		for k, v := range valueSchema {
+			value[k] = v
+		}
+		if _, described := value["description"]; !described {
+			value["description"] = "the value"
+		}
+	}
+
 	schema["type"] = "array"
 	schema["description"] = desc + " (as key-value pairs: [{\"key\": \"...\", \"value\": \"...\"}])"
 	schema["items"] = map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"key":   map[string]any{"type": "string", "description": "the key name"},
-			"value": map[string]any{"type": valueType, "description": "the value"},
+			"value": value,
 		},
 		"additionalProperties": false,
 		"required":             []any{"key", "value"},

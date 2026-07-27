@@ -114,3 +114,67 @@ func TestNoArgumentToolIsStillClosed(t *testing.T) {
 		t.Errorf("a no-argument tool should be closed for strict providers, got additionalProperties=%v", got["additionalProperties"])
 	}
 }
+
+// TestOpenMapInsideArrayItemsIsNotClosed — the rule is "never make a schema
+// stricter than its author wrote it", and it used to hold only at the root. An
+// open map on an array's ITEM schema fell through to the blanket close, so a
+// tool declaring rows of free-form objects had them silently forbidden.
+func TestOpenMapInsideArrayItemsIsNotClosed(t *testing.T) {
+	got := translate(t, `{"type":"object","properties":{"rows":{"type":"array","items":{"type":"object","additionalProperties":true}}}}`)
+
+	props, _ := got["properties"].(map[string]any)
+	rows, _ := props["rows"].(map[string]any)
+	items, ok := rows["items"].(map[string]any)
+	if !ok {
+		t.Fatalf("rows.items missing: %v", rows)
+	}
+	if items["additionalProperties"] == false {
+		t.Error("an author-declared open map on an array item schema was closed")
+	}
+	// It converts, like an open map anywhere else below the root.
+	if items["type"] != "array" {
+		t.Errorf("expected the open map to become a KV array, got type=%v", items["type"])
+	}
+}
+
+// TestNestedMapKeepsItsValueSchema — convertToKVArray wiped the map and rebuilt
+// it from the value's TYPE NAME alone, so a map whose values were declared
+// objects told the model only "value is an object", with none of its shape.
+func TestNestedMapKeepsItsValueSchema(t *testing.T) {
+	got := translate(t, `{"type":"object","properties":{"m":{"type":"object","additionalProperties":{"type":"object","properties":{"deep":{"type":"string"}}}}}}`)
+
+	props, _ := got["properties"].(map[string]any)
+	m, _ := props["m"].(map[string]any)
+	items, _ := m["items"].(map[string]any)
+	itemProps, _ := items["properties"].(map[string]any)
+	value, ok := itemProps["value"].(map[string]any)
+	if !ok {
+		t.Fatalf("KV value schema missing: %v", items)
+	}
+	valueProps, ok := value["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("the declared value schema was discarded: %v", value)
+	}
+	if _, hasDeep := valueProps["deep"]; !hasDeep {
+		t.Errorf("the value schema lost its declared properties: %v", valueProps)
+	}
+}
+
+// TestScalarPropertiesAreNotGivenAdditionalProperties — the key is meaningful
+// only on an object. Stamping it on strings and numbers was noise carried
+// upstream on every tool schema.
+func TestScalarPropertiesAreNotGivenAdditionalProperties(t *testing.T) {
+	got := translate(t, `{"type":"object","properties":{"path":{"type":"string"},"count":{"type":"number"},"flag":{"type":"boolean"}}}`)
+
+	props, _ := got["properties"].(map[string]any)
+	for name, raw := range props {
+		p, _ := raw.(map[string]any)
+		if _, present := p["additionalProperties"]; present {
+			t.Errorf("%s is a %v and was given additionalProperties", name, p["type"])
+		}
+	}
+	// The root itself is still closed — that is the plugin's job.
+	if got["additionalProperties"] != false {
+		t.Errorf("root should still be closed, got %v", got["additionalProperties"])
+	}
+}

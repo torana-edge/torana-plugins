@@ -172,10 +172,11 @@ func init() {
 				sdk.EmitMetric("torana_intent_captured_total", sdk.MetricCounter, 1, labels)
 				// Debug visibility for dogfooding: intent QUALITY (goal vs
 				// action description) is only judgeable by reading the values.
-				if len(intent) > 160 {
-					intent = intent[:160] + "…"
-				}
-				sdk.Log(fmt.Sprintf("intent[%s %s]: %s", toolName, toolID, intent), sdk.LogLevelDebug)
+				// truncateRunes, not intent[:160]: a byte slice cuts mid-rune
+				// on non-ASCII intents. This one only reaches sdk.Log, so it
+				// corrupts a debug line rather than trapping — but the helper
+				// is right here in this file.
+				sdk.Log(fmt.Sprintf("intent[%s %s]: %s", toolName, toolID, truncateRunes(intent, 160)), sdk.LogLevelDebug)
 			} else {
 				sdk.EmitMetric("torana_intent_absent_total", sdk.MetricCounter, 1, labels)
 				sdk.Log(fmt.Sprintf("intent[%s %s]: ABSENT", toolName, toolID), sdk.LogLevelDebug)
@@ -353,9 +354,16 @@ func injectIntentSchema(req *pb.ChatRequest) bool {
 			params["type"] = "object"
 		}
 		props, _ := params["properties"].(map[string]any)
-		// Whether the tool named its arguments at all, recorded before we
-		// create the map — it decides whether closing the schema is safe.
-		declaredProps := props != nil
+		// Whether the tool NAMED any arguments, recorded before we create the
+		// map. It decides whether closing the schema is safe.
+		//
+		// len > 0, not != nil: in JSON Schema {"type":"object"} and
+		// {"type":"object","properties":{}} are the same schema — both permit
+		// any property — so treating the second as "the author named their
+		// arguments" would close a tool that accepts anything, leaving one
+		// that accepts nothing but "i". That is the exact failure this guard
+		// exists to prevent, reached through the guard itself.
+		declaredProps := len(props) > 0
 		if props == nil {
 			props = make(map[string]any)
 			params["properties"] = props

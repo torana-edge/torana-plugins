@@ -41,7 +41,12 @@ func TestOpenSchemasAreNotClosed(t *testing.T) {
 		"author declared an open map":             `{"type":"object","additionalProperties":{"type":"string"}}`,
 		"author declared an open map, bool":       `{"type":"object","additionalProperties":true}`,
 		"no properties at all (accepts anything)": `{"type":"object"}`,
-		"open map alongside properties":           `{"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":true}`,
+		// Identical to the line above in JSON Schema terms: an empty
+		// properties map permits any property, exactly as an absent one does.
+		// This case used to be asserted as "should be closed", which enshrined
+		// the bug — a tool accepting anything became one accepting only "i".
+		"explicitly empty properties (same schema, spelled out)": `{"type":"object","properties":{}}`,
+		"open map alongside properties":                          `{"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":true}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := inject(t, params)
@@ -61,8 +66,9 @@ func TestOpenSchemasAreNotClosed(t *testing.T) {
 // as before. Narrowing the rule must not disable it.
 func TestNamedArgumentSchemasAreStillClosed(t *testing.T) {
 	for name, params := range map[string]string{
-		"named properties":            `{"type":"object","properties":{"path":{"type":"string"}}}`,
-		"explicitly empty properties": `{"type":"object","properties":{}}`,
+		"named properties":          `{"type":"object","properties":{"path":{"type":"string"}}}`,
+		"several named properties":  `{"type":"object","properties":{"path":{"type":"string"},"mode":{"type":"string"}}}`,
+		"named plus closed already": `{"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := inject(t, params)
@@ -94,18 +100,15 @@ func TestRootTypeIsPreserved(t *testing.T) {
 
 // TestIntentFieldIsRequiredExactlyOnce guards the required list against
 // duplicate entries across repeated injection.
+// TestIntentFieldIsRequiredExactlyOnce guards the dedup in the required list.
+//
+// Calling injectIntentSchema twice does NOT exercise it — the second call takes
+// the "already declared" branch and never reaches the append. The case that
+// matters is a tool that lists "i" as required without declaring it as a
+// property, which is what this now uses.
 func TestIntentFieldIsRequiredExactlyOnce(t *testing.T) {
-	req := &pb.ChatRequest{Tools: []*pb.ToolDef{{
-		Name:           "test_tool",
-		ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"}}}`),
-	}}}
-	injectIntentSchema(req)
-	injectIntentSchema(req)
+	got := inject(t, `{"type":"object","properties":{"path":{"type":"string"}},"required":["path","i"]}`)
 
-	var got map[string]any
-	if err := json.Unmarshal(req.Tools[0].ParametersJson, &got); err != nil {
-		t.Fatal(err)
-	}
 	required, _ := got["required"].([]any)
 	count := 0
 	for _, r := range required {
@@ -115,5 +118,41 @@ func TestIntentFieldIsRequiredExactlyOnce(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("intent field appears %d times in required, want 1: %v", count, required)
+	}
+	if !hasIntentField(t, got) {
+		t.Error("the property should still be added even though required already named it")
+	}
+}
+
+// TestStrictSchemasSurviveInjection settles the OpenAI strict-mode question.
+//
+// Under strict function calling the caller's own schema must already declare
+// additionalProperties:false. This plugin only ever SETS that key, never
+// unsets it, so a schema that was strict-compliant on the way in is still
+// strict-compliant on the way out — with "i" added to properties and required,
+// which is what strict mode demands of every declared property.
+//
+// The corollary matters too: leaving a bare {"type":"object"} open cannot break
+// strict mode, because such a schema was already non-compliant before Torana
+// saw it.
+func TestStrictSchemasSurviveInjection(t *testing.T) {
+	got := inject(t, `{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}`)
+
+	if got["additionalProperties"] != false {
+		t.Errorf("a strict-compliant schema lost additionalProperties:false: %v", got["additionalProperties"])
+	}
+	if !hasIntentField(t, got) {
+		t.Fatal("intent field not injected")
+	}
+	// Strict mode requires every property to be listed in required.
+	required, _ := got["required"].([]any)
+	var found bool
+	for _, r := range required {
+		if s, ok := r.(string); ok && s == intentField {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("under strict mode every property must be required; %q is not in %v", intentField, required)
 	}
 }
