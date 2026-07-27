@@ -34,6 +34,17 @@ func TestReadCredentialClassification(t *testing.T) {
 			map[string]any{"X-Api-Key": "sk-proj-openai-key"},
 			credentialNone, "",
 		},
+		// ...and it must not SUPPRESS the header that is an identity. This is
+		// the shape that matters in practice: a harness sends its provider key
+		// and Torana's user header on the same request.
+		"upstream provider key does not mask the user header": {
+			map[string]any{"X-Api-Key": "sk-proj-openai-key", "X-Torana-User": "alice"},
+			credentialTrustedUser, "alice",
+		},
+		"empty api key does not mask the user header": {
+			map[string]any{"X-Api-Key": "", "X-Torana-User": "alice"},
+			credentialTrustedUser, "alice",
+		},
 		"no headers":                   {map[string]any{}, credentialNone, ""},
 		"empty api key":                {map[string]any{"X-Api-Key": ""}, credentialNone, ""},
 		"empty trusted user":           {map[string]any{"X-Torana-User": ""}, credentialNone, ""},
@@ -67,6 +78,17 @@ func TestReadCredentialPrefersVerifiableHeaders(t *testing.T) {
 	})
 	if got.kind != credentialVirtualKey {
 		t.Errorf("a verifiable key should beat the trusted-user header, got %v", got.kind)
+	}
+
+	// A Bearer token is terminal even though this edition cannot verify it:
+	// falling through to an unverified header when a real credential was
+	// presented would be a downgrade.
+	got = readCredential(map[string]any{
+		"Authorization": "Bearer jwt",
+		"X-Torana-User": "alice",
+	})
+	if got.kind != credentialJWT {
+		t.Errorf("a Bearer token must not fall through to the trusted-user header, got %v", got.kind)
 	}
 }
 

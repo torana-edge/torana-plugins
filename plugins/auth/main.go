@@ -94,20 +94,27 @@ type identity struct {
 // (net/http MIME form) through the env.request_headers grant allowlist, so the
 // casing here is the casing the host produces.
 //
-// Order matters: Authorization wins over X-Api-Key, which wins over
-// X-Torana-User. The last is a trusted-header identity assertion with no
-// verification at all, so anything that can be checked is preferred to it.
+// Precedence, in order:
+//
+//  1. Authorization: Bearer — a real credential. Terminal: it cannot be
+//     verified in this edition, and falling through to an UNVERIFIED header
+//     when a verifiable credential was presented would be a downgrade.
+//  2. X-Api-Key beginning sk-torana- — a virtual key the host can verify.
+//  3. X-Torana-User — a trusted-header identity assertion with no verification
+//     at all, so it is last.
+//
+// An X-Api-Key that Torana did not issue is NOT a credential here and does not
+// stop the search. It is a secret for the upstream provider and says nothing
+// about who the caller is — so letting it suppress the one header that does
+// would mask the identity for exactly the requests that carry both. That is
+// what the original else-if chain did, and the reason it looked deliberate is
+// that nothing wrote down which of these are identities and which are secrets.
 func readCredential(headers map[string]any) credential {
 	if authHeader, ok := headers["Authorization"].(string); ok && strings.HasPrefix(authHeader, "Bearer ") {
 		return credential{kind: credentialJWT, token: strings.TrimPrefix(authHeader, "Bearer ")}
 	}
-	if apiKey, ok := headers["X-Api-Key"].(string); ok && apiKey != "" {
-		if strings.HasPrefix(apiKey, virtualKeyPrefix) {
-			return credential{kind: credentialVirtualKey, token: apiKey}
-		}
-		// An API key Torana did not issue: it belongs to the upstream provider
-		// and says nothing about who the caller is.
-		return credential{}
+	if apiKey, ok := headers["X-Api-Key"].(string); ok && strings.HasPrefix(apiKey, virtualKeyPrefix) {
+		return credential{kind: credentialVirtualKey, token: apiKey}
 	}
 	if toranaUser, ok := headers["X-Torana-User"].(string); ok && toranaUser != "" {
 		return credential{kind: credentialTrustedUser, token: toranaUser}

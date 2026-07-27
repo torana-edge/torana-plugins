@@ -246,15 +246,54 @@ func modelScan(content, toolName string) ([]finding, error) {
 	return out, nil
 }
 
-// extractJSON pulls the first {...} object out of a model reply that may be
-// wrapped in prose or code fences.
+// extractJSON pulls the first complete {...} object out of a model reply that
+// may be wrapped in prose or code fences.
+//
+// It used to span from the first "{" to the LAST "}" in the reply. A chatty
+// model that appended a sentence containing a brace — or a second object —
+// produced a string covering both, which does not parse. The caller treats an
+// unparseable verdict as a scan failure, so on a PII detector that is the worst
+// direction to be wrong in: the scan yields nothing on output the model may
+// well have flagged.
+//
+// Brace counting, skipping string literals so a "{" inside a value does not
+// shift the depth, and their escapes so a \" does not end the string early.
 func extractJSON(s string) string {
 	start := strings.IndexByte(s, '{')
-	end := strings.LastIndexByte(s, '}')
-	if start >= 0 && end > start {
-		return s[start : end+1]
+	if start < 0 {
+		return s
 	}
-	return s
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return s[start : i+1]
+			}
+		}
+	}
+	// Unbalanced: hand back what follows the first brace and let the caller's
+	// json.Unmarshal report it, rather than inventing a closing brace.
+	return s[start:]
 }
 
 func blockMessage(toolName, id string, findings []finding) string {
