@@ -353,6 +353,9 @@ func injectIntentSchema(req *pb.ChatRequest) bool {
 			params["type"] = "object"
 		}
 		props, _ := params["properties"].(map[string]any)
+		// Whether the tool named its arguments at all, recorded before we
+		// create the map — it decides whether closing the schema is safe.
+		declaredProps := props != nil
 		if props == nil {
 			props = make(map[string]any)
 			params["properties"] = props
@@ -389,7 +392,29 @@ func injectIntentSchema(req *pb.ChatRequest) bool {
 			if !found {
 				params["required"] = append(required, intentField)
 			}
-			params["additionalProperties"] = false
+
+			// Closing the schema is only this plugin's call when the tool
+			// already described its arguments by name and did not ask to stay
+			// open. Two cases where it is not:
+			//
+			//   - the author declared an open map, deliberately accepting
+			//     free-form keys. Closing it is strictly stricter than written.
+			//   - the tool declared no properties at all, so it accepted
+			//     anything. Closing it after adding "i" leaves a tool that
+			//     accepts nothing BUT "i" — which breaks the tool outright.
+			//
+			// Injecting the field stays fine in both cases; forbidding
+			// everything else does not.
+			openMap := false
+			switch ap := params["additionalProperties"].(type) {
+			case bool:
+				openMap = ap
+			case map[string]any:
+				openMap = true
+			}
+			if declaredProps && !openMap {
+				params["additionalProperties"] = false
+			}
 		}
 
 		newJSON, err := json.Marshal(params)

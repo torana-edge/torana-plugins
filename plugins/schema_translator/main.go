@@ -42,7 +42,7 @@ func init() {
 				continue
 			}
 
-			mutations := translateSchema(tool.Name, params, "")
+			mutations := translateSchema(tool.Name, params, "", true)
 			if len(mutations) > 0 {
 				registry[tool.Name] = mutations
 			}
@@ -146,20 +146,46 @@ func init() {
 // Schema translation
 // ==========================================================================
 
-func translateSchema(toolName string, schema map[string]any, path string) []string {
+// The rule this function follows, at every level:
+//
+//   - never change a tool's ROOT type. Tool parameters must be a JSON Schema
+//     object; OpenAI, Anthropic and Gemini all reject "type": "array" there.
+//   - never make a schema stricter than its author wrote it. Closing an
+//     unspecified object is this plugin's job; closing one the author
+//     deliberately left open is not.
+//
+// isRoot marks the tool's top-level parameters, where both rules bind hardest.
+func translateSchema(toolName string, schema map[string]any, path string, isRoot bool) []string {
 	var mutations []string
 
 	props, hasProps := schema["properties"].(map[string]any)
 	_, hasExplicitAP := schema["additionalProperties"]
 	schemaType, _ := schema["type"].(string)
 
-	if schemaType == "object" && !hasProps && !hasExplicitAP {
+	// A bare {"type": "object"} becomes a key-value array so models that cannot
+	// emit free-form maps can still populate it — but never at the root. A bare
+	// object is the commonest shape for a NO-ARGUMENT tool, and rewriting its
+	// root parameters to an array made every such tool uncallable on all three
+	// major providers.
+	if !isRoot && schemaType == "object" && !hasProps && !hasExplicitAP {
 		convertToKVArray(schema, "string")
 		mutations = append(mutations, path)
 		return mutations
 	}
 
-	schema["additionalProperties"] = false
+	// The open-map rescue below lived only inside the property loop, so an open
+	// map declared at the ROOT fell through and was silently closed. Converting
+	// the root to a KV array is not available to us either, so the only correct
+	// move is to leave the author's declaration exactly as written.
+	if isRoot && hasAdditionalProperties(schema) {
+		if !hasProps {
+			return mutations
+		}
+		// Properties sit alongside the open map: translate them, but leave
+		// additionalProperties as declared.
+	} else {
+		schema["additionalProperties"] = false
+	}
 	if !hasProps {
 		return mutations
 	}
@@ -188,11 +214,11 @@ func translateSchema(toolName string, schema map[string]any, path string) []stri
 		propSchema["additionalProperties"] = false
 		switch propType {
 		case "object":
-			mutations = append(mutations, translateSchema(toolName, propSchema, currentPath)...)
+			mutations = append(mutations, translateSchema(toolName, propSchema, currentPath, false)...)
 		case "array":
 			if items, ok := propSchema["items"].(map[string]any); ok {
 				if itemType, _ := items["type"].(string); itemType == "object" {
-					mutations = append(mutations, translateSchema(toolName, items, currentPath+"[]")...)
+					mutations = append(mutations, translateSchema(toolName, items, currentPath+"[]", false)...)
 				}
 			}
 		}
