@@ -51,7 +51,12 @@ echo "building torana-edge test fixtures"
 # -v so the marker and skip reasons reach the log; -count=1 to defeat caching,
 # which would otherwise let a stale pass stand in for a run that never happened.
 status=0
-(cd "$edge_dir" && go test ./internal/plugin ./internal/proxy ./internal/wasm \
+# internal/plugincmd is included for TestCatalogMatchesThePluginRepository: it
+# compares torana-edge's --official catalog against the plugins that actually
+# exist HERE, and skips unless both repos are checked out. This job is the only
+# place both are — so without it, the one guard against a shipped plugin being
+# absent from the catalog runs nowhere at all.
+(cd "$edge_dir" && go test ./internal/plugin ./internal/proxy ./internal/wasm ./internal/plugincmd \
   -count=1 -v -timeout 900s) >"$log" 2>&1 || status=$?
 
 # Show failures without dumping several thousand lines of -v output.
