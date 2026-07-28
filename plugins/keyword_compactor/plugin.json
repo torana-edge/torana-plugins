@@ -4,6 +4,7 @@
   "name": "keyword_compactor",
   "version": "0.6.0",
   "abi_version": "v1",
+  "minimum_torana_version": "0.1.0",
   "failure_mode": "pass",
   "repository": "https://github.com/torana-edge/torana-plugins",
   "description": "Deterministic keyword-based tool result compaction using the intent plugin's cache; alternative to compactor — run ONE of the two, after 'intent'",

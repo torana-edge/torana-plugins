@@ -10,15 +10,17 @@ import (
 )
 
 type manifest struct {
-	SchemaVersion    int      `json:"schema_version"`
-	ID               string   `json:"id"`
-	Name             string   `json:"name"`
-	Version          string   `json:"version"`
-	ABIVersion       string   `json:"abi_version"`
-	FailureMode      string   `json:"failure_mode"`
-	Repository       string   `json:"repository"`
-	RequiresUpstream []string `json:"requires_upstream"`
-	Hooks            []struct {
+	SchemaVersion        int      `json:"schema_version"`
+	ID                   string   `json:"id"`
+	Name                 string   `json:"name"`
+	Version              string   `json:"version"`
+	ABIVersion           string   `json:"abi_version"`
+	MinimumToranaVersion string   `json:"minimum_torana_version"`
+	MaximumToranaVersion string   `json:"maximum_torana_version"`
+	FailureMode          string   `json:"failure_mode"`
+	Repository           string   `json:"repository"`
+	RequiresUpstream     []string `json:"requires_upstream"`
+	Hooks                []struct {
 		Name string `json:"name"`
 	} `json:"hooks"`
 	Permissions []struct {
@@ -102,6 +104,12 @@ func main() {
 		readJSON(filepath.Join(dir, "plugin.json"), &m)
 		if m.SchemaVersion != 1 || m.ID != "torana/"+entry.Name() || m.Name != entry.Name() || !semver.MatchString(m.Version) || m.ABIVersion != "v1" {
 			panic(fmt.Sprintf("%s: incomplete v1 manifest", entry.Name()))
+		}
+		if m.MinimumToranaVersion == "" || !semver.MatchString(m.MinimumToranaVersion) {
+			panic(fmt.Sprintf("%s: invalid or missing minimum_torana_version %q", entry.Name(), m.MinimumToranaVersion))
+		}
+		if m.MaximumToranaVersion != "" && !semver.MatchString(m.MaximumToranaVersion) {
+			panic(fmt.Sprintf("%s: invalid maximum_torana_version %q", entry.Name(), m.MaximumToranaVersion))
 		}
 		if m.Repository != "https://github.com/torana-edge/torana-plugins" {
 			panic(fmt.Sprintf("%s: invalid repository %q", entry.Name(), m.Repository))

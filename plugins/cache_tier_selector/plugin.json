@@ -4,6 +4,7 @@
   "name": "cache_tier_selector",
   "version": "0.1.0",
   "abi_version": "v1",
+  "minimum_torana_version": "0.1.0",
   "failure_mode": "pass",
   "repository": "https://github.com/torana-edge/torana-plugins",
   "description": "Buys the cheapest prompt-cache lifetime for a conversation based on how long it actually goes idle. Keeps each decision fixed until the provider cache tier expires, because changing a live breakpoint marker would invalidate the entry it is protecting.",
