@@ -280,3 +280,59 @@ func TestHostRejectionIsNotOverriddenByTheTrustedHeader(t *testing.T) {
 		t.Errorf("an unreachable verifier should report resolveNoIdentity, got %v", outcome)
 	}
 }
+
+// The precedence LOOP, not resolveIdentity in isolation. Both bugs found in
+// this file lived in the ordering — an unverifiable JWT masking a header the
+// caller supplied, and a host rejection being overridden by that same header —
+// and neither was reachable from a test that called resolveIdentity alone.
+func TestIdentityFromHeadersPrecedence(t *testing.T) {
+	ok := func(id VerifyResponse) func(string) (VerifyResponse, bool) {
+		return func(string) (VerifyResponse, bool) { return id, true }
+	}
+	rejected := ok(VerifyResponse{Status: "error", Message: "revoked"})
+	unreachable := func(string) (VerifyResponse, bool) { return VerifyResponse{}, false }
+	verified := ok(VerifyResponse{Status: "ok", TenantID: "acme", UserID: "carol"})
+
+	for name, tc := range map[string]struct {
+		headers    map[string]any
+		verify     func(string) (VerifyResponse, bool)
+		wantOK     bool
+		wantUserID string
+	}{
+		// The round-4 defect: a key the host REFUSED must not fall through.
+		"revoked key does not fall through to the user header": {
+			map[string]any{"X-Api-Key": "sk-torana-revoked", "X-Torana-User": "alice"},
+			rejected, false, "",
+		},
+		// But a verifier that could not be reached taught us nothing, so the
+		// next candidate may still speak.
+		"unreachable verifier falls through": {
+			map[string]any{"X-Api-Key": "sk-torana-x", "X-Torana-User": "alice"},
+			unreachable, true, "alice",
+		},
+		// The round-3 defect: an unverifiable JWT must not mask the header.
+		"jwt does not mask the user header": {
+			map[string]any{"Authorization": "Bearer head.payload.sig", "X-Torana-User": "alice"},
+			unreachable, true, "alice",
+		},
+		"provider key does not mask the user header": {
+			map[string]any{"Authorization": "Bearer sk-proj-openai", "X-Torana-User": "alice"},
+			unreachable, true, "alice",
+		},
+		"a verified key wins over the header": {
+			map[string]any{"X-Api-Key": "sk-torana-good", "X-Torana-User": "alice"},
+			verified, true, "carol",
+		},
+		"nothing at all": {map[string]any{}, unreachable, false, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			id, got := identityFromHeaders(tc.headers, tc.verify)
+			if got != tc.wantOK {
+				t.Fatalf("resolved=%v, want %v (identity %+v)", got, tc.wantOK, id)
+			}
+			if got && id.userID != tc.wantUserID {
+				t.Errorf("userID = %q, want %q", id.userID, tc.wantUserID)
+			}
+		})
+	}
+}

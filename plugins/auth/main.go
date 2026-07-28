@@ -36,21 +36,8 @@ func init() {
 			return nil, nil
 		}
 
-		// First candidate that resolves wins. A JWT does not resolve in this
-		// edition — real verification lives in torana-edge/private-nucleus — so
-		// trying the next candidate is what stops an unverifiable bearer token
-		// from masking an identity the caller did supply.
-		var identity identity
-		var outcome resolveOutcome
-		for _, cred := range readCredential(headers) {
-			// resolveRejected stops the loop as firmly as success does: the
-			// host refused this credential, and a lower-precedence candidate
-			// must not turn that refusal into an acceptance.
-			if identity, outcome = resolveIdentity(cred, verifyVirtualKey); outcome != resolveNoIdentity {
-				break
-			}
-		}
-		if outcome != resolveOK {
+		identity, ok := identityFromHeaders(headers, verifyVirtualKey)
+		if !ok {
 			return nil, nil
 		}
 		applyIdentity(meta, identity)
@@ -227,6 +214,30 @@ func resolveIdentity(cred credential, verify func(token string) (VerifyResponse,
 	default:
 		return identity{}, resolveNoIdentity
 	}
+}
+
+// identityFromHeaders runs the precedence loop: the first candidate that
+// settles the question wins.
+//
+// Separated from the hook because this loop IS the precedence rule, and a loop
+// inside a closure cannot be tested. Both bugs found here lived in the ordering
+// rather than in resolveIdentity — an unverifiable JWT masking a header the
+// caller did supply, and a host REJECTION being overridden by that same header
+// — and neither was reachable from a test that called resolveIdentity alone.
+//
+// resolveRejected ends the loop as firmly as success does: the host refused
+// this credential, and a lower-precedence candidate must not turn a refusal
+// into an acceptance. resolveNoIdentity means nothing was learned, so the next
+// candidate may still speak.
+func identityFromHeaders(headers map[string]any, verify func(string) (VerifyResponse, bool)) (identity, bool) {
+	var id identity
+	outcome := resolveNoIdentity
+	for _, cred := range readCredential(headers) {
+		if id, outcome = resolveIdentity(cred, verify); outcome != resolveNoIdentity {
+			break
+		}
+	}
+	return id, outcome == resolveOK
 }
 
 // applyIdentity writes the resolved identity into ToranaMeta, omitting fields
