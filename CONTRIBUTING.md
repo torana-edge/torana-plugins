@@ -72,17 +72,31 @@ rejected at save time.
 
 ## Testing
 
-Plugin behaviour is tested from torana-edge, where the WASM runtime lives:
+Plugin behaviour is tested from torana-edge, where the WASM runtime lives — but
+against bundles built **here**, by this repository's CI:
 
 ```bash
-cd ../torana-edge
-make plugins && make test
+# build every bundle, then run torana-edge's plugin-behaviour suite against them
+for d in plugins/*/; do ./scripts/build.sh "$(basename "$d")"; done
+./scripts/verify-behaviour.sh ../torana-edge dist
 ```
 
-For a plugin that will ship here, mirror it into `torana-edge/plugins/` so the
-determinism and ABI tests can load a real binary. That duplication is deliberate:
-the tests need real WASM, and the distribution repo should not depend on the
-proxy.
+Expect `62 gated tests ran, 0 skipped`. A *skip* fails that script deliberately:
+this is the only place plugin behaviour runs, so a silently-skipped suite is
+indistinguishable from one that passes.
+
+**Do not copy your plugin into `torana-edge/plugins/`.** That directory no
+longer exists. It used to hold a hand-synced mirror of this repository, and
+keeping two trees in step by hand failed exactly once, silently, in the plugin
+where it mattered most: the copy there shipped a `pii` cache key bound to
+nothing but a `tool_call_id`, so a tool result was skipped **without being
+scanned** whenever that id had been cleared before. torana-edge#206.
+
+torana-edge now tests the *host* with purpose-built fixtures in
+`examples/plugins/` — is a hook dispatched, is a missing grant refused — and
+keeps no copy of these plugins at all. Assertions about what a plugin *does*
+live behind `TORANA_PLUGIN_BUNDLES_DIR` and run from here, against bundles
+built from the source that owns them.
 
 A test that passes whether or not the code works is worse than no test. Two
 examples from this repo's own history: a stickiness test that ran in a mode
