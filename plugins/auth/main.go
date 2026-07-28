@@ -41,13 +41,16 @@ func init() {
 		// trying the next candidate is what stops an unverifiable bearer token
 		// from masking an identity the caller did supply.
 		var identity identity
-		var resolved bool
+		var outcome resolveOutcome
 		for _, cred := range readCredential(headers) {
-			if identity, resolved = resolveIdentity(cred, verifyVirtualKey); resolved {
+			// resolveRejected stops the loop as firmly as success does: the
+			// host refused this credential, and a lower-precedence candidate
+			// must not turn that refusal into an acceptance.
+			if identity, outcome = resolveIdentity(cred, verifyVirtualKey); outcome != resolveNoIdentity {
 				break
 			}
 		}
-		if !resolved {
+		if outcome != resolveOK {
 			return nil, nil
 		}
 		applyIdentity(meta, identity)
@@ -177,7 +180,26 @@ func readCredential(headers map[string]any) []credential {
 // resolveIdentity turns a credential into an identity, returning false when it
 // cannot be established. verify is injected so the host call can be substituted
 // in tests.
-func resolveIdentity(cred credential, verify func(token string) (VerifyResponse, bool)) (identity, bool) {
+// resolveOutcome says what happened to a credential, because "could not
+// resolve" and "the host said no" are different answers and only one of them
+// should end the search.
+type resolveOutcome int
+
+const (
+	// resolveNoIdentity: nothing could be established. Try the next candidate.
+	resolveNoIdentity resolveOutcome = iota
+	// resolveOK: an identity was established.
+	resolveOK
+	// resolveRejected: the host actively refused this credential — revoked,
+	// expired, unknown. That is a statement ABOUT THE REQUEST, not an absence
+	// of information, so no lower-precedence candidate may override it.
+	resolveRejected
+)
+
+// resolveIdentity turns a credential into an identity.
+//
+// verify is injected so the host call can be substituted in tests.
+func resolveIdentity(cred credential, verify func(token string) (VerifyResponse, bool)) (identity, resolveOutcome) {
 	switch cred.kind {
 	case credentialTrustedUser:
 		// The caller's own tenant when it sent one; the default otherwise, so
@@ -186,17 +208,24 @@ func resolveIdentity(cred credential, verify func(token string) (VerifyResponse,
 		if tenant == "" {
 			tenant = "default-tenant"
 		}
-		return identity{tenantID: tenant, teamID: cred.team, userID: cred.token}, true
+		return identity{tenantID: tenant, teamID: cred.team, userID: cred.token}, resolveOK
 	case credentialVirtualKey:
 		res, ok := verify(cred.token)
-		if !ok || res.Status != "ok" {
-			// An unverifiable key must not yield an identity. Falling through
-			// with a partial one would attach an empty tenant to the request.
-			return identity{}, false
+		if !ok {
+			// The host call itself failed — unreachable, malformed reply. We
+			// learned nothing about this key, so a later candidate may still
+			// speak.
+			return identity{}, resolveNoIdentity
 		}
-		return identity{tenantID: res.TenantID, teamID: res.TeamID, userID: res.UserID}, true
+		if res.Status != "ok" {
+			// The host answered, and the answer was no. Presenting a revoked
+			// key alongside a trusted-user header must not quietly succeed on
+			// the header.
+			return identity{}, resolveRejected
+		}
+		return identity{tenantID: res.TenantID, teamID: res.TeamID, userID: res.UserID}, resolveOK
 	default:
-		return identity{}, false
+		return identity{}, resolveNoIdentity
 	}
 }
 

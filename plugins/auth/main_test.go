@@ -100,7 +100,7 @@ func TestJWTDoesNotMaskAnIdentityItCannotVerify(t *testing.T) {
 	}
 
 	// And the JWT itself still does not resolve here.
-	if _, ok := resolveIdentity(candidates[0], nil); ok {
+	if _, outcome := resolveIdentity(candidates[0], nil); outcome == resolveOK {
 		t.Error("a JWT must not resolve without verification")
 	}
 }
@@ -127,9 +127,10 @@ func TestReadCredentialPrefersVerifiableHeaders(t *testing.T) {
 		t.Errorf("a verifiable key should beat the trusted-user header, got %v", got.kind)
 	}
 
-	// A JWT is terminal even though this edition cannot verify it: falling
-	// through to an UNVERIFIED header when a real identity claim was presented
-	// would be a downgrade.
+	// A JWT is TRIED first, but it is not terminal — see
+	// TestJWTDoesNotMaskAnIdentityItCannotVerify. This asserts the ordering
+	// only: the identity claim gets first refusal, and the trusted header is
+	// the fallback when it does not resolve.
 	got = first(map[string]any{
 		"Authorization": "Bearer head.payload.sig",
 		"X-Torana-User": "alice",
@@ -160,8 +161,8 @@ func TestUnverifiableKeyYieldsNoIdentity(t *testing.T) {
 		"rejected with msg": func(string) (VerifyResponse, bool) { return VerifyResponse{Status: "error", Message: "revoked"}, true },
 	} {
 		t.Run(name, func(t *testing.T) {
-			id, ok := resolveIdentity(credential{kind: credentialVirtualKey, token: "sk-torana-x"}, verify)
-			if ok {
+			id, outcome := resolveIdentity(credential{kind: credentialVirtualKey, token: "sk-torana-x"}, verify)
+			if outcome == resolveOK {
 				t.Errorf("an unverifiable key produced an identity: %+v", id)
 			}
 		})
@@ -169,12 +170,12 @@ func TestUnverifiableKeyYieldsNoIdentity(t *testing.T) {
 }
 
 func TestVerifiedKeyYieldsTheHostsIdentity(t *testing.T) {
-	id, ok := resolveIdentity(
+	id, outcome := resolveIdentity(
 		credential{kind: credentialVirtualKey, token: "sk-torana-x"},
 		func(string) (VerifyResponse, bool) {
 			return VerifyResponse{Status: "ok", TenantID: "acme", TeamID: "platform", UserID: "alice"}, true
 		})
-	if !ok {
+	if outcome != resolveOK {
 		t.Fatal("a verified key should yield an identity")
 	}
 	if id.tenantID != "acme" || id.teamID != "platform" || id.userID != "alice" {
@@ -185,12 +186,12 @@ func TestVerifiedKeyYieldsTheHostsIdentity(t *testing.T) {
 // The verifier must be the source of identity — resolveIdentity must not
 // substitute anything of its own for a field the host left empty.
 func TestVerifiedKeyDoesNotInventMissingFields(t *testing.T) {
-	id, ok := resolveIdentity(
+	id, outcome := resolveIdentity(
 		credential{kind: credentialVirtualKey, token: "sk-torana-x"},
 		func(string) (VerifyResponse, bool) {
 			return VerifyResponse{Status: "ok", TenantID: "acme"}, true
 		})
-	if !ok {
+	if outcome != resolveOK {
 		t.Fatal("expected an identity")
 	}
 	if id.teamID != "" || id.userID != "" {
@@ -220,7 +221,7 @@ func TestApplyIdentityOmitsEmptyFields(t *testing.T) {
 func TestJWTIsNotResolvedInTheOpenSourceEdition(t *testing.T) {
 	// Real verification lives in private-nucleus. Resolving one here would mean
 	// trusting an unverified token.
-	if _, ok := resolveIdentity(credential{kind: credentialJWT, token: "jwt"}, nil); ok {
+	if _, outcome := resolveIdentity(credential{kind: credentialJWT, token: "jwt"}, nil); outcome == resolveOK {
 		t.Error("a JWT must not resolve to an identity without verification")
 	}
 }
@@ -234,8 +235,8 @@ func TestTrustedUserCarriesItsScope(t *testing.T) {
 		"X-Torana-Team":   "platform",
 		"X-Torana-Tenant": "acme",
 	})
-	id, ok := resolveIdentity(cred, nil)
-	if !ok {
+	id, outcome := resolveIdentity(cred, nil)
+	if outcome != resolveOK {
 		t.Fatal("a trusted-user assertion should resolve")
 	}
 	if id.userID != "alice" || id.teamID != "platform" || id.tenantID != "acme" {
@@ -247,11 +248,35 @@ func TestTrustedUserCarriesItsScope(t *testing.T) {
 // keeps working.
 func TestTrustedUserWithoutScopeUsesTheDefaultTenant(t *testing.T) {
 	cred := first(map[string]any{"X-Torana-User": "alice"})
-	id, ok := resolveIdentity(cred, nil)
-	if !ok || id.tenantID != "default-tenant" || id.userID != "alice" {
-		t.Errorf("got %+v ok=%v", id, ok)
+	id, outcome := resolveIdentity(cred, nil)
+	if outcome != resolveOK || id.tenantID != "default-tenant" || id.userID != "alice" {
+		t.Errorf("got %+v outcome=%v", id, outcome)
 	}
 	if id.teamID != "" {
 		t.Errorf("invented a team: %q", id.teamID)
+	}
+}
+
+// TestHostRejectionIsNotOverriddenByTheTrustedHeader — "the host refused this
+// credential" and "we learned nothing" are different answers, and only the
+// second should let a lower-precedence candidate speak.
+//
+// Presenting a revoked virtual key alongside X-Torana-User must not quietly
+// succeed on the header. It is not an escalation — the header works on its own
+// without any key — but an explicit rejection silently becoming an acceptance
+// is the wrong default in a file people copy.
+func TestHostRejectionIsNotOverriddenByTheTrustedHeader(t *testing.T) {
+	rejected := func(string) (VerifyResponse, bool) {
+		return VerifyResponse{Status: "error", Message: "revoked"}, true
+	}
+	if _, outcome := resolveIdentity(credential{kind: credentialVirtualKey, token: "sk-torana-revoked"}, rejected); outcome != resolveRejected {
+		t.Errorf("an explicitly refused key should report resolveRejected, got %v", outcome)
+	}
+
+	// A host call that FAILED is different: nothing was learned about the key,
+	// so a later candidate may still resolve.
+	unreachable := func(string) (VerifyResponse, bool) { return VerifyResponse{}, false }
+	if _, outcome := resolveIdentity(credential{kind: credentialVirtualKey, token: "sk-torana-x"}, unreachable); outcome != resolveNoIdentity {
+		t.Errorf("an unreachable verifier should report resolveNoIdentity, got %v", outcome)
 	}
 }
