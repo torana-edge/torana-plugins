@@ -26,9 +26,15 @@ import (
 func main() {}
 
 const (
-	intentCacheKey        = "intent"
-	compactionCache       = "compacted"
-	policyCompactionCache = "policy_compacted"
+	intentCacheKey  = "intent"
+	compactionCache = "compacted"
+	// Namespaced by plugin. env.cache_get/set is a SHARED store — unlike
+	// env.state_*, which the host keys by module name — so two plugins using the
+	// same namespace string read and write each other's entries. compactor and
+	// keyword_compactor both used "policy_compacted" with the same key format,
+	// which is harmless only for as long as their deterministic-policy logic
+	// stays byte-identical.
+	policyCompactionCache = "compactor/policy_compacted"
 	minOffloadChars       = 2000
 )
 

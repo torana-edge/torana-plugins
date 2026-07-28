@@ -256,6 +256,24 @@ func cachePrefixKey(req *pb.ChatRequest) string {
 		h.add(m.Role)
 		h.add(m.Content)
 		h.add(string(m.ContentPartsJson))
+		// Extended-thinking blocks are part of what goes upstream and therefore
+		// part of the prefix the provider hashes. Omitting them let two
+		// conversations with identical text but different reasoning produce the
+		// same Torana fingerprint — so a tier decision was reused for a prefix
+		// the provider will treat as new, and the expensive long-tier write it
+		// implies is made against something that cannot hit. That is precisely
+		// the economics this plugin exists to protect.
+		h.add(m.Thinking)
+		h.add(m.ThinkingSignature)
+		h.add(m.RedactedThinking)
+		// cache_control is what DEFINES the breakpoint. The same content marked
+		// differently is a different cached prefix upstream.
+		h.add(string(m.CacheControlJson))
+		// Tool results: the id and name mirror the originating assistant call,
+		// which is hashed below, so these are usually redundant — but only when
+		// that call is inside the prefix, and cheap enough not to reason about.
+		h.add(m.ToolCallId)
+		h.add(m.ToolName)
 		for _, tc := range m.ToolCalls {
 			h.add(tc.Id)
 			h.add(tc.Name)
