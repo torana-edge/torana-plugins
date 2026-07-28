@@ -2,6 +2,25 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+
+# No native build output in the tree.
+#
+# `go build ./...` inside a plugin module writes an executable named after the
+# directory, and `git add -A` picks it up: ~7MB of ELF per plugin. That happened
+# three times on three branches, because .gitignore only protects the branches
+# carrying it — a branch cut from an older main does not — and gitignore does
+# not untrack an already-tracked file, so once it lands it is permanent and
+# churns on every contributor's build.
+#
+# Checked here because this runs on every branch regardless of its .gitignore.
+stray=$(git -C "$root" ls-files 'plugins/*' | awk -F/ 'NF==3 && $NF !~ /\./' || true)
+if [ -n "$stray" ]; then
+  echo "tracked files with no extension under plugins/ — native build output?" >&2
+  echo "$stray" | sed 's/^/  /' >&2
+  echo "The only artifact this repo ships is dist/<plugin>/plugin.wasm;" >&2
+  echo "remove with: git rm --cached <path>" >&2
+  exit 1
+fi
 cache=$(mktemp -d)
 workspace_dir=$(mktemp -d)
 trap 'rm -rf "$cache" "$workspace_dir"' EXIT
