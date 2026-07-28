@@ -1,2 +1,13 @@
 /dist/
 *.wasm
+
+# `go build ./...` inside a plugin module drops a native binary named after the
+# directory (plugins/otel/otel, plugins/auth/auth — ~7MB each). The only build
+# output this repo ships is dist/<plugin>/plugin.wasm. Every source file tracked
+# under plugins/ has an extension, so ignore anything that does not.
+plugins/*/*
+!plugins/*/*/
+!plugins/*/*.*
+# Re-stated AFTER the negation above: last match wins, and `!plugins/*/*.*`
+# would otherwise un-ignore built bundles that the top-level *.wasm covers.
+plugins/*/*.wasm

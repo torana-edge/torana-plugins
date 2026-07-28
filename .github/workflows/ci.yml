@@ -5,6 +5,7 @@ on:
   push:
     branches: [main]
 
+
 jobs:
   test-and-build:
     runs-on: ubuntu-latest
@@ -12,12 +13,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: torana-plugins
+      # The SDK release these plugins are built and released against, read from
+      # the checked-in SDK_REF file. Declaring it as workflow env meant TWO
+      # copies — one per workflow — which is the drift this was meant to end.
+      - id: sdk_ref
+        run: echo "ref=$(cat torana-plugins/SDK_REF)" >> "$GITHUB_OUTPUT"
       # The SDK is pinned to a release tag: plugins are built against a version
       # a user can actually install, and it moves deliberately at release time.
       - uses: actions/checkout@v4
         with:
           repository: torana-edge/torana-plugin-sdk
-          ref: v0.1.3
+          ref: ${{ steps.sdk_ref.outputs.ref }}
           path: torana-plugin-sdk
       # The proxy tracks main rather than a commit, because the question this
       # job exists to answer is "do these plugins work with the current host".
@@ -34,7 +40,11 @@ jobs:
           path: torana-edge
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24.x'
+          # 1.26.x, not 1.25.x: this job runs `go test` inside a torana-edge
+          # checkout whose go.mod requires 1.26.4. It passes today only because
+          # GOTOOLCHAIN=auto downloads that on demand — name the version the
+          # job actually needs instead of relying on the fallback.
+          go-version: '1.26.x'
       - working-directory: torana-plugins
         run: ./scripts/test.sh
       # Every plugin in the tree, not a hand-maintained list. The list said seven
@@ -46,7 +56,11 @@ jobs:
           for dir in plugins/*/; do
             ./scripts/build.sh "$(basename "$dir")"
           done
-      - working-directory: torana-edge
-        run: go test ./internal/plugin -run TestExternalBundlesConformToCurrentHost -count=1
-        env:
-          TORANA_PLUGIN_BUNDLES_DIR: ${{ github.workspace }}/torana-plugins/dist
+      # torana-edge tests the host with fixtures and keeps no copy of these
+      # plugins, so its own suite skips every assertion about plugin behaviour.
+      # This job is the only place they run. The script fails if they skip
+      # rather than run — otherwise a broken gate is indistinguishable from a
+      # green build, and pii would stop being tested without anyone noticing.
+      - name: Official-plugin behaviour suite
+        working-directory: torana-plugins
+        run: ./scripts/verify-behaviour.sh ../torana-edge dist
