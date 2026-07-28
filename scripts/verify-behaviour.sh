@@ -66,7 +66,7 @@ if [ "$status" -ne 0 ]; then
   # non-zero and would terminate the script here — before the three guards
   # below print their counters, turning a red build into one with no
   # diagnostics at all.
-  grep -E '^(---|\s+---) (FAIL|ERROR)|^(FAIL|ok|panic)' "$log" | head -80 || true
+  grep -E '^(---|\s+---) (FAIL|ERROR)|^[[:space:]]+[^[:space:]]+_test\.go:[0-9]+:|^(FAIL|ok|panic)' "$log" | head -80 || true
 fi
 
 # The marker is the one string this repository and torana-edge agree on by

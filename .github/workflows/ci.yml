@@ -38,6 +38,19 @@ jobs:
           repository: torana-edge/torana-edge
           ref: main
           path: torana-edge
+      # Coordinated host/plugin changes use the same branch name in both
+      # repositories. A plugin PR tests that Edge branch when it exists;
+      # unrelated PRs and every push to main keep testing Edge main. This avoids
+      # a permanent feature-branch pin while still allowing an unmerged
+      # cross-repository contract change to prove itself end to end.
+      - name: Use coordinated Edge branch when present
+        if: github.event_name == 'pull_request'
+        working-directory: torana-edge
+        run: |
+          if git ls-remote --exit-code origin "refs/heads/${GITHUB_HEAD_REF}" >/dev/null; then
+            git fetch --depth 1 origin "refs/heads/${GITHUB_HEAD_REF}"
+            git checkout --detach FETCH_HEAD
+          fi
       - uses: actions/setup-go@v5
         with:
           # 1.26.x, not 1.25.x: this job runs `go test` inside a torana-edge
