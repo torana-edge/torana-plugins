@@ -15,12 +15,18 @@ import (
 func main() {}
 
 const (
-	minContentLength       = 2000     // below this, content is already small enough
-	contextLines           = 2        // lines of context around keyword matches
-	maxKeepLines           = 200      // cap to prevent bloat
-	maxResultBytes         = 8000     // cap result size
-	intentCacheKey         = "intent" // cache key for intent (set by the intent plugin)
-	policyCompactionCache  = "policy_compacted"
+	minContentLength = 2000     // below this, content is already small enough
+	contextLines     = 2        // lines of context around keyword matches
+	maxKeepLines     = 200      // cap to prevent bloat
+	maxResultBytes   = 8000     // cap result size
+	intentCacheKey   = "intent" // cache key for intent (set by the intent plugin)
+	// Namespaced by plugin. env.cache_get/set is a SHARED store — unlike
+	// env.state_*, which the host keys by module name — so two plugins using the
+	// same namespace string read and write each other's entries. compactor and
+	// keyword_compactor both used "policy_compacted" with the same key format,
+	// which is harmless only for as long as their deterministic-policy logic
+	// stays byte-identical.
+	policyCompactionCache  = "keyword_compactor/policy_compacted"
 	keywordCompactionCache = "keyword_compacted"
 )
 
