@@ -38,6 +38,16 @@ export TORANA_PLUGIN_BUNDLES_DIR="$bundles"
 log=$(mktemp)
 trap 'rm -f "$log"' EXIT
 
+# torana-edge's OWN fixtures are build artifacts and are deliberately not
+# committed, so they have to be built before its suite will run. Without this
+# the fixture-backed tests skip — around 37 of them — and the skip guard below
+# fails the build for skips this script caused itself.
+echo "building torana-edge test fixtures"
+(cd "$edge_dir" && make testdata) >/dev/null 2>&1 || {
+  echo "failed to build torana-edge test fixtures" >&2
+  exit 1
+}
+
 # -v so the marker and skip reasons reach the log; -count=1 to defeat caching,
 # which would otherwise let a stale pass stand in for a run that never happened.
 status=0
@@ -91,8 +101,14 @@ fi
 # 3. The gated tests still exist. Guards 1 and 2 are both vacuously satisfied by
 #    a suite that has none left.
 if [ "$ran" -eq 0 ]; then
-  echo "FAIL: no gated test ran. Either they were deleted, or the marker in" >&2
-  echo "      torana-edge's officialBundlesDir helper changed." >&2
+  if ! grep -rqs 'officialBundlesDir' "$edge_dir/internal"; then
+    echo "FAIL: this torana-edge checkout has no bundle-gated tests at all." >&2
+    echo "      They arrive with torana-edge#217, which must merge before this job" >&2
+    echo "      can verify anything. Until then there is nothing here to run." >&2
+  else
+    echo "FAIL: no gated test ran, though the gating helper exists. Either the" >&2
+    echo "      tests were deleted, or the marker string changed." >&2
+  fi
   status=1
 fi
 
