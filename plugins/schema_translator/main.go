@@ -42,7 +42,7 @@ func init() {
 				continue
 			}
 
-			mutations := translateSchema(tool.Name, params, "")
+			mutations := translateSchema(tool.Name, params, "", siteRoot)
 			if len(mutations) > 0 {
 				registry[tool.Name] = mutations
 			}
@@ -146,20 +146,66 @@ func init() {
 // Schema translation
 // ==========================================================================
 
-func translateSchema(toolName string, schema map[string]any, path string) []string {
+// schemaSite says where in a tool's schema we are, because the same rewrite is
+// correct in one place and destructive in another.
+type schemaSite int
+
+const (
+	// siteRoot is a tool's top-level parameters.
+	siteRoot schemaSite = iota
+	// siteProperty is a named property's schema, reached by recursion after the
+	// property loop has already decided whether to convert it.
+	siteProperty
+	// siteArrayItem is an array's items schema.
+	siteArrayItem
+)
+
+// The rules this function follows:
+//
+//  1. Never change a tool's ROOT type. Parameters must be a JSON Schema object;
+//     OpenAI, Anthropic and Gemini all reject "type": "array" there.
+//  2. Never rewrite a shape reverseTranslate cannot undo.
+//  3. Never make a schema stricter than its author wrote it, except at the root,
+//     where closing an unspecified object is this plugin's declared purpose and
+//     the operator opted into it by enabling the plugin.
+//
+// Rule 2 is why NO conversion happens in this function's head. The head is only
+// ever reached for the root or an array's item schema — a nested object property
+// has already been converted-or-not by the loop below before recursing — and
+// converting an item changes the array's element type from object to array. The
+// model then emits [[{key,value},…]] instead of [{…}], and reverseAtPath cannot
+// undo it: it requires each element of a "path[]" mutation to be a MAP. The tool
+// receives a list of lists.
+//
+// Conversion happens only at a property, in the loop, where the recorded path is
+// one reverseTranslate can actually reverse.
+func translateSchema(toolName string, schema map[string]any, path string, site schemaSite) []string {
 	var mutations []string
 
 	props, hasProps := schema["properties"].(map[string]any)
-	_, hasExplicitAP := schema["additionalProperties"]
-	schemaType, _ := schema["type"].(string)
 
-	if schemaType == "object" && !hasProps && !hasExplicitAP {
-		convertToKVArray(schema, "string")
-		mutations = append(mutations, path)
+	// additionalProperties is meaningful only on an object. The site refactor
+	// removed the root-type branch that used to carry this check and left the
+	// local behind, so a schema declared {"type":"string"} would get the key
+	// stamped on it — unreachable through a real tool schema, since provider
+	// parameters must be objects, but wrong and no longer guarded.
+	if schemaType, _ := schema["type"].(string); schemaType != "" && schemaType != "object" {
 		return mutations
 	}
 
-	schema["additionalProperties"] = false
+	if hasAdditionalProperties(schema) {
+		// An author-declared open map, left exactly as written.
+		if !hasProps {
+			return mutations
+		}
+		// Properties sit alongside it: translate them, leave the map declared.
+	} else if site != siteArrayItem {
+		schema["additionalProperties"] = false
+	}
+	// An array item is never closed. At the root, closing a no-argument tool is
+	// harmless — there are no arguments to forbid. At an item, closing forbids
+	// the very keys a free-form record type exists to carry.
+
 	if !hasProps {
 		return mutations
 	}
@@ -175,24 +221,28 @@ func translateSchema(toolName string, schema map[string]any, path string) []stri
 		_, propHasAP := propSchema["additionalProperties"]
 
 		if propType == "object" && !propHasProps && !propHasAP {
-			convertToKVArray(propSchema, "string")
+			convertToKVArray(propSchema, "string", nil)
 			mutations = append(mutations, currentPath)
 			continue
 		}
 		if hasAdditionalProperties(propSchema) {
-			valueType := extractAdditionalPropertiesType(propSchema)
-			convertToKVArray(propSchema, valueType)
+			valueSchema, _ := propSchema["additionalProperties"].(map[string]any)
+			convertToKVArray(propSchema, extractAdditionalPropertiesType(propSchema), valueSchema)
 			mutations = append(mutations, currentPath)
 			continue
 		}
-		propSchema["additionalProperties"] = false
+
+		// additionalProperties is meaningful only on an object. Setting it on a
+		// string or a number is noise that every tool schema then carries
+		// upstream.
 		switch propType {
 		case "object":
-			mutations = append(mutations, translateSchema(toolName, propSchema, currentPath)...)
+			propSchema["additionalProperties"] = false
+			mutations = append(mutations, translateSchema(toolName, propSchema, currentPath, siteProperty)...)
 		case "array":
 			if items, ok := propSchema["items"].(map[string]any); ok {
 				if itemType, _ := items["type"].(string); itemType == "object" {
-					mutations = append(mutations, translateSchema(toolName, items, currentPath+"[]")...)
+					mutations = append(mutations, translateSchema(toolName, items, currentPath+"[]", siteArrayItem)...)
 				}
 			}
 		}
@@ -223,7 +273,14 @@ func extractAdditionalPropertiesType(schema map[string]any) string {
 	return "string"
 }
 
-func convertToKVArray(schema map[string]any, valueType string) {
+// convertToKVArray rewrites an open map into an array of {key, value} pairs, so
+// a model that cannot emit free-form object keys can still populate it.
+//
+// valueSchema is the author's declared schema for the map's values, when there
+// was one. It used to be discarded and replaced with a bare {"type": <name>},
+// so a map declared as {"type":"object","properties":{...}} told the model only
+// "value is an object" — with none of its shape.
+func convertToKVArray(schema map[string]any, valueType string, valueSchema map[string]any) {
 	desc := ""
 	if d, ok := schema["description"].(string); ok {
 		desc = d
@@ -231,13 +288,27 @@ func convertToKVArray(schema map[string]any, valueType string) {
 	for k := range schema {
 		delete(schema, k)
 	}
+
+	value := map[string]any{"type": valueType, "description": "the value"}
+	if valueSchema != nil {
+		// Preserve the declared shape, copied so later mutation of the result
+		// cannot reach back into the caller's map.
+		value = make(map[string]any, len(valueSchema)+1)
+		for k, v := range valueSchema {
+			value[k] = v
+		}
+		if _, described := value["description"]; !described {
+			value["description"] = "the value"
+		}
+	}
+
 	schema["type"] = "array"
 	schema["description"] = desc + " (as key-value pairs: [{\"key\": \"...\", \"value\": \"...\"}])"
 	schema["items"] = map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"key":   map[string]any{"type": "string", "description": "the key name"},
-			"value": map[string]any{"type": valueType, "description": "the value"},
+			"value": value,
 		},
 		"additionalProperties": false,
 		"required":             []any{"key", "value"},
