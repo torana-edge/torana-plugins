@@ -32,6 +32,11 @@ if [[ -d "$root/../torana-plugin-sdk" ]]; then
       ;;
   esac
 else
+  # No sibling SDK: build against the published module. Say so, because a
+  # silent fallback to whatever the proxy serves is the bug this script's
+  # assertions exist to prevent — and a contributor who expected their local
+  # SDK changes to be picked up otherwise learns nothing.
+  echo "note: no sibling torana-plugin-sdk checkout; building $plugin against the published module" >&2
   export GOWORK=off
 fi
 GOCACHE="$cache" GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -buildvcs=false -o "$root/dist/$plugin/plugin.wasm" "$source"

@@ -47,31 +47,44 @@ status=0
 # Show failures without dumping several thousand lines of -v output.
 if [ "$status" -ne 0 ]; then
   echo "--- test failures ---"
-  grep -E '^(---|\s+---) (FAIL|ERROR)|^(FAIL|ok|panic)' "$log" | head -80
+  # `|| true`: under `set -euo pipefail` a grep that matches nothing exits
+  # non-zero and would terminate the script here — before the three guards
+  # below print their counters, turning a red build into one with no
+  # diagnostics at all.
+  grep -E '^(---|\s+---) (FAIL|ERROR)|^(FAIL|ok|panic)' "$log" | head -80 || true
 fi
 
+# The marker is the one string this repository and torana-edge agree on by
+# contract, and guard 3 fails if it disappears — so it is the only prose worth
+# keying on.
 ran=$(grep -c 'official-plugin behaviour: bundles from' "$log" || true)
-unset_skips=$(grep -c 'TORANA_PLUGIN_BUNDLES_DIR unset' "$log" || true)
-missing_skips=$(grep -cE 'bundle "[^"]+" not present in' "$log" || true)
+
+# Skips are counted structurally instead. Matching a skip REASON meant
+# hardcoding sentences owned by another repository: torana-edge already has a
+# second wording ("TORANA_PLUGIN_BUNDLES_DIR is unset") that the previous
+# pattern missed, so the guard was already partly blind. Any skip in these
+# packages is suspect here, because the whole point of this job is that the
+# bundles are present.
+skipped=$(grep -cE '^\s*--- SKIP:' "$log" || true)
+# `|| true` on the pipeline too, not just the count: with pipefail a grep that
+# matches nothing fails the whole pipeline, and set -e then kills the script
+# before a single guard reports. Which is exactly what happened the first time
+# this ran green.
+skipped_names=$(grep -E '^\s*--- SKIP:' "$log" | sed -E 's/^[[:space:]]*--- SKIP:[[:space:]]*//; s/ \(.*//' | sort -u || true)
 
 echo "--- behaviour suite ---"
-echo "gated tests that ran:      $ran"
-echo "skipped, bundles dir unset: $unset_skips"
-echo "skipped, bundle missing:    $missing_skips"
+echo "gated tests that ran: $ran"
+echo "tests skipped:        $skipped"
 
-# 1. The environment reached the tests. If it did not, every gated test skipped
-#    and plugin behaviour is untested everywhere.
-if [ "$unset_skips" -ne 0 ]; then
-  echo "FAIL: $unset_skips test(s) skipped because TORANA_PLUGIN_BUNDLES_DIR was unset." >&2
-  echo "      The variable is not reaching the test process." >&2
-  status=1
-fi
-
-# 2. Every plugin the suite asks for was built. A rename or a build that quietly
-#    produced nothing turns those tests into skips rather than failures.
-if [ "$missing_skips" -ne 0 ]; then
-  echo "FAIL: $missing_skips test(s) skipped for a missing bundle." >&2
-  grep -oE 'bundle "[^"]+" not present in .*' "$log" | sort -u | head >&2
+# 1 & 2. Nothing should skip. The bundles are built by the step before this one
+#    and the directory is exported below, so a skip means the suite is not
+#    actually exercising what this job exists to exercise — whatever reason the
+#    test gave.
+if [ "$skipped" -ne 0 ]; then
+  echo "FAIL: $skipped test(s) skipped, but every official bundle was just built." >&2
+  echo "      This job is the only place plugin behaviour runs, so a skip here is" >&2
+  echo "      indistinguishable from that behaviour being untested." >&2
+  echo "$skipped_names" | sed 's/^/        /' >&2
   status=1
 fi
 

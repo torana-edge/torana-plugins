@@ -17,7 +17,15 @@ if [[ -d "$root/../torana-plugin-sdk" ]]; then
   # ever reported that half the setup was dead. Assert the outcome instead of
   # trusting the plumbing.
   sdk_dir=$(cd "$root/../torana-plugin-sdk" && pwd)
-  resolved=$(cd "$root/plugins/pii" && go list -m -f '{{.Dir}}' github.com/torana-edge/torana-plugin-sdk 2>/dev/null || true)
+  # Any plugin module will do — the workspace resolves the SDK the same way for
+  # all of them. Naming one made the check fail with "did not resolve the
+  # sibling SDK" if that plugin were ever renamed, which is not what went wrong.
+  probe=$(find "$root/plugins" -mindepth 2 -maxdepth 2 -name go.mod -print -quit)
+  if [ -z "$probe" ]; then
+    echo "no plugin modules found under $root/plugins" >&2
+    exit 1
+  fi
+  resolved=$(cd "$(dirname "$probe")" && go list -m -f '{{.Dir}}' github.com/torana-edge/torana-plugin-sdk 2>/dev/null || true)
   case "$resolved" in
     "$sdk_dir"*) ;;
     *)
