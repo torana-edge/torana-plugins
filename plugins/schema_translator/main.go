@@ -183,8 +183,15 @@ func translateSchema(toolName string, schema map[string]any, path string, site s
 	var mutations []string
 
 	props, hasProps := schema["properties"].(map[string]any)
-	schemaType, _ := schema["type"].(string)
-	_ = schemaType
+
+	// additionalProperties is meaningful only on an object. The site refactor
+	// removed the root-type branch that used to carry this check and left the
+	// local behind, so a schema declared {"type":"string"} would get the key
+	// stamped on it — unreachable through a real tool schema, since provider
+	// parameters must be objects, but wrong and no longer guarded.
+	if schemaType, _ := schema["type"].(string); schemaType != "" && schemaType != "object" {
+		return mutations
+	}
 
 	if hasAdditionalProperties(schema) {
 		// An author-declared open map, left exactly as written.

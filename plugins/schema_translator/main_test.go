@@ -288,3 +288,30 @@ func TestArrayItemConversionWouldNotSurviveReversal(t *testing.T) {
 	// Unchanged means the tool would receive the KV form. That is the outcome
 	// the translator must never create.
 }
+
+// TestNonObjectSchemaIsLeftAlone — additionalProperties is meaningful only on
+// an object. The site refactor removed the root-type branch that carried this
+// check and left a dead local in its place, so a non-object schema would have
+// had the key stamped on it.
+//
+// Unreachable through a real tool schema, since provider parameters must be
+// objects, but the guard is the thing that makes that a property of the code
+// rather than of the callers.
+func TestNonObjectSchemaIsLeftAlone(t *testing.T) {
+	for _, raw := range []string{
+		`{"type":"string"}`,
+		`{"type":"array","items":{"type":"string"}}`,
+		`{"type":"number"}`,
+	} {
+		got := translate(t, raw)
+		if _, present := got["additionalProperties"]; present {
+			t.Errorf("%s was given additionalProperties: %v", raw, got)
+		}
+	}
+	// An untyped schema is still treated as an object, which is what a tool
+	// declaring only "properties" relies on.
+	got := translate(t, `{"properties":{"path":{"type":"string"}}}`)
+	if got["additionalProperties"] != false {
+		t.Errorf("an untyped schema with properties should still be closed: %v", got)
+	}
+}
