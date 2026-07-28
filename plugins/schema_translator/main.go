@@ -42,7 +42,7 @@ func init() {
 				continue
 			}
 
-			mutations := translateSchema(tool.Name, params, "", true)
+			mutations := translateSchema(tool.Name, params, "", siteRoot)
 			if len(mutations) > 0 {
 				registry[tool.Name] = mutations
 			}
@@ -146,69 +146,59 @@ func init() {
 // Schema translation
 // ==========================================================================
 
-// The rule this function follows, at every level:
+// schemaSite says where in a tool's schema we are, because the same rewrite is
+// correct in one place and destructive in another.
+type schemaSite int
+
+const (
+	// siteRoot is a tool's top-level parameters.
+	siteRoot schemaSite = iota
+	// siteProperty is a named property's schema, reached by recursion after the
+	// property loop has already decided whether to convert it.
+	siteProperty
+	// siteArrayItem is an array's items schema.
+	siteArrayItem
+)
+
+// The rules this function follows:
 //
-//   - never change a tool's ROOT type. Tool parameters must be a JSON Schema
-//     object; OpenAI, Anthropic and Gemini all reject "type": "array" there.
-//   - never make a schema stricter than its author wrote it. Closing an
-//     unspecified object is this plugin's job; closing one the author
-//     deliberately left open is not.
+//  1. Never change a tool's ROOT type. Parameters must be a JSON Schema object;
+//     OpenAI, Anthropic and Gemini all reject "type": "array" there.
+//  2. Never rewrite a shape reverseTranslate cannot undo.
+//  3. Never make a schema stricter than its author wrote it, except at the root,
+//     where closing an unspecified object is this plugin's declared purpose and
+//     the operator opted into it by enabling the plugin.
 //
-// isRoot marks the tool's top-level parameters, where both rules bind hardest.
-func translateSchema(toolName string, schema map[string]any, path string, isRoot bool) []string {
+// Rule 2 is why NO conversion happens in this function's head. The head is only
+// ever reached for the root or an array's item schema — a nested object property
+// has already been converted-or-not by the loop below before recursing — and
+// converting an item changes the array's element type from object to array. The
+// model then emits [[{key,value},…]] instead of [{…}], and reverseAtPath cannot
+// undo it: it requires each element of a "path[]" mutation to be a MAP. The tool
+// receives a list of lists.
+//
+// Conversion happens only at a property, in the loop, where the recorded path is
+// one reverseTranslate can actually reverse.
+func translateSchema(toolName string, schema map[string]any, path string, site schemaSite) []string {
 	var mutations []string
 
 	props, hasProps := schema["properties"].(map[string]any)
-	_, hasExplicitAP := schema["additionalProperties"]
 	schemaType, _ := schema["type"].(string)
+	_ = schemaType
 
-	// A bare {"type": "object"} becomes a key-value array so models that cannot
-	// emit free-form maps can still populate it — but never at the root. A bare
-	// object is the commonest shape for a NO-ARGUMENT tool, and rewriting its
-	// root parameters to an array made every such tool uncallable on all three
-	// major providers.
-	if !isRoot && schemaType == "object" && !hasProps && !hasExplicitAP {
-		convertToKVArray(schema, "string", nil)
-		mutations = append(mutations, path)
-		return mutations
-	}
-
-	// An author-declared open map. Below the root it becomes a KV array, which
-	// preserves the intent in a shape a model can emit. At the root it cannot —
-	// the root type must stay "object" — so the declaration is left exactly as
-	// written.
-	//
-	// This check used to live only inside the property loop, so an open map at
-	// the root, or on an array's item schema, fell through to the blanket close
-	// below and was silently made stricter than its author wrote it.
-	// An author-declared open map is left exactly as written here, and that is
-	// the whole of the rule at this level: never make a schema stricter than
-	// its author wrote it.
-	//
-	// It is NOT converted to a KV array here. The only schemas reaching this
-	// branch are a tool's root and an array's ITEM schema — a nested object
-	// property has already been handled by the loop below before recursing —
-	// and converting either one changes a shape the caller cannot use:
-	//
-	//   root: parameters must be a JSON Schema object; providers reject an
-	//   array outright.
-	//
-	//   array item: the element type changes from object to array, so the model
-	//   emits [[{key,value},…]] instead of [{…}], and reverseAtPath cannot undo
-	//   it — it expects each element of a "path[]" mutation to be a MAP. The
-	//   tool then receives a list of lists.
-	//
-	// KV conversion happens only at a property, in the loop below, where the
-	// mutation path is one reverseTranslate can actually reverse.
 	if hasAdditionalProperties(schema) {
+		// An author-declared open map, left exactly as written.
 		if !hasProps {
 			return mutations
 		}
-		// Properties sit alongside the open map: translate them, but leave
-		// additionalProperties as declared.
-	} else {
+		// Properties sit alongside it: translate them, leave the map declared.
+	} else if site != siteArrayItem {
 		schema["additionalProperties"] = false
 	}
+	// An array item is never closed. At the root, closing a no-argument tool is
+	// harmless — there are no arguments to forbid. At an item, closing forbids
+	// the very keys a free-form record type exists to carry.
+
 	if !hasProps {
 		return mutations
 	}
@@ -241,13 +231,11 @@ func translateSchema(toolName string, schema map[string]any, path string, isRoot
 		switch propType {
 		case "object":
 			propSchema["additionalProperties"] = false
-			mutations = append(mutations, translateSchema(toolName, propSchema, currentPath, false)...)
+			mutations = append(mutations, translateSchema(toolName, propSchema, currentPath, siteProperty)...)
 		case "array":
 			if items, ok := propSchema["items"].(map[string]any); ok {
 				if itemType, _ := items["type"].(string); itemType == "object" {
-					// isRoot=false: an item schema is not a tool's root, so an
-					// open map on it converts rather than being closed.
-					mutations = append(mutations, translateSchema(toolName, items, currentPath+"[]", false)...)
+					mutations = append(mutations, translateSchema(toolName, items, currentPath+"[]", siteArrayItem)...)
 				}
 			}
 		}

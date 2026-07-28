@@ -22,7 +22,7 @@ func translate(t *testing.T, raw string) map[string]any {
 	if err := json.Unmarshal([]byte(raw), &schema); err != nil {
 		t.Fatalf("bad fixture: %v", err)
 	}
-	translateSchema("test_tool", schema, "", true)
+	translateSchema("test_tool", schema, "", siteRoot)
 	return schema
 }
 
@@ -124,6 +124,33 @@ func TestNoArgumentToolIsStillClosed(t *testing.T) {
 // the array's element type from object to array, so the model emits
 // [[{key,value},…]] and reverseTranslate cannot undo it — see
 // TestArrayItemConversionWouldNotSurviveReversal.
+// TestBareObjectArrayItemsAreLeftAlone is the case the first version of this
+// fix missed. It guarded only the open-map branch, so a BARE {"type":"object"}
+// item — an ordinary "list of free-form records" — still converted, still
+// recorded a "rows[]" mutation, and still could not be reversed.
+//
+// The rule is about the SITE, not about which branch happens to fire there:
+// nothing at an array item may be rewritten, because no rewrite there survives
+// reverseTranslate.
+func TestBareObjectArrayItemsAreLeftAlone(t *testing.T) {
+	got := translate(t, `{"type":"object","properties":{"rows":{"type":"array","items":{"type":"object"}}}}`)
+
+	props, _ := got["properties"].(map[string]any)
+	rows, _ := props["rows"].(map[string]any)
+	items, ok := rows["items"].(map[string]any)
+	if !ok {
+		t.Fatalf("rows.items missing: %v", rows)
+	}
+	if items["type"] != "object" {
+		t.Errorf("the array's element type changed to %v; the tool would receive a "+
+			"list of lists that reverseTranslate cannot undo", items["type"])
+	}
+	// Not closed either: a free-form record type exists to carry arbitrary keys.
+	if items["additionalProperties"] == false {
+		t.Error("a free-form record type at an array item was closed")
+	}
+}
+
 func TestOpenMapInsideArrayItemsIsLeftAlone(t *testing.T) {
 	got := translate(t, `{"type":"object","properties":{"rows":{"type":"array","items":{"type":"object","additionalProperties":true}}}}`)
 
@@ -207,8 +234,13 @@ func TestMutationsSurviveReversal(t *testing.T) {
 			emitted: `{"meta":[{"key":"k","value":"v"}]}`,
 			want:    `{"meta":{"k":"v"}}`,
 		},
-		// The case that regressed: nothing is rewritten, so nothing needs
+		// Both array-item shapes: nothing is rewritten, so nothing needs
 		// reversing and the model's arguments pass through unchanged.
+		"bare object inside array items": {
+			schema:  `{"type":"object","properties":{"rows":{"type":"array","items":{"type":"object"}}}}`,
+			emitted: `{"rows":[{"a":"1"}]}`,
+			want:    `{"rows":[{"a":"1"}]}`,
+		},
 		"open map inside array items": {
 			schema:  `{"type":"object","properties":{"rows":{"type":"array","items":{"type":"object","additionalProperties":{"type":"string"}}}}}`,
 			emitted: `{"rows":[{"a":"1"}]}`,
@@ -220,7 +252,7 @@ func TestMutationsSurviveReversal(t *testing.T) {
 			if err := json.Unmarshal([]byte(tc.schema), &schema); err != nil {
 				t.Fatal(err)
 			}
-			mutations := translateSchema("tool", schema, "", true)
+			mutations := translateSchema("tool", schema, "", siteRoot)
 
 			reversed, _ := reverseTranslate("tool", tc.emitted, map[string][]string{"tool": mutations})
 
