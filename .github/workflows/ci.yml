@@ -40,7 +40,11 @@ jobs:
           path: torana-edge
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25.x'
+          # 1.26.x, not 1.25.x: this job runs `go test` inside a torana-edge
+          # checkout whose go.mod requires 1.26.4. It passes today only because
+          # GOTOOLCHAIN=auto downloads that on demand — name the version the
+          # job actually needs instead of relying on the fallback.
+          go-version: '1.26.x'
       - working-directory: torana-plugins
         run: ./scripts/test.sh
       # Every plugin in the tree, not a hand-maintained list. The list said seven
