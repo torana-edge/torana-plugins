@@ -82,6 +82,12 @@ const virtualKeyPrefix = "sk-torana-"
 type credential struct {
 	kind  credentialKind
 	token string
+	// team and tenant accompany a trusted-user assertion. The host exposes
+	// X-Torana-Team and X-Torana-Tenant through the same allowlist as
+	// X-Torana-User, and reading only the user meant a caller that scoped its
+	// request got the scope silently dropped.
+	team   string
+	tenant string
 }
 
 type identity struct {
@@ -90,34 +96,68 @@ type identity struct {
 	userID   string
 }
 
+// looksLikeJWT reports whether a bearer token is structurally a JWT: three
+// non-empty dot-separated segments.
+//
+// Authorization carries two unrelated things. An OpenAI-shaped client puts its
+// PROVIDER key there ("Bearer sk-proj-…"), which is a secret for the upstream
+// and says nothing about who the caller is. A gateway deployment puts a JWT
+// there, which is an identity claim this edition cannot verify.
+//
+// Treating every bearer token as the second kind is what made the previous fix
+// miss the commonest case: a harness sending its provider key in Authorization
+// with X-Torana-User alongside still got no identity, which is the exact
+// scenario that fix was written for.
+func looksLikeJWT(token string) bool {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, p := range parts {
+		if p == "" {
+			return false
+		}
+	}
+	return true
+}
+
 // readCredential classifies the inbound credential. Headers arrive canonicalized
 // (net/http MIME form) through the env.request_headers grant allowlist, so the
 // casing here is the casing the host produces.
 //
-// Precedence, in order:
+// Precedence, most verifiable first:
 //
-//  1. Authorization: Bearer — a real credential. Terminal: it cannot be
-//     verified in this edition, and falling through to an UNVERIFIED header
-//     when a verifiable credential was presented would be a downgrade.
-//  2. X-Api-Key beginning sk-torana- — a virtual key the host can verify.
-//  3. X-Torana-User — a trusted-header identity assertion with no verification
-//     at all, so it is last.
+//  1. A torana-issued key, in EITHER Authorization or X-Api-Key. The host can
+//     verify it, so it wins wherever it was sent — a client that puts it in
+//     Authorization is not doing anything unusual.
+//  2. A structurally valid JWT in Authorization. A real identity claim, and
+//     terminal: falling through to an unverified header when one was presented
+//     would be a downgrade.
+//  3. X-Torana-User — a trusted-header assertion with no verification at all,
+//     so it comes last.
 //
-// An X-Api-Key that Torana did not issue is NOT a credential here and does not
-// stop the search. It is a secret for the upstream provider and says nothing
-// about who the caller is — so letting it suppress the one header that does
-// would mask the identity for exactly the requests that carry both. That is
-// what the original else-if chain did, and the reason it looked deliberate is
-// that nothing wrote down which of these are identities and which are secrets.
+// Anything else, in either header, is a SECRET rather than an identity and does
+// not stop the search. Letting a provider key suppress X-Torana-User would mask
+// the identity on exactly the requests that carry both.
 func readCredential(headers map[string]any) credential {
+	bearer := ""
 	if authHeader, ok := headers["Authorization"].(string); ok && strings.HasPrefix(authHeader, "Bearer ") {
-		return credential{kind: credentialJWT, token: strings.TrimPrefix(authHeader, "Bearer ")}
+		bearer = strings.TrimPrefix(authHeader, "Bearer ")
 	}
-	if apiKey, ok := headers["X-Api-Key"].(string); ok && strings.HasPrefix(apiKey, virtualKeyPrefix) {
-		return credential{kind: credentialVirtualKey, token: apiKey}
+	apiKey, _ := headers["X-Api-Key"].(string)
+
+	for _, token := range []string{bearer, apiKey} {
+		if strings.HasPrefix(token, virtualKeyPrefix) {
+			return credential{kind: credentialVirtualKey, token: token}
+		}
+	}
+	if looksLikeJWT(bearer) {
+		return credential{kind: credentialJWT, token: bearer}
 	}
 	if toranaUser, ok := headers["X-Torana-User"].(string); ok && toranaUser != "" {
-		return credential{kind: credentialTrustedUser, token: toranaUser}
+		team, _ := headers["X-Torana-Team"].(string)
+		tenant, _ := headers["X-Torana-Tenant"].(string)
+		return credential{kind: credentialTrustedUser, token: toranaUser, team: team, tenant: tenant}
 	}
 	return credential{}
 }
@@ -128,7 +168,13 @@ func readCredential(headers map[string]any) credential {
 func resolveIdentity(cred credential, verify func(token string) (VerifyResponse, bool)) (identity, bool) {
 	switch cred.kind {
 	case credentialTrustedUser:
-		return identity{tenantID: "default-tenant", userID: cred.token}, true
+		// The caller's own tenant when it sent one; the default otherwise, so
+		// an unscoped assertion still resolves.
+		tenant := cred.tenant
+		if tenant == "" {
+			tenant = "default-tenant"
+		}
+		return identity{tenantID: tenant, teamID: cred.team, userID: cred.token}, true
 	case credentialVirtualKey:
 		res, ok := verify(cred.token)
 		if !ok || res.Status != "ok" {

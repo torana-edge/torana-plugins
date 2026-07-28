@@ -41,6 +41,23 @@ func TestReadCredentialClassification(t *testing.T) {
 			map[string]any{"X-Api-Key": "sk-proj-openai-key", "X-Torana-User": "alice"},
 			credentialTrustedUser, "alice",
 		},
+		// The commonest shape of all, and the one the previous fix missed: an
+		// OpenAI-shaped client puts its provider key in Authorization, not
+		// X-Api-Key. Treating every bearer token as an identity claim meant
+		// this yielded nothing.
+		"provider key in Authorization does not mask the user header": {
+			map[string]any{"Authorization": "Bearer sk-proj-openai-key", "X-Torana-User": "alice"},
+			credentialTrustedUser, "alice",
+		},
+		"opaque bearer token is not an identity": {
+			map[string]any{"Authorization": "Bearer opaque-secret"},
+			credentialNone, "",
+		},
+		// A torana-issued key is verifiable wherever it was sent.
+		"virtual key in Authorization is still a virtual key": {
+			map[string]any{"Authorization": "Bearer sk-torana-123"},
+			credentialVirtualKey, "sk-torana-123",
+		},
 		"empty api key does not mask the user header": {
 			map[string]any{"X-Api-Key": "", "X-Torana-User": "alice"},
 			credentialTrustedUser, "alice",
@@ -63,13 +80,16 @@ func TestReadCredentialClassification(t *testing.T) {
 
 // A verifiable credential must win over an unverified assertion.
 func TestReadCredentialPrefersVerifiableHeaders(t *testing.T) {
+	// Most verifiable wins. A torana-issued key can be checked with the host;
+	// a JWT cannot be checked at all in this edition, so it does not outrank
+	// one just for arriving in Authorization.
 	got := readCredential(map[string]any{
-		"Authorization": "Bearer jwt",
+		"Authorization": "Bearer head.payload.sig",
 		"X-Api-Key":     "sk-torana-123",
 		"X-Torana-User": "alice",
 	})
-	if got.kind != credentialJWT {
-		t.Errorf("Authorization should win, got %v", got.kind)
+	if got.kind != credentialVirtualKey {
+		t.Errorf("a verifiable torana key should beat an unverifiable JWT, got %v", got.kind)
 	}
 
 	got = readCredential(map[string]any{
@@ -80,15 +100,25 @@ func TestReadCredentialPrefersVerifiableHeaders(t *testing.T) {
 		t.Errorf("a verifiable key should beat the trusted-user header, got %v", got.kind)
 	}
 
-	// A Bearer token is terminal even though this edition cannot verify it:
-	// falling through to an unverified header when a real credential was
-	// presented would be a downgrade.
+	// A JWT is terminal even though this edition cannot verify it: falling
+	// through to an UNVERIFIED header when a real identity claim was presented
+	// would be a downgrade.
 	got = readCredential(map[string]any{
-		"Authorization": "Bearer jwt",
+		"Authorization": "Bearer head.payload.sig",
 		"X-Torana-User": "alice",
 	})
 	if got.kind != credentialJWT {
-		t.Errorf("a Bearer token must not fall through to the trusted-user header, got %v", got.kind)
+		t.Errorf("a JWT must not fall through to the trusted-user header, got %v", got.kind)
+	}
+
+	// But an opaque provider secret is not an identity claim, so it must not
+	// suppress one.
+	got = readCredential(map[string]any{
+		"Authorization": "Bearer sk-proj-openai",
+		"X-Torana-User": "alice",
+	})
+	if got.kind != credentialTrustedUser {
+		t.Errorf("a provider key in Authorization must not mask the user header, got %v", got.kind)
 	}
 }
 
@@ -165,5 +195,36 @@ func TestJWTIsNotResolvedInTheOpenSourceEdition(t *testing.T) {
 	// trusting an unverified token.
 	if _, ok := resolveIdentity(credential{kind: credentialJWT, token: "jwt"}, nil); ok {
 		t.Error("a JWT must not resolve to an identity without verification")
+	}
+}
+
+// TestTrustedUserCarriesItsScope — the host exposes X-Torana-Team and
+// X-Torana-Tenant through the same allowlist as X-Torana-User, and reading only
+// the user silently dropped the scope a caller had explicitly set.
+func TestTrustedUserCarriesItsScope(t *testing.T) {
+	cred := readCredential(map[string]any{
+		"X-Torana-User":   "alice",
+		"X-Torana-Team":   "platform",
+		"X-Torana-Tenant": "acme",
+	})
+	id, ok := resolveIdentity(cred, nil)
+	if !ok {
+		t.Fatal("a trusted-user assertion should resolve")
+	}
+	if id.userID != "alice" || id.teamID != "platform" || id.tenantID != "acme" {
+		t.Errorf("scope dropped: %+v", id)
+	}
+}
+
+// Without a tenant header the default still applies, so an unscoped assertion
+// keeps working.
+func TestTrustedUserWithoutScopeUsesTheDefaultTenant(t *testing.T) {
+	cred := readCredential(map[string]any{"X-Torana-User": "alice"})
+	id, ok := resolveIdentity(cred, nil)
+	if !ok || id.tenantID != "default-tenant" || id.userID != "alice" {
+		t.Errorf("got %+v ok=%v", id, ok)
+	}
+	if id.teamID != "" {
+		t.Errorf("invented a team: %q", id.teamID)
 	}
 }
