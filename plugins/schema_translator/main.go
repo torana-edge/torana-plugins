@@ -181,19 +181,31 @@ func translateSchema(toolName string, schema map[string]any, path string, isRoot
 	// This check used to live only inside the property loop, so an open map at
 	// the root, or on an array's item schema, fell through to the blanket close
 	// below and was silently made stricter than its author wrote it.
+	// An author-declared open map is left exactly as written here, and that is
+	// the whole of the rule at this level: never make a schema stricter than
+	// its author wrote it.
+	//
+	// It is NOT converted to a KV array here. The only schemas reaching this
+	// branch are a tool's root and an array's ITEM schema — a nested object
+	// property has already been handled by the loop below before recursing —
+	// and converting either one changes a shape the caller cannot use:
+	//
+	//   root: parameters must be a JSON Schema object; providers reject an
+	//   array outright.
+	//
+	//   array item: the element type changes from object to array, so the model
+	//   emits [[{key,value},…]] instead of [{…}], and reverseAtPath cannot undo
+	//   it — it expects each element of a "path[]" mutation to be a MAP. The
+	//   tool then receives a list of lists.
+	//
+	// KV conversion happens only at a property, in the loop below, where the
+	// mutation path is one reverseTranslate can actually reverse.
 	if hasAdditionalProperties(schema) {
-		if isRoot {
-			if !hasProps {
-				return mutations
-			}
-			// Properties sit alongside the open map: translate them, but leave
-			// additionalProperties as declared.
-		} else {
-			valueSchema, _ := schema["additionalProperties"].(map[string]any)
-			convertToKVArray(schema, extractAdditionalPropertiesType(schema), valueSchema)
-			mutations = append(mutations, path)
+		if !hasProps {
 			return mutations
 		}
+		// Properties sit alongside the open map: translate them, but leave
+		// additionalProperties as declared.
 	} else {
 		schema["additionalProperties"] = false
 	}

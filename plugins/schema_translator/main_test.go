@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 )
 
@@ -115,11 +116,15 @@ func TestNoArgumentToolIsStillClosed(t *testing.T) {
 	}
 }
 
-// TestOpenMapInsideArrayItemsIsNotClosed — the rule is "never make a schema
-// stricter than its author wrote it", and it used to hold only at the root. An
-// open map on an array's ITEM schema fell through to the blanket close, so a
-// tool declaring rows of free-form objects had them silently forbidden.
-func TestOpenMapInsideArrayItemsIsNotClosed(t *testing.T) {
+// TestOpenMapInsideArrayItemsIsLeftAlone — the rule is "never make a schema
+// stricter than its author wrote it", and it used to hold only at the root: an
+// open map on an array's ITEM schema fell through to the blanket close.
+//
+// Leaving it alone, rather than converting it to a KV array. Converting changes
+// the array's element type from object to array, so the model emits
+// [[{key,value},…]] and reverseTranslate cannot undo it — see
+// TestArrayItemConversionWouldNotSurviveReversal.
+func TestOpenMapInsideArrayItemsIsLeftAlone(t *testing.T) {
 	got := translate(t, `{"type":"object","properties":{"rows":{"type":"array","items":{"type":"object","additionalProperties":true}}}}`)
 
 	props, _ := got["properties"].(map[string]any)
@@ -131,9 +136,9 @@ func TestOpenMapInsideArrayItemsIsNotClosed(t *testing.T) {
 	if items["additionalProperties"] == false {
 		t.Error("an author-declared open map on an array item schema was closed")
 	}
-	// It converts, like an open map anywhere else below the root.
-	if items["type"] != "array" {
-		t.Errorf("expected the open map to become a KV array, got type=%v", items["type"])
+	if items["type"] != "object" {
+		t.Errorf("the array's element type changed to %v; the tool would receive a "+
+			"list of lists", items["type"])
 	}
 }
 
@@ -177,4 +182,77 @@ func TestScalarPropertiesAreNotGivenAdditionalProperties(t *testing.T) {
 	if got["additionalProperties"] != false {
 		t.Errorf("root should still be closed, got %v", got["additionalProperties"])
 	}
+}
+
+// TestMutationsSurviveReversal is the test class this file was missing
+// entirely: every mutation the translator records must be undoable, or the tool
+// receives arguments in a shape it did not declare.
+//
+// Its absence is why an array-item conversion that reverseAtPath cannot reverse
+// passed review — the forward direction was asserted and the round trip never
+// was.
+func TestMutationsSurviveReversal(t *testing.T) {
+	for name, tc := range map[string]struct {
+		schema  string
+		emitted string
+		want    string
+	}{
+		"open map at a property": {
+			schema:  `{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}}}}`,
+			emitted: `{"env":[{"key":"A","value":"1"}]}`,
+			want:    `{"env":{"A":"1"}}`,
+		},
+		"bare object at a property": {
+			schema:  `{"type":"object","properties":{"meta":{"type":"object"}}}`,
+			emitted: `{"meta":[{"key":"k","value":"v"}]}`,
+			want:    `{"meta":{"k":"v"}}`,
+		},
+		// The case that regressed: nothing is rewritten, so nothing needs
+		// reversing and the model's arguments pass through unchanged.
+		"open map inside array items": {
+			schema:  `{"type":"object","properties":{"rows":{"type":"array","items":{"type":"object","additionalProperties":{"type":"string"}}}}}`,
+			emitted: `{"rows":[{"a":"1"}]}`,
+			want:    `{"rows":[{"a":"1"}]}`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var schema map[string]any
+			if err := json.Unmarshal([]byte(tc.schema), &schema); err != nil {
+				t.Fatal(err)
+			}
+			mutations := translateSchema("tool", schema, "", true)
+
+			reversed, _ := reverseTranslate("tool", tc.emitted, map[string][]string{"tool": mutations})
+
+			var got, want map[string]any
+			if err := json.Unmarshal([]byte(reversed), &got); err != nil {
+				t.Fatalf("reversed output is not valid JSON: %v (%q)", err, reversed)
+			}
+			if err := json.Unmarshal([]byte(tc.want), &want); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("round trip lost the shape the tool declared\n  mutations: %v\n  model emitted: %s\n  reversed:      %s\n  want:          %s",
+					mutations, tc.emitted, reversed, tc.want)
+			}
+		})
+	}
+}
+
+// TestArrayItemConversionWouldNotSurviveReversal pins WHY array items are left
+// alone, so the "apply the rule at every level" reasoning cannot be reapplied
+// to them without noticing.
+//
+// reverseAtPath treats a trailing "[]" as "for each element, un-KV its fields",
+// and asserts each element is a map. Converting the item schema makes each
+// element an array, so reversal silently does nothing and the tool is handed
+// [[{key,value},…]].
+func TestArrayItemConversionWouldNotSurviveReversal(t *testing.T) {
+	args := `{"rows":[[{"key":"a","value":"1"}]]}`
+	reversed, _ := reverseTranslate("tool", args, map[string][]string{"tool": {"rows[]"}})
+	if reversed != args {
+		t.Fatalf("reversal is expected to be a no-op on list-of-lists; got %s", reversed)
+	}
+	// Unchanged means the tool would receive the KV form. That is the outcome
+	// the translator must never create.
 }
