@@ -21,6 +21,7 @@ import (
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	"github.com/torana-edge/torana-plugin-sdk/pb"
 	"google.golang.org/protobuf/proto"
+	"unicode/utf8"
 )
 
 func main() {}
@@ -414,7 +415,7 @@ func extractConversationContext(msgs []*pb.Message, excludeToolCallID string) st
 		}
 		if content != "" {
 			if len(content) > 500 {
-				content = content[:500] + "..."
+				content = truncHead(content, 500) + "..."
 			}
 			parts = append([]string{msg.Role + ": " + content}, parts...)
 			collected++
@@ -435,5 +436,49 @@ func truncateForPrompt(content string, maxChars int) string {
 		return content
 	}
 	half := maxChars / 2
-	return content[:half] + "\n\n... [truncated] ...\n\n" + content[len(content)-half:]
+	return truncHead(content, half) + "\n\n... [truncated] ...\n\n" + truncTail(content, half)
+}
+
+// Torana truncates by byte budget, but a byte index can land in the middle of a
+// UTF-8 rune. These back the cut off to the nearest boundary, so the result is
+// always within budget and always valid UTF-8.
+//
+// Here the truncated text goes into a JSON payload for an offload completion,
+// not into a proto3 string, so a mid-rune cut does not trap — json.Marshal
+// substitutes U+FFFD. It silently corrupts the last character of the text a
+// model is about to summarise instead. (In keyword_compactor the same cut DOES
+// trap, because the result is assigned to Message.Content.)
+
+// truncHead returns the longest prefix of s that is at most n bytes and does
+// not split a rune.
+func truncHead(s string, n int) string {
+	// A negative budget would reach s[:n] and panic, and a panic inside a
+	// plugin traps the whole request. No caller passes one today; the helper
+	// is copied into three modules and states no precondition.
+	if n <= 0 {
+		return ""
+	}
+	if n >= len(s) {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// truncTail returns the longest suffix of s that is at most n bytes and does
+// not split a rune.
+func truncTail(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if n >= len(s) {
+		return s
+	}
+	i := len(s) - n
+	for i < len(s) && !utf8.RuneStart(s[i]) {
+		i++
+	}
+	return s[i:]
 }

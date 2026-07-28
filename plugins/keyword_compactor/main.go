@@ -9,6 +9,7 @@ import (
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	"github.com/torana-edge/torana-plugin-sdk/pb"
+	"unicode/utf8"
 )
 
 func main() {}
@@ -277,15 +278,44 @@ func extractKeywords(intent string) []string {
 	return kw
 }
 
-// truncateHeadTail keeps the first and last N characters of content.
+// truncationNotice is the marker inserted between the kept halves. It counts
+// against the budget: a "truncation" that returns more bytes than it was
+// allowed is not one.
+func truncationNotice(removed int) string {
+	return "\n\n... [" + itoa(removed) + " bytes truncated by Torana] ...\n\n"
+}
+
+// truncateHeadTail caps content at n bytes TOTAL — notice included — keeping
+// roughly the first and last half of what remains.
+//
+// The threshold used to disagree with itself three ways: the doc comment said
+// "first and last N characters" (2n), the guard fired at n*2, and the body kept
+// n/2+n/2 (n). Separately, the notice was appended AFTER the halves had already
+// consumed the whole budget, so near the boundary the result was longer than
+// the input it was shortening.
 func truncateHeadTail(content string, n int) string {
-	if len(content) <= n*2 {
+	if n <= 0 {
+		return ""
+	}
+	if len(content) <= n {
 		return content
 	}
-	half := n / 2
-	head := content[:half]
-	tail := content[len(content)-half:]
-	return head + "\n\n... [" + itoa(len(content)-n) + " bytes truncated by Torana] ...\n\n" + tail
+
+	// Reserve using the widest the count can be. The notice states how many
+	// bytes were removed, and its own length changes that number — reserving
+	// against len(content) breaks the circularity in one pass and can only
+	// over-reserve, never under.
+	budget := n - len(truncationNotice(len(content)))
+	if budget < 0 {
+		budget = 0
+	}
+
+	head := truncHead(content, budget/2)
+	// The remainder rather than budget/2: backing off to a rune boundary can
+	// shorten the head, and the tail should use what that frees.
+	tail := truncTail(content, budget-len(head))
+
+	return head + truncationNotice(len(content)-len(head)-len(tail)) + tail
 }
 
 func itoa(n int) string {
@@ -305,4 +335,47 @@ func itoa(n int) string {
 		digits = append([]byte{'-'}, digits...)
 	}
 	return string(digits)
+}
+
+// Torana truncates tool output by byte budget, but a byte index can land in
+// the middle of a UTF-8 rune. The resulting string is invalid UTF-8, and the
+// SDK marshals it into a proto3 string field — which enforces UTF-8 and
+// panics, trapping the plugin for the entire request. Any non-ASCII tool
+// output was enough to trigger it.
+//
+// These back the cut off to the nearest rune boundary, so the result is always
+// within budget and always valid UTF-8.
+
+// truncHead returns the longest prefix of s that is at most n bytes and does
+// not split a rune.
+func truncHead(s string, n int) string {
+	// A negative budget would reach s[:n] and panic, and a panic inside a
+	// plugin traps the whole request. No caller passes one today; the helper
+	// is copied into three modules and states no precondition.
+	if n <= 0 {
+		return ""
+	}
+	if n >= len(s) {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// truncTail returns the longest suffix of s that is at most n bytes and does
+// not split a rune.
+func truncTail(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if n >= len(s) {
+		return s
+	}
+	i := len(s) - n
+	for i < len(s) && !utf8.RuneStart(s[i]) {
+		i++
+	}
+	return s[i:]
 }

@@ -11,6 +11,7 @@ import (
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	"github.com/torana-edge/torana-plugin-sdk/pb"
+	"unicode/utf8"
 )
 
 func main() {}
@@ -202,7 +203,10 @@ Never include the actual PII values — only the category and line number. If th
 func modelScan(content, toolName string) ([]finding, error) {
 	scanContent := content
 	if cfg.MaxScanChars > 0 && len(scanContent) > cfg.MaxScanChars {
-		scanContent = scanContent[:cfg.MaxScanChars]
+		// A mid-rune cut here does not trap — json.Marshal substitutes U+FFFD
+		// rather than failing — but it silently corrupts the last character of
+		// the text a PII detector is about to read. Cut cleanly.
+		scanContent = truncHead(scanContent, cfg.MaxScanChars)
 	}
 	payload, _ := json.Marshal(map[string]any{
 		"provider":      cfg.Provider,
@@ -283,4 +287,49 @@ func toolLabel(toolName, id string) string {
 	default:
 		return "a tool result"
 	}
+}
+
+// Torana truncates by byte budget, but a byte index can land in the middle of a
+// UTF-8 rune. These back the cut off to the nearest boundary, so the result is
+// always within budget and always valid UTF-8.
+//
+// Here the truncated text goes into a JSON payload for the scan host call, not
+// into a proto3 string, so a mid-rune cut does not trap — json.Marshal
+// substitutes U+FFFD. It silently corrupts the last character of the text a PII
+// DETECTOR is about to read, which is its own kind of bad. (In
+// keyword_compactor the same cut DOES trap, because the result is assigned to
+// Message.Content.)
+
+// truncHead returns the longest prefix of s that is at most n bytes and does
+// not split a rune.
+func truncHead(s string, n int) string {
+	// A negative budget would reach s[:n] and panic, and a panic inside a
+	// plugin traps the whole request. No caller passes one today; the helper
+	// is copied into three modules and states no precondition.
+	if n <= 0 {
+		return ""
+	}
+	if n >= len(s) {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// truncTail returns the longest suffix of s that is at most n bytes and does
+// not split a rune.
+func truncTail(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if n >= len(s) {
+		return s
+	}
+	i := len(s) - n
+	for i < len(s) && !utf8.RuneStart(s[i]) {
+		i++
+	}
+	return s[i:]
 }
