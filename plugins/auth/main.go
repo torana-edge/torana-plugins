@@ -36,18 +36,18 @@ func init() {
 			return nil, nil
 		}
 
-		cred := readCredential(headers)
-		if cred.kind == credentialNone {
-			return nil, nil
+		// First candidate that resolves wins. A JWT does not resolve in this
+		// edition — real verification lives in torana-edge/private-nucleus — so
+		// trying the next candidate is what stops an unverifiable bearer token
+		// from masking an identity the caller did supply.
+		var identity identity
+		var resolved bool
+		for _, cred := range readCredential(headers) {
+			if identity, resolved = resolveIdentity(cred, verifyVirtualKey); resolved {
+				break
+			}
 		}
-		if cred.kind == credentialJWT {
-			// Enterprise auth is not available in the open-source edition.
-			// Real JWT verification lives in torana-edge/private-nucleus.
-			return nil, nil
-		}
-
-		identity, ok := resolveIdentity(cred, verifyVirtualKey)
-		if !ok {
+		if !resolved {
 			return nil, nil
 		}
 		applyIdentity(meta, identity)
@@ -130,36 +130,48 @@ func looksLikeJWT(token string) bool {
 //  1. A torana-issued key, in EITHER Authorization or X-Api-Key. The host can
 //     verify it, so it wins wherever it was sent — a client that puts it in
 //     Authorization is not doing anything unusual.
-//  2. A structurally valid JWT in Authorization. A real identity claim, and
-//     terminal: falling through to an unverified header when one was presented
-//     would be a downgrade.
-//  3. X-Torana-User — a trusted-header assertion with no verification at all,
-//     so it comes last.
+//  2. A structurally valid JWT in Authorization.
+//  3. X-Torana-User — a trusted-header assertion with no verification at all.
 //
 // Anything else, in either header, is a SECRET rather than an identity and does
 // not stop the search. Letting a provider key suppress X-Torana-User would mask
 // the identity on exactly the requests that carry both.
-func readCredential(headers map[string]any) credential {
+//
+// Candidates are returned in order rather than one winner, because the JWT case
+// cannot be settled by looking at the header alone. "Bearer <three dotted
+// segments>" is a JWT by shape, but a Google identity token or a
+// service-account assertion to a Vertex-shaped upstream has that shape and is a
+// SECRET. This edition cannot verify a JWT either way, so treating one as
+// terminal buys nothing and costs the identity a caller did supply — the hook
+// simply tries each candidate until one resolves.
+//
+// An edition that CAN verify JWTs should stop at the first that resolves, which
+// is what trying them in order already does.
+func readCredential(headers map[string]any) []credential {
 	bearer := ""
 	if authHeader, ok := headers["Authorization"].(string); ok && strings.HasPrefix(authHeader, "Bearer ") {
 		bearer = strings.TrimPrefix(authHeader, "Bearer ")
 	}
 	apiKey, _ := headers["X-Api-Key"].(string)
 
+	var candidates []credential
 	for _, token := range []string{bearer, apiKey} {
 		if strings.HasPrefix(token, virtualKeyPrefix) {
-			return credential{kind: credentialVirtualKey, token: token}
+			candidates = append(candidates, credential{kind: credentialVirtualKey, token: token})
+			break
 		}
 	}
 	if looksLikeJWT(bearer) {
-		return credential{kind: credentialJWT, token: bearer}
+		candidates = append(candidates, credential{kind: credentialJWT, token: bearer})
 	}
 	if toranaUser, ok := headers["X-Torana-User"].(string); ok && toranaUser != "" {
 		team, _ := headers["X-Torana-Team"].(string)
 		tenant, _ := headers["X-Torana-Tenant"].(string)
-		return credential{kind: credentialTrustedUser, token: toranaUser, team: team, tenant: tenant}
+		candidates = append(candidates, credential{
+			kind: credentialTrustedUser, token: toranaUser, team: team, tenant: tenant,
+		})
 	}
-	return credential{}
+	return candidates
 }
 
 // resolveIdentity turns a credential into an identity, returning false when it

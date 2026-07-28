@@ -9,6 +9,15 @@ import "testing"
 // and not an access control. That makes tests MORE important, not less: people
 // copy references.
 
+// first returns the highest-precedence candidate, or a zero credential when
+// there is none.
+func first(headers map[string]any) credential {
+	if c := readCredential(headers); len(c) > 0 {
+		return c[0]
+	}
+	return credential{}
+}
+
 func TestReadCredentialClassification(t *testing.T) {
 	for name, tc := range map[string]struct {
 		headers  map[string]any
@@ -23,43 +32,31 @@ func TestReadCredentialClassification(t *testing.T) {
 			map[string]any{"X-Api-Key": "sk-torana-123"},
 			credentialVirtualKey, "sk-torana-123",
 		},
+		"virtual key in Authorization is still a virtual key": {
+			map[string]any{"Authorization": "Bearer sk-torana-123"},
+			credentialVirtualKey, "sk-torana-123",
+		},
 		"trusted user header": {
 			map[string]any{"X-Torana-User": "alice"},
 			credentialTrustedUser, "alice",
 		},
-		// A provider key is not an identity. Treating it as one would attach
-		// an identity Torana never verified, derived from a secret that says
-		// nothing about who the caller is.
+		// A provider key is not an identity. Treating it as one would attach an
+		// identity Torana never verified, from a secret that says nothing about
+		// who the caller is.
 		"upstream provider key is not a credential": {
 			map[string]any{"X-Api-Key": "sk-proj-openai-key"},
 			credentialNone, "",
-		},
-		// ...and it must not SUPPRESS the header that is an identity. This is
-		// the shape that matters in practice: a harness sends its provider key
-		// and Torana's user header on the same request.
-		"upstream provider key does not mask the user header": {
-			map[string]any{"X-Api-Key": "sk-proj-openai-key", "X-Torana-User": "alice"},
-			credentialTrustedUser, "alice",
-		},
-		// The commonest shape of all, and the one the previous fix missed: an
-		// OpenAI-shaped client puts its provider key in Authorization, not
-		// X-Api-Key. Treating every bearer token as an identity claim meant
-		// this yielded nothing.
-		"provider key in Authorization does not mask the user header": {
-			map[string]any{"Authorization": "Bearer sk-proj-openai-key", "X-Torana-User": "alice"},
-			credentialTrustedUser, "alice",
 		},
 		"opaque bearer token is not an identity": {
 			map[string]any{"Authorization": "Bearer opaque-secret"},
 			credentialNone, "",
 		},
-		// A torana-issued key is verifiable wherever it was sent.
-		"virtual key in Authorization is still a virtual key": {
-			map[string]any{"Authorization": "Bearer sk-torana-123"},
-			credentialVirtualKey, "sk-torana-123",
+		"upstream provider key does not mask the user header": {
+			map[string]any{"X-Api-Key": "sk-proj-openai-key", "X-Torana-User": "alice"},
+			credentialTrustedUser, "alice",
 		},
-		"empty api key does not mask the user header": {
-			map[string]any{"X-Api-Key": "", "X-Torana-User": "alice"},
+		"provider key in Authorization does not mask the user header": {
+			map[string]any{"Authorization": "Bearer sk-proj-openai-key", "X-Torana-User": "alice"},
 			credentialTrustedUser, "alice",
 		},
 		"no headers":                   {map[string]any{}, credentialNone, ""},
@@ -67,9 +64,13 @@ func TestReadCredentialClassification(t *testing.T) {
 		"empty trusted user":           {map[string]any{"X-Torana-User": ""}, credentialNone, ""},
 		"authorization without Bearer": {map[string]any{"Authorization": "Basic dXNlcjpwdw=="}, credentialNone, ""},
 		"non-string header value":      {map[string]any{"X-Api-Key": 42}, credentialNone, ""},
+		"empty api key does not mask the user header": {
+			map[string]any{"X-Api-Key": "", "X-Torana-User": "alice"},
+			credentialTrustedUser, "alice",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got := readCredential(tc.headers)
+			got := first(tc.headers)
 			if got.kind != tc.wantKind || got.token != tc.wantTok {
 				t.Errorf("got kind=%v token=%q, want kind=%v token=%q",
 					got.kind, got.token, tc.wantKind, tc.wantTok)
@@ -78,12 +79,38 @@ func TestReadCredentialClassification(t *testing.T) {
 	}
 }
 
+// TestJWTDoesNotMaskAnIdentityItCannotVerify — a JWT-shaped bearer may be an
+// identity claim OR an upstream secret (a Google identity token, a
+// service-account assertion), and the header cannot tell them apart. This
+// edition cannot verify either, so stopping at the JWT would discard an
+// identity the caller did supply.
+func TestJWTDoesNotMaskAnIdentityItCannotVerify(t *testing.T) {
+	candidates := readCredential(map[string]any{
+		"Authorization": "Bearer head.payload.sig",
+		"X-Torana-User": "alice",
+	})
+	if len(candidates) != 2 {
+		t.Fatalf("expected the JWT and the user header as candidates, got %+v", candidates)
+	}
+	if candidates[0].kind != credentialJWT {
+		t.Errorf("the JWT should be tried first, got %v", candidates[0].kind)
+	}
+	if candidates[1].kind != credentialTrustedUser || candidates[1].token != "alice" {
+		t.Errorf("the user header should remain available as a fallback, got %+v", candidates[1])
+	}
+
+	// And the JWT itself still does not resolve here.
+	if _, ok := resolveIdentity(candidates[0], nil); ok {
+		t.Error("a JWT must not resolve without verification")
+	}
+}
+
 // A verifiable credential must win over an unverified assertion.
 func TestReadCredentialPrefersVerifiableHeaders(t *testing.T) {
 	// Most verifiable wins. A torana-issued key can be checked with the host;
 	// a JWT cannot be checked at all in this edition, so it does not outrank
 	// one just for arriving in Authorization.
-	got := readCredential(map[string]any{
+	got := first(map[string]any{
 		"Authorization": "Bearer head.payload.sig",
 		"X-Api-Key":     "sk-torana-123",
 		"X-Torana-User": "alice",
@@ -92,7 +119,7 @@ func TestReadCredentialPrefersVerifiableHeaders(t *testing.T) {
 		t.Errorf("a verifiable torana key should beat an unverifiable JWT, got %v", got.kind)
 	}
 
-	got = readCredential(map[string]any{
+	got = first(map[string]any{
 		"X-Api-Key":     "sk-torana-123",
 		"X-Torana-User": "alice",
 	})
@@ -103,7 +130,7 @@ func TestReadCredentialPrefersVerifiableHeaders(t *testing.T) {
 	// A JWT is terminal even though this edition cannot verify it: falling
 	// through to an UNVERIFIED header when a real identity claim was presented
 	// would be a downgrade.
-	got = readCredential(map[string]any{
+	got = first(map[string]any{
 		"Authorization": "Bearer head.payload.sig",
 		"X-Torana-User": "alice",
 	})
@@ -113,7 +140,7 @@ func TestReadCredentialPrefersVerifiableHeaders(t *testing.T) {
 
 	// But an opaque provider secret is not an identity claim, so it must not
 	// suppress one.
-	got = readCredential(map[string]any{
+	got = first(map[string]any{
 		"Authorization": "Bearer sk-proj-openai",
 		"X-Torana-User": "alice",
 	})
@@ -202,7 +229,7 @@ func TestJWTIsNotResolvedInTheOpenSourceEdition(t *testing.T) {
 // X-Torana-Tenant through the same allowlist as X-Torana-User, and reading only
 // the user silently dropped the scope a caller had explicitly set.
 func TestTrustedUserCarriesItsScope(t *testing.T) {
-	cred := readCredential(map[string]any{
+	cred := first(map[string]any{
 		"X-Torana-User":   "alice",
 		"X-Torana-Team":   "platform",
 		"X-Torana-Tenant": "acme",
@@ -219,7 +246,7 @@ func TestTrustedUserCarriesItsScope(t *testing.T) {
 // Without a tenant header the default still applies, so an unscoped assertion
 // keeps working.
 func TestTrustedUserWithoutScopeUsesTheDefaultTenant(t *testing.T) {
-	cred := readCredential(map[string]any{"X-Torana-User": "alice"})
+	cred := first(map[string]any{"X-Torana-User": "alice"})
 	id, ok := resolveIdentity(cred, nil)
 	if !ok || id.tenantID != "default-tenant" || id.userID != "alice" {
 		t.Errorf("got %+v ok=%v", id, ok)
