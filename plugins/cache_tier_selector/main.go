@@ -25,9 +25,9 @@
 // {"type":"ephemeral","ttl":"1h"} on the next invalidates the very entry the
 // plugin is trying to preserve, and pays a fresh write for the privilege.
 //
-// So the decision is made once per cache prefix and then never revisited. A new
-// prefix means the old entry is already dead, which is the only safe moment to
-// choose again. A plugin that re-decided per turn would cost money rather than
+// So the decision is fixed for the lifetime of the provider cache entry. It may
+// be reconsidered only after that tier's TTL has elapsed, when no live entry can
+// be invalidated. A plugin that re-decided per turn would cost money rather than
 // save it, and would fail Torana's determinism test — which is the test that
 // exists to catch precisely this class of bug.
 package main
@@ -36,6 +36,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	"github.com/torana-edge/torana-plugin-sdk/pb"
@@ -71,15 +72,22 @@ type config struct {
 	// longer tier is bought. Defaults to 30% of the long tier's TTL, which
 	// keeps a single unusual pause from committing a short conversation.
 	MinGapSecondsForLongTier int `json:"min_gap_seconds_for_long_tier"`
+	// ActivityRetentionDays bounds per-conversation history. Decisions have a
+	// shorter natural lifetime: once the provider cache tier expires, changing
+	// its marker cannot invalidate a live cache entry.
+	ActivityRetentionDays int `json:"activity_retention_days"`
 }
 
 func loadConfig() config {
-	cfg := config{Mode: "auto"}
+	cfg := config{Mode: "auto", ActivityRetentionDays: 30}
 	if raw := sdk.PluginConfig(); raw != "" {
 		_ = json.Unmarshal([]byte(raw), &cfg)
 	}
 	if cfg.Mode == "" {
 		cfg.Mode = "auto"
+	}
+	if cfg.ActivityRetentionDays <= 0 {
+		cfg.ActivityRetentionDays = 30
 	}
 	return cfg
 }
@@ -112,31 +120,54 @@ func init() {
 			return nil, nil
 		}
 
+		now, clockErr := sdk.Now()
+
 		// A decision already exists for this exact prefix — reapply it
-		// verbatim. This is the stickiness that keeps the cache entry alive.
+		// verbatim until the provider cache itself has expired.
 		var prior decision
-		if found, _ := sdk.StateGetJSON("decision/"+prefixKey, &prior); found {
-			return applyMarker(req, idx, prior.Marker), nil
+		decisionKey := "decision/" + prefixKey
+		found, stateErr := sdk.StateGetJSON(decisionKey, &prior)
+		if stateErr != nil {
+			logStateError("read "+decisionKey, stateErr)
+			return nil, nil
+		}
+		if found {
+			if clockErr != nil || !decisionExpired(prior, now) {
+				return applyMarker(req, idx, prior.Marker), nil
+			}
+			if err := sdk.StateSet(decisionKey, ""); err != nil {
+				logStateError("delete expired "+decisionKey, err)
+				return nil, nil
+			}
 		}
 
 		// Without a clock there is no gap history to reason from, so the
 		// conversation keeps whatever tier the harness asked for.
-		now, err := sdk.Now()
-		if err != nil {
+		if clockErr != nil {
 			return nil, nil
 		}
-		act := recordActivity(meta.ConversationID, now)
+		cleanupExpiredState(now, cfg)
+		act, err := recordActivity(meta.ConversationID, now)
+		if err != nil {
+			logStateError("record activity", err)
+			return nil, nil
+		}
 
 		marker, ttl := chooseTier(cfg, pricing, act, now)
 		if marker == nil {
 			return nil, nil
 		}
 
-		_ = sdk.StateSetJSON("decision/"+prefixKey, decision{
+		if err := sdk.StateSetJSON(decisionKey, decision{
 			Marker:          marker,
 			TierTTL:         ttl,
 			DecidedAtMillis: now,
-		})
+		}); err != nil {
+			// Applying a marker that was not persisted would allow the next
+			// identical request to choose different bytes and bust the cache.
+			logStateError("persist "+decisionKey, err)
+			return nil, nil
+		}
 		_, _ = sdk.HostCall("torana_plugin_counter", counterPayload("tier_decisions", 1))
 
 		return applyMarker(req, idx, marker), nil
@@ -178,13 +209,15 @@ func chooseTier(cfg config, pricing sdk.CachePricing, act activity, now int64) (
 }
 
 // recordActivity updates and returns this conversation's gap history.
-func recordActivity(convKey string, now int64) activity {
+func recordActivity(convKey string, now int64) (activity, error) {
 	var act activity
 	if convKey == "" || now == 0 {
-		return act
+		return act, nil
 	}
 	key := "activity/" + convKey
-	_, _ = sdk.StateGetJSON(key, &act)
+	if _, err := sdk.StateGetJSON(key, &act); err != nil {
+		return act, err
+	}
 
 	if act.LastSeenMillis > 0 {
 		if gap := now - act.LastSeenMillis; gap > act.LongestGapMillis {
@@ -193,8 +226,80 @@ func recordActivity(convKey string, now int64) activity {
 	}
 	act.LastSeenMillis = now
 	act.Turns++
-	_ = sdk.StateSetJSON(key, act)
-	return act
+	if err := sdk.StateSetJSON(key, act); err != nil {
+		return act, err
+	}
+	return act, nil
+}
+
+func decisionExpired(value decision, now int64) bool {
+	if now <= 0 || value.DecidedAtMillis <= 0 || value.TierTTL <= 0 {
+		return false
+	}
+	return now >= value.DecidedAtMillis+int64(value.TierTTL)*1000
+}
+
+// cleanupExpiredState runs at most hourly and deletes a bounded number of keys
+// per request, so a large legacy store cannot turn one request into a long
+// pause. Repeated traffic eventually drains the whole backlog.
+func cleanupExpiredState(now int64, cfg config) {
+	const (
+		cleanupKey      = "_cleanup_at"
+		cleanupInterval = int64(60 * 60 * 1000)
+		maxDeletes      = 100
+	)
+	var last int64
+	if found, err := sdk.StateGetJSON(cleanupKey, &last); err != nil {
+		logStateError("read cleanup marker", err)
+		return
+	} else if found && now-last < cleanupInterval {
+		return
+	}
+	keys, err := sdk.StateKeys()
+	if err != nil {
+		logStateError("list state for cleanup", err)
+		return
+	}
+	retentionMillis := int64(cfg.ActivityRetentionDays) * 24 * 60 * 60 * 1000
+	deleted := 0
+	for _, key := range keys {
+		if deleted >= maxDeletes {
+			break
+		}
+		expired := false
+		switch {
+		case strings.HasPrefix(key, "decision/"):
+			var value decision
+			found, readErr := sdk.StateGetJSON(key, &value)
+			if readErr != nil {
+				logStateError("read "+key, readErr)
+				continue
+			}
+			expired = found && decisionExpired(value, now)
+		case strings.HasPrefix(key, "activity/"):
+			var value activity
+			found, readErr := sdk.StateGetJSON(key, &value)
+			if readErr != nil {
+				logStateError("read "+key, readErr)
+				continue
+			}
+			expired = found && value.LastSeenMillis > 0 && now-value.LastSeenMillis >= retentionMillis
+		}
+		if expired {
+			if err := sdk.StateSet(key, ""); err != nil {
+				logStateError("delete "+key, err)
+				continue
+			}
+			deleted++
+		}
+	}
+	if err := sdk.StateSetJSON(cleanupKey, now); err != nil {
+		logStateError("persist cleanup marker", err)
+	}
+}
+
+func logStateError(operation string, err error) {
+	sdk.Log(fmt.Sprintf("cache_tier_selector: %s: %v", operation, err), sdk.LogLevelInfo)
 }
 
 // applyMarker sets the breakpoint marker on the message at idx. Returning the

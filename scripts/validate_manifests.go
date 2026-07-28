@@ -10,15 +10,15 @@ import (
 )
 
 type manifest struct {
-	SchemaVersion        int    `json:"schema_version"`
-	ID                   string `json:"id"`
-	Name                 string `json:"name"`
-	Version              string `json:"version"`
-	ABIVersion           string `json:"abi_version"`
-	MinimumToranaVersion string `json:"minimum_torana_version"`
-	FailureMode          string `json:"failure_mode"`
-	Repository           string `json:"repository"`
-	Hooks                []struct {
+	SchemaVersion    int      `json:"schema_version"`
+	ID               string   `json:"id"`
+	Name             string   `json:"name"`
+	Version          string   `json:"version"`
+	ABIVersion       string   `json:"abi_version"`
+	FailureMode      string   `json:"failure_mode"`
+	Repository       string   `json:"repository"`
+	RequiresUpstream []string `json:"requires_upstream"`
+	Hooks            []struct {
 		Name string `json:"name"`
 	} `json:"hooks"`
 	Permissions []struct {
@@ -100,7 +100,7 @@ func main() {
 		dir := filepath.Join(os.Args[1], entry.Name())
 		var m manifest
 		readJSON(filepath.Join(dir, "plugin.json"), &m)
-		if m.SchemaVersion != 1 || m.ID != "torana/"+entry.Name() || m.Name != entry.Name() || !semver.MatchString(m.Version) || m.ABIVersion != "v1" || !semver.MatchString(m.MinimumToranaVersion) {
+		if m.SchemaVersion != 1 || m.ID != "torana/"+entry.Name() || m.Name != entry.Name() || !semver.MatchString(m.Version) || m.ABIVersion != "v1" {
 			panic(fmt.Sprintf("%s: incomplete v1 manifest", entry.Name()))
 		}
 		if m.Repository != "https://github.com/torana-edge/torana-plugins" {
@@ -121,6 +121,12 @@ func main() {
 				panic(fmt.Sprintf("%s: invalid or duplicate permission %q", entry.Name(), permission.Name))
 			}
 			seen["permission:"+permission.Name] = true
+		}
+		for _, requiredID := range m.RequiresUpstream {
+			if strings.TrimSpace(requiredID) == "" || requiredID == m.ID || seen["requires:"+requiredID] {
+				panic(fmt.Sprintf("%s: invalid or duplicate requires_upstream %q", entry.Name(), requiredID))
+			}
+			seen["requires:"+requiredID] = true
 		}
 		var schema map[string]any
 		readJSON(filepath.Join(dir, "schema.json"), &schema)

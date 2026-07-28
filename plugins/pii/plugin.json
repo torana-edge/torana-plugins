@@ -4,12 +4,11 @@
   "name": "pii",
   "version": "0.1.0",
   "abi_version": "v1",
-  "minimum_torana_version": "0.1.0",
   "failure_mode": "block",
   "repository": "https://github.com/torana-edge/torana-plugins",
   "description": "Scans tool results through a local model + regex pre-filter and blocks the request if PII is detected",
   "hooks": [
-    {"name": "run_before_request", "priority": 175}
+    {"name": "run_before_request"}
   ],
   "permissions": [
     {"name": "env.cache_get", "description": "Skip re-scanning tool results already cleared this session"},

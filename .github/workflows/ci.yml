@@ -47,6 +47,12 @@ jobs:
           go-version: '1.26.x'
       - working-directory: torana-plugins
         run: ./scripts/test.sh
+      - name: Vulnerability scan every plugin module
+        working-directory: torana-plugins
+        run: |
+          for dir in plugins/*/; do
+            (cd "$dir" && go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...)
+          done
       # Every plugin in the tree, not a hand-maintained list. The list said seven
       # while the repository held nine, so cache_warmer and cache_tier_selector
       # were never built here and never reached the conformance test below — a

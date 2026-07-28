@@ -4,14 +4,12 @@
   "name": "auth",
   "version": "0.1.0",
   "abi_version": "v1",
-  "minimum_torana_version": "0.1.0",
   "failure_mode": "pass",
   "repository": "https://github.com/torana-edge/torana-plugins",
   "description": "Enterprise Gateway auth normalization. NOT published to the public plugin registry and not a general-purpose authentication plugin \u2014 it is a reference for the capability surface only. Do not deploy it as an access control.",
   "hooks": [
     {
-      "name": "run_before_request",
-      "priority": 100
+      "name": "run_before_request"
     }
   ],
   "permissions": [
