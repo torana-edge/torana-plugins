@@ -83,3 +83,25 @@ func TestFingerprintIgnoresContentAfterTheBreakpoint(t *testing.T) {
 		t.Errorf("an unmarked message after the breakpoint changed the fingerprint:\n  %q\n  %q", before, got)
 	}
 }
+
+func TestDecisionExpiresWithProviderTier(t *testing.T) {
+	value := decision{DecidedAtMillis: 1_000, TierTTL: 300}
+	if decisionExpired(value, 300_999) {
+		t.Fatal("decision expired before its provider cache tier")
+	}
+	if !decisionExpired(value, 301_000) {
+		t.Fatal("decision remained sticky after its provider cache tier expired")
+	}
+}
+
+func TestDecisionWithoutUsableClockOrTTLDoesNotExpire(t *testing.T) {
+	for _, value := range []decision{
+		{},
+		{DecidedAtMillis: 1_000},
+		{TierTTL: 300},
+	} {
+		if decisionExpired(value, 999_999) {
+			t.Errorf("incomplete decision unexpectedly expired: %+v", value)
+		}
+	}
+}

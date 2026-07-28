@@ -27,7 +27,6 @@ const cleanCachePrefix = "pii_clean:v2"
 type piiConfig struct {
 	Provider     string   `json:"provider"`       // local-model provider (required to enable the model scan)
 	Model        string   `json:"model"`          // model name for the scan
-	APIKeyEnv    string   `json:"api_key_env"`    // optional key env for that provider
 	Tools        []string `json:"tools"`          // tool-name allowlist; empty or ["*"] = all tool results
 	OnError      string   `json:"on_error"`       // "block" (default, fail-closed) | "allow" (fail-open)
 	MaxScanChars int      `json:"max_scan_chars"` // cap on model-scan input; 0 = unbounded
@@ -211,7 +210,6 @@ func modelScan(content, toolName string) ([]finding, error) {
 	payload, _ := json.Marshal(map[string]any{
 		"provider":      cfg.Provider,
 		"model":         cfg.Model,
-		"api_key_env":   cfg.APIKeyEnv,
 		"system_prompt": piiSystemPrompt,
 		"user_prompt":   "Tool: " + toolName + "\n\nOutput to scan:\n" + scanContent,
 	})

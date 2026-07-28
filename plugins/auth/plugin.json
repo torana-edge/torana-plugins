@@ -10,8 +10,7 @@
   "description": "Enterprise Gateway auth normalization. NOT published to the public plugin registry and not a general-purpose authentication plugin \u2014 it is a reference for the capability surface only. Do not deploy it as an access control.",
   "hooks": [
     {
-      "name": "run_before_request",
-      "priority": 100
+      "name": "run_before_request"
     }
   ],
   "permissions": [

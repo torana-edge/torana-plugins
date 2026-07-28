@@ -9,8 +9,8 @@
   "repository": "https://github.com/torana-edge/torana-plugins",
   "description": "Keeps a chosen conversation's prompt cache alive across an idle gap. Opt-in per conversation and bounded by a deadline and a break-even refresh budget, because refreshing forever costs more than the cache miss it avoids.",
   "hooks": [
-    {"name": "run_before_request", "priority": 200},
-    {"name": "run_on_tick", "priority": 200}
+    {"name": "run_before_request"},
+    {"name": "run_on_tick"}
   ],
   "permissions": [
     {"name": "env.background_tick", "description": "Refresh caches while no request is in flight — the only time a cache can lapse"},

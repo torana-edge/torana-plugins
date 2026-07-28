@@ -16,6 +16,14 @@
       "title": "Min Gap For Long Tier (seconds)",
       "default": 0,
       "description": "How long an observed pause must be before the longer tier is bought. 0 uses 30% of that tier's lifetime, so one unusual pause does not commit a short conversation."
+    },
+    "activity_retention_days": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3650,
+      "title": "Activity Retention (days)",
+      "default": 30,
+      "description": "How long to retain per-conversation idle-gap history. Prefix decisions expire automatically with the provider cache tier."
     }
   }
 }

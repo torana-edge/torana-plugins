@@ -8,8 +8,9 @@
   "failure_mode": "pass",
   "repository": "https://github.com/torana-edge/torana-plugins",
   "description": "Cheap-model tool result compaction guided by the intent plugin's cache; alternative to keyword_compactor — run ONE of the two, after 'intent'",
+  "requires_upstream": ["torana/intent"],
   "hooks": [
-    {"name": "run_before_request", "priority": 200}
+    {"name": "run_before_request"}
   ],
   "permissions": [
     {"name": "env.cache_get", "description": "Check intent and compaction cache"},
