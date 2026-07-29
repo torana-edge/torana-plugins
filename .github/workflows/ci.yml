@@ -83,3 +83,13 @@ jobs:
       - name: Official-plugin behaviour suite
         working-directory: torana-plugins
         run: ./scripts/verify-behaviour.sh ../torana-edge dist
+      # Torana binds an operator's approval to a digest over the bundle. If the
+      # same source can produce two different .wasm files, reinstalling
+      # identical code invalidates that approval, and an operator who reapproves
+      # out of habit is trained to click through the one control protecting
+      # them. This builds each plugin from two different directories, because
+      # the build path is the variable that matters — building twice from one
+      # path agrees with itself whether or not -trimpath is passed.
+      - name: Reproducible plugin digests
+        working-directory: torana-plugins
+        run: ./scripts/verify-reproducible.sh
