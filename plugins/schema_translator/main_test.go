@@ -2,13 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 
 	"google.golang.org/protobuf/proto"
 
-	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 	"github.com/torana-edge/torana-plugin-sdk/sdktest"
 )
@@ -299,9 +299,15 @@ func TestMutationsSurviveReversal(t *testing.T) {
 			}
 			mutations := translateSchema(schema, nil, siteRoot)
 
-			reversed, err := reverseTranslate("tool", tc.emitted, mutations)
+			reversed, changed, err := reverseTranslate("tool", tc.emitted, mutations)
 			if err != nil {
 				t.Fatalf("reverseTranslate: %v", err)
+			}
+			// Every recorded mutation must actually convert when its field is
+			// present; a semantic no-op is only legal when nothing was
+			// recorded (the array-item rows below).
+			if len(mutations) > 0 && !changed {
+				t.Fatalf("conversion did not occur: %q", tc.emitted)
 			}
 
 			var got, want map[string]any
@@ -319,16 +325,21 @@ func TestMutationsSurviveReversal(t *testing.T) {
 	}
 }
 
-// TestArrayItemConversionWouldNotSurviveReversal pins WHY array items are left
-// alone: an each-step reversal requires each element to be a MAP.
-func TestArrayItemConversionWouldNotSurviveReversal(t *testing.T) {
-	args := `{"rows":[[{"key":"a","value":"1"}]]}`
-	reversed, err := reverseTranslate("tool", args, []mutationPath{{steps: []pathStep{{field: "rows", each: true}}}})
-	if err != nil {
-		t.Fatalf("reverseTranslate: %v", err)
-	}
-	if reversed != args {
-		t.Fatalf("reversal is expected to be a no-op on list-of-lists; got %s", reversed)
+// TestTerminalEachPathIsRejected pins WHY array items are left alone: a path
+// ending in each:true is not a path this translator generates (conversions are
+// only recorded at property sites, whose terminal step is each:false). If a
+// future edit made the translator convert an array item, the recorded path
+// would be structurally invalid and reversal must REFUSE it rather than
+// invoking the old per-element heuristic.
+func TestTerminalEachPathIsRejected(t *testing.T) {
+	for _, args := range []string{
+		`{"rows":[[{"key":"a","value":"1"}]]}`,
+		`{"rows":[{"a":"1"}]}`,
+	} {
+		_, _, err := reverseTranslate("tool", args, []mutationPath{{steps: []pathStep{{field: "rows", each: true}}}})
+		if err == nil {
+			t.Fatalf("terminal each:true path must be rejected, args=%s", args)
+		}
 	}
 }
 
@@ -975,4 +986,407 @@ func TestEnvLogNotUsed(t *testing.T) {
 	}
 }
 
-var _ = sdk.PassRequest
+// ==========================================================================
+// Round-1 correction pins (F1-F6)
+// ==========================================================================
+
+// TestToolDefPreservationOnReplacement — replacement clones every ToolDef, so
+// the host/customer fields (description, strict, cache_control_json) survive,
+// and an unrelated tool remains COMPLETELY unchanged — raw bytes included.
+func TestToolDefPreservationOnReplacement(t *testing.T) {
+	req := &pbv2.ChatRequest{Tools: []*pbv2.ToolDef{
+		{
+			Name:             "convert",
+			Description:      "converts things",
+			Strict:           true,
+			CacheControlJson: []byte(`{"ttl":60}`),
+			ParametersJson:   []byte(`{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}}}}`),
+		},
+		{
+			Name:             "other",
+			Description:      "untouched",
+			Strict:           true,
+			CacheControlJson: []byte(`{"ttl":3600}`),
+			ParametersJson:   []byte(`{"additionalProperties":false,"properties":{"p":{"type":"string"}},"type":"object"}`),
+		},
+	}}
+	h := newHarness(t)
+	res := h.BeforeRequest(req)
+	if res.Err != nil || res.Request == nil {
+		t.Fatalf("expected replacement, err=%v", res.Err)
+	}
+	converted := res.Request.Tools[0]
+	if converted.Description != "converts things" || !converted.Strict || string(converted.CacheControlJson) != `{"ttl":60}` {
+		t.Fatalf("converted tool lost host/customer fields: %+v", converted)
+	}
+	var s map[string]any
+	if err := json.Unmarshal(converted.ParametersJson, &s); err != nil {
+		t.Fatal(err)
+	}
+	if s["properties"].(map[string]any)["env"].(map[string]any)["type"] != "array" {
+		t.Fatalf("converted tool was not translated: %v", s)
+	}
+	other := res.Request.Tools[1]
+	if other.Description != "untouched" || !other.Strict || string(other.CacheControlJson) != `{"ttl":3600}` {
+		t.Fatalf("unrelated tool lost fields: %+v", other)
+	}
+	if string(other.ParametersJson) != `{"additionalProperties":false,"properties":{"p":{"type":"string"}},"type":"object"}` {
+		t.Fatalf("unrelated tool was rewritten: %s", other.ParametersJson)
+	}
+}
+
+// chainObject builds an object chain of the given depth with two bare-object
+// siblings (x, y) converted at the leaf: depth 0 is root{x,y}, depth 1 is
+// root{p0:{x,y}}, and so on.
+func chainObject(depth int) map[string]any {
+	leaf := map[string]any{"type": "object", "properties": map[string]any{
+		"x": map[string]any{"type": "object"},
+		"y": map[string]any{"type": "object"},
+	}}
+	cur := leaf
+	for i := depth - 1; i >= 0; i-- {
+		cur = map[string]any{"type": "object", "properties": map[string]any{fmt.Sprintf("p%d", i): cur}}
+	}
+	return cur
+}
+
+func chainJSON(depth int, leaf string) string {
+	out := leaf
+	for i := depth - 1; i >= 0; i-- {
+		out = fmt.Sprintf(`{"p%d":%s}`, i, out)
+	}
+	return out
+}
+
+// TestGeneratedNestedPathsReverseAndAreIndependent — reference-model coverage
+// over nesting depths 0..8 with two sibling conversions at every depth. Every
+// generated path must reverse a representative value back to the declared
+// tool-facing value, and sibling paths must not share mutable storage.
+func TestGeneratedNestedPathsReverseAndAreIndependent(t *testing.T) {
+	for depth := 0; depth <= 8; depth++ {
+		t.Run(fmt.Sprintf("object-chain-depth-%d", depth), func(t *testing.T) {
+			mutations := translateSchema(chainObject(depth), nil, siteRoot)
+			if len(mutations) != 2 {
+				t.Fatalf("want two sibling mutations at depth %d, got %d", depth, len(mutations))
+			}
+			if len(mutations[0].steps) != depth+1 || len(mutations[1].steps) != depth+1 {
+				t.Fatalf("path length = %d/%d, want %d", len(mutations[0].steps), len(mutations[1].steps), depth+1)
+			}
+			if last := mutations[0].steps[len(mutations[0].steps)-1].field; last != "x" {
+				t.Fatalf("first sibling is %q, want x", last)
+			}
+			if last := mutations[1].steps[len(mutations[1].steps)-1].field; last != "y" {
+				t.Fatalf("second sibling is %q, want y", last)
+			}
+			// Storage independence: mutating one path must not affect the other.
+			origFirst := mutations[0].steps[0].field
+			mutations[0].steps[0].field = "MUTATED"
+			if mutations[1].steps[0].field == "MUTATED" {
+				t.Fatal("sibling paths share mutable storage")
+			}
+			mutations[0].steps[0].field = origFirst
+
+			args := chainJSON(depth, `{"x":[{"key":"kx","value":1}],"y":[{"key":"ky","value":true}]}`)
+			want := chainJSON(depth, `{"x":{"kx":1},"y":{"ky":true}}`)
+			reversed, changed, err := reverseTranslate("t", args, mutations)
+			if err != nil {
+				t.Fatalf("depth %d: reverse: %v", depth, err)
+			}
+			if !changed {
+				t.Fatalf("depth %d: no conversion reported", depth)
+			}
+			var gotM, wantM map[string]any
+			if err := json.Unmarshal([]byte(reversed), &gotM); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(want), &wantM); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(gotM, wantM) {
+				t.Fatalf("depth %d round trip:\n  got  %s\n  want %s", depth, reversed, want)
+			}
+		})
+	}
+}
+
+// TestGeneratedArrayVariantsReverse — arrays nested in objects, objects
+// nested in arrays, two nested arrays, and legal dotted/[]/empty/unicode
+// field names; each generated path reverses correctly (pins the F2 array
+// double-record fix: the each-step REPLACES the scalar step).
+func TestGeneratedArrayVariantsReverse(t *testing.T) {
+	cases := []struct {
+		name   string
+		schema string
+		args   string
+		want   string
+	}{
+		{"object-in-array",
+			`{"type":"object","properties":{"rows":{"type":"array","items":{"type":"object","properties":{"x":{"type":"object"},"y":{"type":"object"}}}}}}`,
+			`{"rows":[{"x":[{"key":"a","value":1}],"y":[{"key":"b","value":2}]}]}`,
+			`{"rows":[{"x":{"a":1},"y":{"b":2}}]}`},
+		{"array-in-object-chain",
+			`{"type":"object","properties":{"p0":{"type":"object","properties":{"p1":{"type":"object","properties":{"list":{"type":"array","items":{"type":"object","properties":{"x":{"type":"object"},"y":{"type":"object"}}}}}}}}}}`,
+			`{"p0":{"p1":{"list":[{"x":[{"key":"a","value":1}],"y":[{"key":"b","value":2}]}]}}}`,
+			`{"p0":{"p1":{"list":[{"x":{"a":1},"y":{"b":2}}]}}}`},
+		{"two-nested-arrays",
+			`{"type":"object","properties":{"outer":{"type":"array","items":{"type":"object","properties":{"inner":{"type":"array","items":{"type":"object","properties":{"x":{"type":"object"},"y":{"type":"object"}}}}}}}}}`,
+			`{"outer":[{"inner":[{"x":[{"key":"a","value":1}],"y":[{"key":"b","value":2}]}]}]}`,
+			`{"outer":[{"inner":[{"x":{"a":1},"y":{"b":2}}]}]}`},
+		{"exotic field names",
+			`{"type":"object","properties":{"a.b":{"type":"object","properties":{"c[]":{"type":"object","properties":{"":{"type":"object","properties":{"名前":{"type":"object"},"x":{"type":"object"}}}}}}}}}`,
+			`{"a.b":{"c[]":{"":{"名前":[{"key":"n","value":"1"}],"x":[{"key":"v","value":2}]}}}}`,
+			`{"a.b":{"c[]":{"":{"名前":{"n":"1"},"x":{"v":2}}}}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var schema map[string]any
+			if err := json.Unmarshal([]byte(tc.schema), &schema); err != nil {
+				t.Fatal(err)
+			}
+			mutations := translateSchema(schema, nil, siteRoot)
+			if len(mutations) != 2 {
+				t.Fatalf("want two mutations, got %d: %+v", len(mutations), mutations)
+			}
+			// The first step of every array-bearing path must be the each step
+			// (never the scalar-then-each double record).
+			for i, m := range mutations {
+				for j, st := range m.steps {
+					if st.each && j > 0 && m.steps[j-1].field == st.field && !m.steps[j-1].each {
+						t.Fatalf("mutation %d records %q twice (scalar then each): %+v", i, st.field, m.steps)
+					}
+				}
+			}
+			reversed, changed, err := reverseTranslate("t", tc.args, mutations)
+			if err != nil {
+				t.Fatalf("reverse: %v", err)
+			}
+			if !changed {
+				t.Fatal("no conversion reported")
+			}
+			var gotM, wantM map[string]any
+			if err := json.Unmarshal([]byte(reversed), &gotM); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(tc.want), &wantM); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(gotM, wantM) {
+				t.Fatalf("round trip:\n  got  %s\n  want %s", reversed, tc.want)
+			}
+		})
+	}
+}
+
+// TestReverseTranslateStrictClasses — every malformed provider-output class
+// terminates; every legal class converts exactly (F3).
+func TestReverseTranslateStrictClasses(t *testing.T) {
+	paths := []mutationPath{{steps: []pathStep{{field: "env", each: false}}}}
+	for name, args := range map[string]string{
+		"missing value":       `{"env":[{"key":"A"}]}`,
+		"duplicate keys":      `{"env":[{"key":"A","value":"1"},{"key":"A","value":"2"}]}`,
+		"extra member":        `{"env":[{"key":"A","value":"1","x":2}]}`,
+		"non-object item":     `{"env":[1]}`,
+		"key non-string":      `{"env":[{"key":5,"value":"1"}]}`,
+		"wrong container":     `{"env":"str"}`,
+		"null args":           `null`,
+		"array args":          `[1,2]`,
+		"malformed":           `{"env": `,
+		"duplicate JSON keys": `{"env":[{"key":"A","value":"1"}],"env":[{"key":"B","value":"2"}]}`,
+		"empty bytes":         ``,
+	} {
+		t.Run("reject "+name, func(t *testing.T) {
+			if _, _, err := reverseTranslate("t", args, paths); err == nil {
+				t.Fatalf("must terminate: %q", args)
+			}
+		})
+	}
+	for name, tc := range map[string]struct {
+		args    string
+		want    string
+		changed bool
+	}{
+		"empty key preserved": {`{"env":[{"key":"","value":"v"}]}`, `{"env":{"":"v"}}`, true},
+		"empty array":         {`{"env":[]}`, `{"env":{}}`, true},
+		"null value":          {`{"env":[{"key":"A","value":null}]}`, `{"env":{"A":null}}`, true},
+		"number value":        {`{"env":[{"key":"A","value":42}]}`, `{"env":{"A":42}}`, true},
+		"absent path":         {`{"other":1}`, `{"other":1}`, false},
+		"empty object":        {`{}`, `{}`, false},
+	} {
+		t.Run("accept "+name, func(t *testing.T) {
+			got, changed, err := reverseTranslate("t", tc.args, paths)
+			if err != nil {
+				t.Fatalf("must succeed: %v", err)
+			}
+			if changed != tc.changed {
+				t.Fatalf("changed = %v, want %v", changed, tc.changed)
+			}
+			var gotM, wantM map[string]any
+			if err := json.Unmarshal([]byte(got), &gotM); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(tc.want), &wantM); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(gotM, wantM) {
+				t.Fatalf("got %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNonObjectSchemasDoNotPanic — null, array, scalar, malformed, and empty
+// schema bodies, plus nil ToolDef entries, never panic; each is carried
+// untranslated with the empty envelope published (F4).
+func TestNonObjectSchemasDoNotPanic(t *testing.T) {
+	for name, params := range map[string]string{
+		"null":      `null`,
+		"array":     `[1,2]`,
+		"scalar":    `"str"`,
+		"malformed": `{bad`,
+		"empty":     ``,
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			res := h.BeforeRequest(&pbv2.ChatRequest{Tools: []*pbv2.ToolDef{{Name: "t", ParametersJson: []byte(params)}}})
+			if !res.PassedThrough || res.Err != nil {
+				t.Fatalf("expected pass-through, err=%v", res.Err)
+			}
+			if env := publishedEnvelope(t, h); env != `{"version":1,"tools":{}}` {
+				t.Fatalf("envelope = %s", env)
+			}
+		})
+	}
+	t.Run("nil tool entry", func(t *testing.T) {
+		h := newHarness(t)
+		res := h.BeforeRequest(&pbv2.ChatRequest{Tools: []*pbv2.ToolDef{
+			nil,
+			{Name: "ok", ParametersJson: []byte(`{"additionalProperties":false,"properties":{"p":{"type":"string"}},"type":"object"}`)},
+		}})
+		if !res.PassedThrough || res.Err != nil {
+			t.Fatalf("expected pass-through without panic, err=%v", res.Err)
+		}
+		if env := publishedEnvelope(t, h); env != `{"version":1,"tools":{}}` {
+			t.Fatalf("envelope = %s", env)
+		}
+	})
+}
+
+// TestSemanticNoOpPreservesOriginalBytes — a schema whose translation changes
+// nothing semantically (already closed; whitespace; key order; numeric
+// spellings) passes through with its ORIGINAL raw bytes: no canonicalizing
+// rewrite that would bust the provider prompt cache (F4).
+func TestSemanticNoOpPreservesOriginalBytes(t *testing.T) {
+	for name, raw := range map[string]string{
+		"whitespace":       `{ "type":"object", "additionalProperties":false, "properties":{ "path": { "type":"string" } } }`,
+		"key order":        `{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string"}}}`,
+		"numeric spelling": `{"additionalProperties":false,"properties":{"n":{"type":"number","minimum":1.0}},"type":"object"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			req := reqWithTools(raw)
+			res := h.BeforeRequest(req)
+			if !res.PassedThrough || res.Err != nil {
+				t.Fatalf("semantic no-op must pass through, err=%v", res.Err)
+			}
+			if env := publishedEnvelope(t, h); env != `{"version":1,"tools":{}}` {
+				t.Fatalf("envelope = %s", env)
+			}
+			// The input request object was never touched.
+			if string(req.Tools[0].ParametersJson) != raw {
+				t.Fatalf("original raw bytes were canonicalized:\n  got  %s\n  want %s", req.Tools[0].ParametersJson, raw)
+			}
+		})
+	}
+}
+
+// TestUnconstrainedValuesSurvive — a bare object property and
+// additionalProperties:true allow arbitrary JSON values; translation must NOT
+// narrow them to strings, and strict reversal must preserve every shape (F5).
+func TestUnconstrainedValuesSurvive(t *testing.T) {
+	for name, raw := range map[string]string{
+		"bare object":          `{"type":"object","properties":{"m":{"type":"object"}}}`,
+		"additionalProperties": `{"type":"object","properties":{"m":{"type":"object","additionalProperties":true}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			schema, mutations := translate(t, raw)
+			items := schema["properties"].(map[string]any)["m"].(map[string]any)["items"].(map[string]any)
+			value := items["properties"].(map[string]any)["value"].(map[string]any)
+			if _, hasType := value["type"]; hasType {
+				t.Fatalf("unconstrained value was narrowed to type %v", value["type"])
+			}
+			for _, v := range []string{`true`, `42`, `{"deep":[1,2]}`, `["a","b"]`, `null`, `"str"`} {
+				args := `{"m":[{"key":"k","value":` + v + `}]}`
+				reversed, _, err := reverseTranslate("t", args, mutations)
+				if err != nil {
+					t.Fatalf("value %s: %v", v, err)
+				}
+				want := `{"m":{"k":` + v + `}}`
+				var gotM, wantM map[string]any
+				if err := json.Unmarshal([]byte(reversed), &gotM); err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal([]byte(want), &wantM); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(gotM, wantM) {
+					t.Fatalf("value %s: got %s, want %s", v, reversed, want)
+				}
+			}
+		})
+	}
+}
+
+// TestStreamStrictReversalClasses — the strict classes at the real
+// fragmented-stream boundary: malformed classes terminate; legal classes
+// reverse; a semantic no-op preserves the exact original bytes AND the
+// signature (F3).
+func TestStreamStrictReversalClasses(t *testing.T) {
+	translated := `{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}}}}`
+	for name, args := range map[string]string{
+		"missing value":   `{"env":[{"key":"A"}]}`,
+		"duplicate keys":  `{"env":[{"key":"A","value":"1"},{"key":"A","value":"2"}]}`,
+		"extra member":    `{"env":[{"key":"A","value":"1","x":2}]}`,
+		"wrong container": `{"env":"str"}`,
+		"null args":       `null`,
+	} {
+		t.Run("terminates "+name, func(t *testing.T) {
+			h := newHarness(t)
+			h.BeforeRequest(reqWithTools(translated))
+			res := streamBlock(t, h, 0, "call_1", "read", "sig", args)
+			if res.Err == nil {
+				t.Fatalf("must terminate: %q", args)
+			}
+		})
+	}
+	t.Run("empty key preserved, signature cleared", func(t *testing.T) {
+		h := newHarness(t)
+		h.BeforeRequest(reqWithTools(translated))
+		res := streamBlock(t, h, 0, "call_1", "read", "sig", `{"env":[{"key":"","value":"v"}]}`)
+		if got := emittedArgs(t, res); got != `{"env":{"":"v"}}` {
+			t.Fatalf("args = %q", got)
+		}
+		if sig := emittedSig(t, res); sig != "" {
+			t.Fatalf("signature must be cleared, got %q", sig)
+		}
+	})
+	t.Run("empty array becomes empty object", func(t *testing.T) {
+		h := newHarness(t)
+		h.BeforeRequest(reqWithTools(translated))
+		res := streamBlock(t, h, 0, "call_1", "read", "sig", `{"env":[]}`)
+		if got := emittedArgs(t, res); got != `{"env":{}}` {
+			t.Fatalf("args = %q", got)
+		}
+	})
+	t.Run("semantic no-op preserves bytes and signature", func(t *testing.T) {
+		h := newHarness(t)
+		h.BeforeRequest(reqWithTools(translated))
+		args := `{ "other":"x" }`
+		res := streamBlock(t, h, 0, "call_1", "read", "sig-abc", args)
+		if got := emittedArgs(t, res); got != args {
+			t.Fatalf("original bytes must travel unchanged, got %q", got)
+		}
+		if sig := emittedSig(t, res); sig != "sig-abc" {
+			t.Fatalf("signature must be preserved on a semantic no-op, got %q", sig)
+		}
+	})
+}

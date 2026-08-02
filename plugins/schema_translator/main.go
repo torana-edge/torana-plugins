@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
+
+	"google.golang.org/protobuf/proto"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
@@ -54,6 +57,17 @@ type mutationPath struct {
 type registry struct {
 	version int
 	tools   map[string][]mutationPath
+}
+
+// appendStep is the ONLY way steps are added to a path. It allocates exactly
+// len(path)+1, so sibling paths never share a backing array: an ordinary
+// append onto a slice with spare capacity lets a later sibling overwrite the
+// same position, silently corrupting the earlier path (review round-1 F2).
+func appendStep(path []pathStep, step pathStep) []pathStep {
+	out := make([]pathStep, len(path)+1)
+	copy(out, path)
+	out[len(path)] = step
+	return out
 }
 
 // wireStep mirrors the canonical step encoding; no omitempty so canonical
@@ -223,7 +237,7 @@ func init() {
 				// reversal cannot be proven must not be sent.
 				return sdk.PassRequest(), nil
 			}
-			return sdk.RequestResult{}, fmt.Errorf("schema_translator: registry publish refused: %s", herr.Message)
+			return sdk.RequestResult{}, fmt.Errorf("schema_translator: registry publish refused (code=%s)", herr.Code)
 		}
 
 		if !changed {
@@ -277,7 +291,7 @@ func handleAssembled(call sdk.ToolCall) (sdk.StreamResult, error) {
 		// NOT_FOUND, NOT_CONFIGURED, UNAVAILABLE, PERMISSION_DENIED: every
 		// non-success is terminal at stream completion. There is no
 		// pass-through without a present, valid envelope.
-		return sdk.StreamResult{}, fmt.Errorf("schema_translator: registry unavailable: %s", herr.Message)
+		return sdk.StreamResult{}, fmt.Errorf("schema_translator: registry unavailable (code=%s)", herr.Code)
 	}
 	reg, err := decodeRegistry([]byte(raw))
 	if err != nil {
@@ -288,22 +302,37 @@ func handleAssembled(call sdk.ToolCall) (sdk.StreamResult, error) {
 		// Explicit absence in a valid envelope: this tool was not translated.
 		return sdk.EmitEvents(sdk.EmitAssembledToolCall(call, call.Arguments)...), nil
 	}
-	reversed, err := reverseTranslate(call.Name, call.Arguments, paths)
+	reversed, changed, err := reverseTranslate(call.Name, call.Arguments, paths)
 	if err != nil {
 		return sdk.StreamResult{}, err
+	}
+	if !changed {
+		// Every translated property was absent: a semantic no-op. Emit the
+		// ORIGINAL argument bytes so the bound signature stays valid.
+		return sdk.EmitEvents(sdk.EmitAssembledToolCall(call, call.Arguments)...), nil
 	}
 	return sdk.EmitEvents(sdk.EmitAssembledToolCall(call, reversed)...), nil
 }
 
-// translateTools translates every eligible tool into a deep-copied ToolDef
-// list, recording structural mutation paths. Deterministic: property names
-// are visited in sorted order, so both the schema bytes and the registry
-// bytes are pure functions of the request. Duplicate tool names are
-// pre-scanned and EVERY occurrence is left untranslated — no last-write-wins
-// reversal schema. Returns changed=false when no schema bytes differ.
+// translateTools translates every eligible tool into a proto.Clone-derived
+// ToolDef list, recording structural mutation paths. Cloning preserves every
+// field the host or customer set — description, strict, cache_control_json,
+// and unknown protobuf bytes — so a replacement never drops them (review
+// round-1 F1). Deterministic: property names are visited in sorted order, so
+// both the schema bytes and the registry bytes are pure functions of the
+// request. Duplicate tool names are pre-scanned and EVERY occurrence is left
+// untranslated — no last-write-wins reversal schema.
+//
+// `changed` tracks SEMANTIC mutation: a schema whose translation produced no
+// value change (already closed, different key order, whitespace, numeric
+// spellings) keeps its ORIGINAL raw bytes instead of being canonicalized, so
+// a pass stays a pass and prompt-cache bytes are untouched (review F4).
 func translateTools(tools []*pbv2.ToolDef) (*registry, []*pbv2.ToolDef, bool) {
 	counts := make(map[string]int, len(tools))
 	for _, t := range tools {
+		if t == nil {
+			continue
+		}
 		counts[t.Name]++
 	}
 
@@ -312,33 +341,40 @@ func translateTools(tools []*pbv2.ToolDef) (*registry, []*pbv2.ToolDef, bool) {
 	changed := false
 
 	for _, tool := range tools {
-		nt := &pbv2.ToolDef{
-			Name:           tool.Name,
-			ParametersJson: append([]byte(nil), tool.ParametersJson...),
+		if tool == nil {
+			// Defensive: a nil entry is carried as-is and never dereferenced.
+			newTools = append(newTools, nil)
+			continue
 		}
+		nt := proto.Clone(tool).(*pbv2.ToolDef)
 		if counts[tool.Name] > 1 || len(tool.ParametersJson) == 0 {
 			newTools = append(newTools, nt)
 			continue
 		}
 		var params map[string]any
-		if err := json.Unmarshal(tool.ParametersJson, &params); err != nil {
-			// Malformed schema: cannot translate, not recorded.
+		if err := json.Unmarshal(tool.ParametersJson, &params); err != nil || params == nil {
+			// Malformed, null, array, or scalar schema: cannot translate,
+			// not recorded, carried byte-identical.
 			newTools = append(newTools, nt)
 			continue
 		}
+		orig := deepCopyMap(params)
 		mutations := translateSchema(params, nil, siteRoot)
 		if len(mutations) > 0 {
 			reg.tools[tool.Name] = mutations
+		}
+		if reflect.DeepEqual(orig, params) {
+			// Semantic no-op: preserve the author's raw bytes.
+			newTools = append(newTools, nt)
+			continue
 		}
 		newJSON, err := json.Marshal(params)
 		if err != nil {
 			newTools = append(newTools, nt)
 			continue
 		}
-		if string(newJSON) != string(tool.ParametersJson) {
-			nt.ParametersJson = newJSON
-			changed = true
-		}
+		nt.ParametersJson = newJSON
+		changed = true
 		newTools = append(newTools, nt)
 	}
 	return reg, newTools, changed
@@ -352,8 +388,7 @@ func isAdvisory(code pbv2.ErrorCode) bool {
 }
 
 // ==========================================================================
-// Schema translation (ported from v1; structural paths + sorted iteration +
-// deep-copied value schemas)
+// Schema translation
 // ==========================================================================
 
 // schemaSite says where in a tool's schema we are, because the same rewrite is
@@ -390,6 +425,9 @@ const (
 // Conversion happens only at a property, in the loop, where the recorded path is
 // one reverseTranslate can actually reverse.
 func translateSchema(schema map[string]any, path []pathStep, site schemaSite) []mutationPath {
+	if schema == nil {
+		return nil
+	}
 	var mutations []mutationPath
 
 	props, hasProps := schema["properties"].(map[string]any)
@@ -429,19 +467,19 @@ func translateSchema(schema map[string]any, path []pathStep, site schemaSite) []
 		if !ok {
 			continue
 		}
-		currentPath := append(path, pathStep{field: propName, each: false})
+		currentPath := appendStep(path, pathStep{field: propName, each: false})
 		propType, _ := propSchema["type"].(string)
 		_, propHasProps := propSchema["properties"].(map[string]any)
 		_, propHasAP := propSchema["additionalProperties"]
 
 		if propType == "object" && !propHasProps && !propHasAP {
-			convertToKVArray(propSchema, "string", nil)
+			convertToKVArray(propSchema, nil)
 			mutations = append(mutations, mutationPath{steps: currentPath})
 			continue
 		}
 		if hasAdditionalProperties(propSchema) {
 			valueSchema, _ := propSchema["additionalProperties"].(map[string]any)
-			convertToKVArray(propSchema, extractAdditionalPropertiesType(propSchema), valueSchema)
+			convertToKVArray(propSchema, valueSchema)
 			mutations = append(mutations, mutationPath{steps: currentPath})
 			continue
 		}
@@ -453,7 +491,11 @@ func translateSchema(schema map[string]any, path []pathStep, site schemaSite) []
 		case "array":
 			if items, ok := propSchema["items"].(map[string]any); ok {
 				if itemType, _ := items["type"].(string); itemType == "object" {
-					itemPath := append(currentPath, pathStep{field: propName, each: true})
+					// The each-step REPLACES the just-created scalar step: the
+					// mutation site is the array's ITEMS, so the recorded path
+					// is parent+{propName,each:true}, never parent+
+					// {propName}+{propName,each:true} (review round-1 F2).
+					itemPath := appendStep(path, pathStep{field: propName, each: true})
 					mutations = append(mutations, translateSchema(items, itemPath, siteArrayItem)...)
 				}
 			}
@@ -476,23 +518,18 @@ func hasAdditionalProperties(schema map[string]any) bool {
 	return false
 }
 
-func extractAdditionalPropertiesType(schema map[string]any) string {
-	if ap, ok := schema["additionalProperties"].(map[string]any); ok {
-		if t, ok := ap["type"].(string); ok {
-			return t
-		}
-	}
-	return "string"
-}
-
 // convertToKVArray rewrites an open map into an array of {key, value} pairs, so
 // a model that cannot emit free-form object keys can still populate it.
 //
 // valueSchema is the author's declared schema for the map's values, when there
-// was one. It is DEEP-copied before embedding: the shallow copy the v1 plugin
-// made aliased nested maps and slices, so mutating the embedded copy reached
-// back into the caller's map (see TestEmbeddedValueSchemaIsDeepCopied).
-func convertToKVArray(schema map[string]any, valueType string, valueSchema map[string]any) {
+// was one; it is DEEP-copied before embedding (the v1 shallow copy aliased
+// nested maps and slices). When the author declared NO value constraint (a
+// bare object property, or additionalProperties:true), the value schema is
+// UNCONSTRAINED — only a description, no type — so arbitrary JSON values
+// (booleans, numbers, objects, arrays, null) survive translation and strict
+// reversal. Narrowing unconstrained values to type:string made the schema
+// stricter than the author wrote it (review round-1 F5).
+func convertToKVArray(schema map[string]any, valueSchema map[string]any) {
 	desc := ""
 	if d, ok := schema["description"].(string); ok {
 		desc = d
@@ -501,7 +538,7 @@ func convertToKVArray(schema map[string]any, valueType string, valueSchema map[s
 		delete(schema, k)
 	}
 
-	value := map[string]any{"type": valueType, "description": "the value"}
+	value := map[string]any{"description": "the value"}
 	if valueSchema != nil {
 		value = deepCopyMap(valueSchema)
 		if _, described := value["description"]; !described {
@@ -553,119 +590,156 @@ func deepCopySlice(s []any) []any {
 }
 
 // ==========================================================================
-// Reverse translation (ported from v1; structural paths)
+// Reverse translation (strict, error-returning)
 // ==========================================================================
 
 // reverseTranslate undoes KV-array conversions using ONLY the recorded
-// recorded mutation paths — the exact paths this plugin converted on the request
-// side. It deliberately does not touch KV-array shapes it did not create: an agent
+// mutation paths — the exact paths this plugin converted on the request side.
+// It deliberately does not touch KV-array shapes it did not create: an agent
 // may legitimately pass [{"key":..,"value":..}] arrays as real arguments, and
-// no heuristic can tell those apart from our translations. A tool with no
-// recorded mutation (explicitly absent from the envelope) passes through
-// intact. A RECORDED tool whose arguments are not a JSON object cannot be
-// reversed and is an error — fail-open would execute the wrong call.
-func reverseTranslate(toolName string, argsJSON string, paths []mutationPath) (string, error) {
-	if argsJSON == "" || argsJSON == "{}" {
-		return argsJSON, nil
-	}
+// no heuristic can tell those apart from our translations.
+//
+// The traversal is STRICT (review round-1 F3): a recorded tool whose assembled
+// arguments are anything other than a non-null JSON object — empty bytes,
+// null, arrays, scalars, malformed JSON, or duplicate JSON keys — TERMINATES,
+// because emitting it would execute a call with a different meaning. Every
+// present traversal step must have the expected container type; every KV item
+// must be an object with EXACTLY `key` (a string; empty is legal and
+// preserved) and `value`; duplicate KV keys, missing/extra members, and wrong
+// types are errors. An empty KV array becomes an empty object. An absent
+// optional path is a valid no-op.
+//
+// changed reports whether any conversion actually happened. When nothing was
+// converted, the ORIGINAL argument bytes are returned unchanged so the bound
+// signature stays valid (no unmarshal/remarshal of unrelated fields).
+func reverseTranslate(toolName string, argsJSON string, paths []mutationPath) (string, bool, error) {
 	if len(paths) == 0 {
-		return argsJSON, nil
+		return argsJSON, false, nil
+	}
+	if err := rejectDuplicateKeys([]byte(argsJSON)); err != nil {
+		return "", false, fmt.Errorf("schema_translator: cannot reverse %q: %w", toolName, err)
 	}
 	var args map[string]any
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-		return "", fmt.Errorf("schema_translator: cannot reverse %q: arguments are not a JSON object", toolName)
+		return "", false, fmt.Errorf("schema_translator: cannot reverse %q: arguments are not a JSON object", toolName)
 	}
+	if args == nil {
+		return "", false, fmt.Errorf("schema_translator: cannot reverse %q: arguments are null", toolName)
+	}
+	changed := false
 	for _, p := range paths {
-		reverseAtPath(args, p.steps)
+		c, err := reverseAtPathStrict(args, p.steps)
+		if err != nil {
+			return "", false, fmt.Errorf("schema_translator: cannot reverse %q: %w", toolName, err)
+		}
+		changed = changed || c
+	}
+	if !changed {
+		return argsJSON, false, nil
 	}
 	b, err := json.Marshal(args)
 	if err != nil {
-		return "", fmt.Errorf("schema_translator: cannot reverse %q: %w", toolName, err)
+		return "", false, fmt.Errorf("schema_translator: cannot reverse %q: %w", toolName, err)
 	}
-	return string(b), nil
+	return string(b), true, nil
 }
 
-func reverseKVArrayAtPath(args map[string]any, path []pathStep) {
-	reverseAtPath(args, path)
-}
-
-func reverseAtPath(obj map[string]any, steps []pathStep) {
+// reverseAtPathStrict reverses the conversions along steps. Returns whether
+// the object was actually modified. An absent step is a valid no-op; a
+// present step with the wrong container type is an error (never a silent
+// skip). A TERMINAL each step is structurally invalid: the translator only
+// records conversions at property sites (terminal each:false), so a registry
+// path ending in each:true was not generated by this plugin and is rejected
+// rather than invoking the old per-element heuristic.
+func reverseAtPathStrict(obj map[string]any, steps []pathStep) (bool, error) {
 	if len(steps) == 0 {
-		return
+		return false, nil
 	}
 	step := steps[0]
 	rest := steps[1:]
 
 	if step.each {
-		arr, ok := obj[step.field].([]any)
-		if !ok {
-			return
-		}
 		if len(rest) == 0 {
-			for i, item := range arr {
-				if itemMap, ok := item.(map[string]any); ok {
-					arr[i] = reverseKVObject(itemMap)
-				}
-			}
-		} else {
-			for _, item := range arr {
-				if itemMap, ok := item.(map[string]any); ok {
-					reverseAtPath(itemMap, rest)
-				}
-			}
+			return false, fmt.Errorf("registry path ends in each:true — not a path this translator generates")
 		}
-		return
+		val, present := obj[step.field]
+		if !present {
+			return false, nil
+		}
+		arr, ok := val.([]any)
+		if !ok {
+			return false, fmt.Errorf("step %q must be an array, got %T", step.field, val)
+		}
+		changed := false
+		for _, item := range arr {
+			itemMap, ok := item.(map[string]any)
+			if !ok {
+				return false, fmt.Errorf("step %q: element is not an object", step.field)
+			}
+			c, err := reverseAtPathStrict(itemMap, rest)
+			if err != nil {
+				return false, err
+			}
+			changed = changed || c
+		}
+		return changed, nil
 	}
 
 	if len(rest) == 0 {
-		if val, ok := obj[step.field]; ok {
-			if arr, ok := val.([]any); ok {
-				obj[step.field] = reverseKVArray(arr)
-			}
+		val, present := obj[step.field]
+		if !present {
+			return false, nil
 		}
-		return
+		arr, ok := val.([]any)
+		if !ok {
+			return false, fmt.Errorf("step %q must be a KV array, got %T", step.field, val)
+		}
+		reversed, err := reverseKVArrayStrict(arr)
+		if err != nil {
+			return false, err
+		}
+		obj[step.field] = reversed
+		return true, nil
 	}
 
-	if nested, ok := obj[step.field].(map[string]any); ok {
-		reverseAtPath(nested, rest)
+	val, present := obj[step.field]
+	if !present {
+		return false, nil
 	}
+	nested, ok := val.(map[string]any)
+	if !ok {
+		return false, fmt.Errorf("step %q must be an object, got %T", step.field, val)
+	}
+	return reverseAtPathStrict(nested, rest)
 }
 
-func reverseKVArray(arr []any) map[string]any {
+// reverseKVArrayStrict converts a KV array into the tool-facing map. Every
+// item must be an object with exactly `key` and `value`; `key` must be a
+// string (empty keys are legal and preserved); duplicate keys are an error;
+// an empty array yields an empty object.
+func reverseKVArrayStrict(arr []any) (map[string]any, error) {
 	result := make(map[string]any, len(arr))
 	for _, item := range arr {
 		kv, ok := item.(map[string]any)
 		if !ok {
-			continue
+			return nil, fmt.Errorf("KV item is not an object")
 		}
-		key, _ := kv["key"].(string)
-		if key == "" {
-			continue
+		if len(kv) != 2 {
+			return nil, fmt.Errorf("KV item must have exactly key and value, got %d members", len(kv))
 		}
-		if val, exists := kv["value"]; exists {
-			result[key] = val
+		keyRaw, hasKey := kv["key"]
+		valueRaw, hasValue := kv["value"]
+		if !hasKey || !hasValue {
+			return nil, fmt.Errorf("KV item missing key or value")
 		}
-	}
-	return result
-}
-
-func reverseKVObject(obj map[string]any) map[string]any {
-	for k, v := range obj {
-		if arr, ok := v.([]any); ok && isKVArray(arr) {
-			obj[k] = reverseKVArray(arr)
+		key, ok := keyRaw.(string)
+		if !ok {
+			return nil, fmt.Errorf("KV item key must be a string, got %T", keyRaw)
 		}
+		if _, dup := result[key]; dup {
+			return nil, fmt.Errorf("duplicate KV key %q", key)
+		}
+		result[key] = valueRaw
 	}
-	return obj
-}
-
-func isKVArray(arr []any) bool {
-	if len(arr) == 0 {
-		return false
-	}
-	if m, ok := arr[0].(map[string]any); ok {
-		_, hasKey := m["key"]
-		_, hasValue := m["value"]
-		return hasKey && hasValue
-	}
-	return false
+	return result, nil
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"unicode/utf8"
 )
 
 // ==========================================================================
@@ -22,6 +23,12 @@ import (
 // that were written, so a missing member is distinguishable from an empty
 // string or false value.
 func decodeObjectStrict(data []byte, known map[string]bool) (map[string]json.RawMessage, error) {
+	// encoding/json silently replaces invalid UTF-8 with U+FFFD, so distinct
+	// invalid identities or registry names could normalize to the same value.
+	// The wire is required to be valid UTF-8 (review round-1 F6).
+	if !utf8.Valid(data) {
+		return nil, fmt.Errorf("invalid UTF-8")
+	}
 	if err := rejectDuplicateKeys(data); err != nil {
 		return nil, err
 	}
@@ -103,7 +110,9 @@ func walkValueNoDups(dec *json.Decoder, tok json.Token) error {
 			return fmt.Errorf("unexpected delimiter %v", t)
 		}
 	case nil:
-		return fmt.Errorf("top-level null is not a valid object")
+		// A null VALUE is legal at any depth (a KV item's value may be null).
+		// Top-level null reaches callers as a nil map and is rejected by
+		// their required-member checks.
 	default:
 		// scalar: nothing to check
 	}

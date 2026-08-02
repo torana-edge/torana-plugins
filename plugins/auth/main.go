@@ -163,7 +163,7 @@ func virtualKeyCandidate(headers map[string]any) (string, bool) {
 // UNCHANGED. Malformed syntax is NOT a credential.
 func parseBearer(authHeader string) (string, bool) {
 	i := 0
-	for i < len(authHeader) && !isSpace(authHeader[i]) {
+	for i < len(authHeader) && !isBearerSeparator(authHeader[i]) {
 		i++
 	}
 	if i == 0 {
@@ -173,7 +173,7 @@ func parseBearer(authHeader string) (string, bool) {
 		return "", false
 	}
 	j := i
-	for j < len(authHeader) && isSpace(authHeader[j]) {
+	for j < len(authHeader) && isBearerSeparator(authHeader[j]) {
 		j++
 	}
 	if j == i {
@@ -184,18 +184,26 @@ func parseBearer(authHeader string) (string, bool) {
 		return "", false
 	}
 	for k := 0; k < len(cred); k++ {
-		if isSpace(cred[k]) {
-			return "", false // internal or trailing whitespace
+		if isForbiddenCredentialByte(cred[k]) {
+			return "", false // internal or trailing whitespace / control
 		}
 	}
 	return cred, true
 }
 
-// isSpace reports ASCII whitespace: SP (0x20) and HTAB (0x09) are the only
-// legal header separators; CR/LF cannot legally appear inside a header value
-// and are treated as malformed rather than passed through.
-func isSpace(b byte) bool {
-	return b == ' ' || b == '\t' || b == '\r' || b == '\n'
+// isBearerSeparator is the ONLY whitespace the Bearer grammar permits between
+// the scheme and the credential: ASCII SP (0x20) and HTAB (0x09). CR, LF, and
+// any other control are NOT separators — a header like "Bearer\rsk-torana-x"
+// fails the scheme match outright (review round-1 F6).
+func isBearerSeparator(b byte) bool {
+	return b == ' ' || b == '\t'
+}
+
+// isForbiddenCredentialByte reports any ASCII control (C0: 0x00-0x1F, DEL:
+// 0x7F) or SP. The contract permits one non-empty credential with no internal
+// or trailing ASCII whitespace; every one of these bytes is rejected.
+func isForbiddenCredentialByte(b byte) bool {
+	return b <= 0x20 || b == 0x7f
 }
 
 // verifyVirtualKey asks the host to validate a Torana-issued key. The request
@@ -220,8 +228,11 @@ func verifyVirtualKey(token string) (string, verifyOutcome, error) {
 			// NOT_FOUND, PERMISSION_DENIED, INVALID_ARGUMENT, INTERNAL: a
 			// contract/protocol failure, not a domain answer. Revoked or
 			// unknown credentials are expressed by the normal domain
-			// response, never by HostError.
-			return "", verifyNoIdentity, fmt.Errorf("auth: verify_virtual_key refused (%s): %s", herr.Code, herr.Message)
+			// response, never by HostError. The host message is NEVER
+			// interpolated: a private verifier could embed the token or
+			// tenant data in it, and Edge captures hook errors (review
+			// round-1 F7). The error is classified by code only.
+			return "", verifyNoIdentity, fmt.Errorf("auth: verify_virtual_key refused (code=%s)", herr.Code)
 		}
 	}
 

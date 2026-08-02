@@ -39,6 +39,17 @@ func TestParseBearerGrammar(t *testing.T) {
 		"not a bearer":        {"Basic abc", "", false},
 		"scheme only space":   {"Basic ", "", false},
 		"CR inside":           {"Bearer sk-torana-\rabc", "", false},
+		"LF inside":           {"Bearer sk-torana-\nabc", "", false},
+		"VT inside":           {"Bearer sk-torana-\vabc", "", false},
+		"FF inside":           {"Bearer sk-torana-\fabc", "", false},
+		"CR as separator":     {"Bearer\rsk-torana-abc", "", false},
+		"LF as separator":     {"Bearer\nsk-torana-abc", "", false},
+		"VT as separator":     {"Bearer\vsk-torana-abc", "", false},
+		"FF as separator":     {"Bearer\fsk-torana-abc", "", false},
+		"NUL inside":          {"Bearer sk-torana-\x00abc", "", false},
+		"DEL inside":          {"Bearer sk-torana-\x7fabc", "", false},
+		"CR after separator":  {"Bearer \rsk-torana-abc", "", false},
+		"tab then CR":         {"Bearer \tsk-torana-abc\r", "", false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			token, ok := parseBearer(tc.header)
@@ -49,67 +60,53 @@ func TestParseBearerGrammar(t *testing.T) {
 	}
 }
 
-// TestComposeIdentityCollisions — the composed identity is length-framed with
-// all three positions ALWAYS represented, so delimiter, NUL, omission, and
-// field-swapping collisions are distinct; the verified-token digest is
-// domain-separated from the profile identity and never exposes the token.
+// TestComposeIdentityCollisions — explicit table of (response, token) inputs
+// with an equal expectation per row: identical inputs are equal; each field
+// swap differs; omitted-versus-empty position framing differs; delimiter and
+// NUL ambiguity pairs differ; the profile identity and the verified-token
+// digest are domain-separated; distinct tokens never collapse.
 func TestComposeIdentityCollisions(t *testing.T) {
+	resp := func(tenant, team, user string) VerifyResponse {
+		return VerifyResponse{TenantID: tenant, TeamID: team, UserID: user}
+	}
 	cases := []struct {
-		name string
-		a, b string
+		name  string
+		a     VerifyResponse
+		aTok  string
+		b     VerifyResponse
+		bTok  string
+		equal bool
 	}{
-		{"equal profiles collapse", "auth-identity-v2", "auth-identity-v2"},
-		{"field swap differs", "auth-identity-v2", "auth-identity-v2"},
-		{"omission differs", "auth-identity-v2", "auth-identity-v2"},
-		{"NUL content differs", "auth-identity-v2", "auth-identity-v2"},
-		{"delimiter content differs", "auth-identity-v2", "auth-identity-v2"},
-		{"empty profile is not the host fallback", "auth-verified-key-v2", "auth-identity-v2"},
-	}
-	profiles := [][]string{
-		{"t1", "tm1", "u1"},
-		{"t1", "u1", "tm1"},
-		{"t1", "tm1", ""},
-		{"t1\u0000tm1", "", ""},
-		{"t1|tm1", "", ""},
-		{"", "", ""},
-	}
-	keys := make([]string, len(profiles))
-	for i, p := range profiles {
-		keys[i] = composeIdentity(VerifyResponse{TenantID: p[0], TeamID: p[1], UserID: p[2]}, "tok-1")
+		{"identical input", resp("t", "tm", "u"), "tok-1", resp("t", "tm", "u"), "tok-1", true},
+		{"identical empty profile", VerifyResponse{}, "tok-1", VerifyResponse{}, "tok-1", true},
+		{"swap tenant/team", resp("t", "tm", "u"), "tok-1", resp("tm", "t", "u"), "tok-1", false},
+		{"swap tenant/user", resp("t", "tm", "u"), "tok-1", resp("u", "tm", "t"), "tok-1", false},
+		{"swap team/user", resp("t", "tm", "u"), "tok-1", resp("t", "u", "tm"), "tok-1", false},
+		{"omitted vs empty user", resp("t", "tm", "u"), "tok-1", resp("t", "tm", ""), "tok-1", false},
+		{"omitted vs empty team", resp("t", "tm", ""), "tok-1", resp("t", "", ""), "tok-1", false},
+		{"delimiter ambiguity", resp("a|b", "", ""), "tok-1", resp("a", "b", ""), "tok-1", false},
+		{"NUL ambiguity", resp("a\x00b", "", ""), "tok-1", resp("a", "b", ""), "tok-1", false},
+		{"NUL vs delimiter", resp("a\x00b", "", ""), "tok-1", resp("a|b", "", ""), "tok-1", false},
+		{"profile vs token namespace", resp("t", "tm", "u"), "tok-1", VerifyResponse{}, "tok-1", false},
+		{"distinct tokens", VerifyResponse{}, "tok-1", VerifyResponse{}, "tok-2", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var ia, ib int
-			switch tc.a {
-			case "auth-identity-v2":
-				ia = 0
-			case "auth-verified-key-v2":
-				ia = 5
-			}
-			switch tc.b {
-			case "auth-identity-v2":
-				ib = 1
-			case "auth-verified-key-v2":
-				ib = 5
-			}
-			if keys[ia] == keys[ib] {
-				t.Fatalf("collision: %q == %q", keys[ia], keys[ib])
+			gotA := composeIdentity(tc.a, tc.aTok)
+			gotB := composeIdentity(tc.b, tc.bTok)
+			if (gotA == gotB) != tc.equal {
+				t.Fatalf("composeIdentity equal=%v, want %v\n  a: %q\n  b: %q", gotA == gotB, tc.equal, gotA, gotB)
 			}
 		})
 	}
-	// The verified-key digest is ContentAddressedCacheKey of the verified
+	// The verified-token digest is ContentAddressedCacheKey of the verified
 	// token, never the token itself.
-	digest := keys[5]
+	digest := composeIdentity(VerifyResponse{}, "tok-1")
 	if digest != sdk.ContentAddressedCacheKey(verifiedKeyNamespace, "tok-1") {
 		t.Fatalf("verified digest = %q", digest)
 	}
 	if strings.Contains(digest, "tok-1") {
 		t.Fatal("the verified token leaks into the identity")
-	}
-	// A different token must not collapse onto the same digest.
-	other := composeIdentity(VerifyResponse{}, "tok-2")
-	if other == digest {
-		t.Fatal("two tokens collapse onto one digest")
 	}
 }
 
@@ -136,21 +133,24 @@ func TestDecodeVerifyResponseGrammar(t *testing.T) {
 		})
 	}
 	for name, raw := range map[string]string{
-		"missing status":     `{}`,
-		"unknown member":     `{"status":"ok","extra":1}`,
-		"duplicate status":   `{"status":"ok","status":"ok"}`,
-		"null status":        `{"status":null}`,
-		"message on ok":      `{"status":"ok","message":"hi"}`,
-		"tenant on rejected": `{"status":"rejected","tenant_id":"t"}`,
-		"team on rejected":   `{"status":"rejected","team_id":"tm"}`,
-		"user on rejected":   `{"status":"rejected","user_id":"u"}`,
-		"message 1025 bytes": `{"status":"rejected","message":"` + strings.Repeat("x", 1025) + `"}`,
-		"trailing JSON":      `{"status":"ok"} {}`,
-		"not an object":      `["ok"]`,
-		"null envelope":      `null`,
-		"status wrong type":  `{"status":7}`,
-		"message wrong type": `{"status":"rejected","message":7}`,
-		"tenant wrong type":  `{"status":"ok","tenant_id":7}`,
+		"missing status":        `{}`,
+		"unknown member":        `{"status":"ok","extra":1}`,
+		"duplicate status":      `{"status":"ok","status":"ok"}`,
+		"null status":           `{"status":null}`,
+		"message on ok":         `{"status":"ok","message":"hi"}`,
+		"tenant on rejected":    `{"status":"rejected","tenant_id":"t"}`,
+		"team on rejected":      `{"status":"rejected","team_id":"tm"}`,
+		"user on rejected":      `{"status":"rejected","user_id":"u"}`,
+		"message 1025 bytes":    `{"status":"rejected","message":"` + strings.Repeat("x", 1025) + `"}`,
+		"trailing JSON":         `{"status":"ok"} {}`,
+		"not an object":         `["ok"]`,
+		"null envelope":         `null`,
+		"status wrong type":     `{"status":7}`,
+		"message wrong type":    `{"status":"rejected","message":7}`,
+		"tenant wrong type":     `{"status":"ok","tenant_id":7}`,
+		"invalid UTF-8 tenant":  "{\"status\":\"ok\",\"tenant_id\":\"t\xff\"}",
+		"invalid UTF-8 user":    "{\"status\":\"ok\",\"user_id\":\"u\x00\"}",
+		"invalid UTF-8 message": "{\"status\":\"rejected\",\"message\":\"m\xff\"}",
 	} {
 		t.Run("reject "+name, func(t *testing.T) {
 			if _, err := decodeVerifyResponse([]byte(raw)); err == nil {
@@ -551,6 +551,36 @@ func TestNoUnauthorizedCalls(t *testing.T) {
 		default:
 			t.Errorf("unexpected host call: %s", c.Command)
 		}
+	}
+}
+
+// TestHostErrorMessageNeverLeaks — a private verifier can embed the token,
+// an upstream reason, or tenant data in a contract HostError's message; Edge
+// captures hook errors. The hook error must be classified by code only, and
+// the message must appear in no error, log, verdict, or metric (F7).
+func TestHostErrorMessageNeverLeaks(t *testing.T) {
+	h := newHarness(t)
+	h.StubHostCall("verify_virtual_key", func(args string) (string, error) {
+		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_INTERNAL,
+			"upstream denied token=sk-torana-secret123 for tenant acme"), nil
+	})
+	res := h.BeforeRequest(reqWithHeaders(map[string]string{"Authorization": "Bearer sk-torana-secret123"}))
+	if res.Err == nil {
+		t.Fatal("a contract HostError must be a hook error")
+	}
+	if strings.Contains(res.Err.Error(), "sk-torana-secret123") ||
+		strings.Contains(res.Err.Error(), "acme") ||
+		strings.Contains(res.Err.Error(), "upstream denied") {
+		t.Fatalf("the host message leaked into the hook error: %v", res.Err)
+	}
+	if ids := identityCalls(t, h); len(ids) != 0 {
+		t.Fatalf("a contract refusal produced a verdict: %v", ids)
+	}
+	if logs := h.Logs(); len(logs) != 0 {
+		t.Fatalf("the host message leaked into logs: %+v", logs)
+	}
+	if metrics := h.Metrics(); len(metrics) != 0 {
+		t.Fatalf("the host message leaked into metrics: %+v", metrics)
 	}
 }
 
