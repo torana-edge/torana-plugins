@@ -9,6 +9,19 @@
 // Run it AFTER the intent plugin. It is an alternative to keyword_compactor
 // (deterministic, local, no model call) — pick ONE per deployment; both
 // consume the same intent cache.
+//
+// v2 semantics (typed host calls):
+//   - cache reads distinguish absent (NOT_FOUND) from present-empty; a
+//     present-empty value is UNUSABLE, never a usable value, and never a
+//     reason to erase a tool result;
+//   - any non-NOT_FOUND cache refusal or malformed reply is a
+//     contract/configuration defect: the hook errors, so failure_mode
+//     preserves the request and the host records the failure;
+//   - extension refusals split by actionability: NOT_CONFIGURED/UNAVAILABLE
+//     are advisory — skip without retrying in the same request; contract
+//     refusals (INVALID_ARGUMENT/PERMISSION_DENIED/INTERNAL) error the hook;
+//   - cache writes and savings reports stay best-effort: the replacement is
+//     already applied to the in-memory request and the host logs refusals.
 package main
 
 import (
@@ -17,11 +30,11 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 	"google.golang.org/protobuf/proto"
-	"unicode/utf8"
 )
 
 func main() {}
@@ -29,12 +42,9 @@ func main() {}
 const (
 	intentCacheKey  = "intent"
 	compactionCache = "compacted"
-	// Namespaced by plugin. env.cache_get/set is a SHARED store — unlike
-	// env.state_*, which the host keys by module name — so two plugins using the
-	// same namespace string read and write each other's entries. compactor and
-	// keyword_compactor both used "policy_compacted" with the same key format,
-	// which is harmless only for as long as their deterministic-policy logic
-	// stays byte-identical.
+	// Namespaced by plugin. env.cache_* is a SHARED store — unlike
+	// env.state_*, which the host keys by module name — so two plugins using
+	// the same namespace string read and write each other's entries.
 	policyCompactionCache = "compactor/policy_compacted"
 	minOffloadChars       = 2000
 )
@@ -50,30 +60,61 @@ var (
 	expectedApplications int64
 )
 
+// config is the plugin's decoded configuration.
+type config struct {
+	MaxOffloadInputChars int                  `json:"max_offload_input_chars"`
+	ToolPolicies         []sdk.ToolPolicyRule `json:"tool_policies"`
+	ExpectedApplications int64                `json:"expected_applications"`
+}
+
+// parseConfig is the pure config decoder; loadConfig installs its result into
+// the process-global state exactly once. The host validates config against
+// schema.json at write time, so an unmarshal failure here is unreachable in
+// practice and falls back to defaults, matching v1.
+func parseConfig(raw string) config {
+	var c config
+	if raw != "" {
+		_ = json.Unmarshal([]byte(raw), &c)
+	}
+	if c.MaxOffloadInputChars < 0 {
+		c.MaxOffloadInputChars = 0
+	}
+	if c.ExpectedApplications < 0 {
+		c.ExpectedApplications = 0
+	}
+	return c
+}
+
 func loadConfig() {
 	cfgOnce.Do(func() {
-		var c struct {
-			MaxOffloadInputChars int                  `json:"max_offload_input_chars"`
-			ToolPolicies         []sdk.ToolPolicyRule `json:"tool_policies"`
-			ExpectedApplications int64                `json:"expected_applications"`
-		}
-		if raw := sdk.PluginConfig(); raw != "" {
-			_ = json.Unmarshal([]byte(raw), &c)
-		}
-		if c.MaxOffloadInputChars > 0 {
-			maxOffloadInputChars = c.MaxOffloadInputChars
-		}
+		c := parseConfig(sdk.PluginConfig())
+		maxOffloadInputChars = c.MaxOffloadInputChars
 		toolPolicies = c.ToolPolicies
 		expectedApplications = c.ExpectedApplications
 	})
 }
 
+// resetConfigForTest restores every config global so a test row can install a
+// fresh config. Production never calls it; the once-only loader is unchanged.
+func resetConfigForTest() {
+	cfgOnce = sync.Once{}
+	maxOffloadInputChars = 0
+	toolPolicies = nil
+	expectedApplications = 0
+}
+
 func init() {
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
-		if !compactToolResults(ctx, req) {
-			return nil, nil
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv2.ChatRequest) (sdk.RequestResult, error) {
+		modified, err := compactToolResults(ctx, req)
+		if err != nil {
+			// failure_mode (pass) preserves the request; the host records the
+			// plugin failure.
+			return sdk.RequestResult{}, err
 		}
-		return req, nil
+		if !modified {
+			return sdk.PassRequest(), nil
+		}
+		return sdk.ReplaceRequest(req), nil
 	})
 }
 
@@ -81,7 +122,7 @@ func init() {
 // Tool result compaction
 // ==========================================================================
 
-func compactToolResults(ctx context.Context, req *pb.ChatRequest) bool {
+func compactToolResults(ctx context.Context, req *pbv2.ChatRequest) (bool, error) {
 	loadConfig()
 	modified := false
 	var modelWorks []modelWork
@@ -118,7 +159,11 @@ func compactToolResults(ctx context.Context, req *pb.ChatRequest) bool {
 			if assistantAfter[i] == 0 && !rule.FirstPass {
 				continue
 			}
-			if applyDeterministicPolicy(msg, toolName, toolArgs, rule, false) {
+			applied, err := applyDeterministicPolicy(msg, toolName, toolArgs, rule)
+			if err != nil {
+				return false, err
+			}
+			if applied {
 				modified = true
 			}
 			continue
@@ -136,10 +181,18 @@ func compactToolResults(ctx context.Context, req *pb.ChatRequest) bool {
 			continue
 		}
 
-		// Get intent from cache (written by the intent plugin).
-		intent, _ := sdk.HostCall("env.cache_get", intentCacheKey+":"+msg.ToolCallId)
-		if intent == "" {
-			// Eligible but no captured intent — the money left on the table.
+		// Get intent from cache (written by the intent plugin). NOT_FOUND and
+		// present-empty are both unusable (skip + metric); any other refusal
+		// or malformed reply is a contract defect — error the hook.
+		intent, herr, err := sdk.CacheGet(intentCacheKey + ":" + msg.ToolCallId)
+		if err != nil {
+			return false, fmt.Errorf("compactor: cache_get %s:%s: %w", intentCacheKey, msg.ToolCallId, err)
+		}
+		if herr != nil && !sdk.IsNotFound(herr) {
+			return false, fmt.Errorf("compactor: cache_get %s:%s refused: %s", intentCacheKey, msg.ToolCallId, herr.Message)
+		}
+		if herr != nil || intent == "" {
+			// Eligible but no usable intent — the money left on the table.
 			sdk.EmitMetric("torana_intent_missing_total", sdk.MetricCounter, 1, map[string]string{"tool": toolName})
 			continue
 		}
@@ -148,17 +201,27 @@ func compactToolResults(ctx context.Context, req *pb.ChatRequest) bool {
 		// reuse tool_call_ids, and intents can change across rehydrated rounds.
 		modelCacheKey := sdk.ContentAddressedCacheKey(compactionCache,
 			"v3", toolName, toolArgs, msg.Content, intent, "model")
-		cached, _ := sdk.HostCall("env.cache_get", modelCacheKey)
-		if cached == "" || len(cached) < len(msg.Content) {
+		cached, herr, err := sdk.CacheGet(modelCacheKey)
+		if err != nil {
+			return false, fmt.Errorf("compactor: cache_get model key: %w", err)
+		}
+		if herr != nil && !sdk.IsNotFound(herr) {
+			return false, fmt.Errorf("compactor: cache_get model key refused: %s", herr.Message)
+		}
+		// A hit whose value is non-empty AND shorter than the original is
+		// reused without offload; a value >= the original leaves the message
+		// untouched; a miss or present-empty value is recomputed.
+		if (herr != nil || cached == "") || len(cached) < len(msg.Content) {
 			modelWorks = append(modelWorks, modelWork{
 				message: msg, index: i, intent: intent, cacheKey: modelCacheKey, cached: cached,
 			})
 		}
 	}
-	if prepareAndApplyModelBatch(req, modelWorks) {
-		modified = true
+	applied, err := prepareAndApplyModelBatch(req, modelWorks)
+	if err != nil {
+		return false, err
 	}
-	return modified
+	return modified || applied, nil
 }
 
 type tokenUsage struct {
@@ -171,7 +234,7 @@ type tokenUsage struct {
 }
 
 type modelWork struct {
-	message  *pb.Message
+	message  *pbv2.Message
 	index    int
 	intent   string
 	cacheKey string
@@ -179,7 +242,7 @@ type modelWork struct {
 }
 
 type modelCandidate struct {
-	message       *pb.Message
+	message       *pbv2.Message
 	index         int
 	originalBytes int
 	replacement   string
@@ -190,9 +253,23 @@ type modelCandidate struct {
 	cacheKey      string
 }
 
-func prepareAndApplyModelBatch(req *pb.ChatRequest, works []modelWork) bool {
+// offloadResponse is the domain body of a successful offload. Additive JSON
+// fields (e.g. a legacy "status") are tolerated by the decoder and never
+// consulted: refusals arrive ONLY in the framed error arm.
+type offloadResponse struct {
+	Completion string     `json:"completion"`
+	Provider   string     `json:"provider"`
+	Model      string     `json:"model"`
+	Usage      tokenUsage `json:"usage"`
+}
+
+// prepareAndApplyModelBatch runs the economic gate (optimistic preflight for
+// any uncached candidate, then the real post-offload report) and applies the
+// approved batch. Returns (applied, error); a contract-defect refusal errors
+// the hook, an advisory refusal declines the batch.
+func prepareAndApplyModelBatch(req *pbv2.ChatRequest, works []modelWork) (bool, error) {
 	if len(works) == 0 || expectedApplications <= 0 {
-		return false
+		return false, nil
 	}
 
 	// Do not incur offload cost unless even a zero-cost, best-case replacement
@@ -201,8 +278,15 @@ func prepareAndApplyModelBatch(req *pb.ChatRequest, works []modelWork) bool {
 	optimistic, hasUncached := optimisticModelCandidates(works)
 	if hasUncached {
 		preflight, ok := modelBatchReport(req, optimistic, false)
-		if !ok || !evaluateModelReport(preflight) {
-			return false
+		if !ok {
+			return false, nil
+		}
+		approve, err := evaluateModelReport(preflight)
+		if err != nil {
+			return false, err
+		}
+		if !approve {
+			return false, nil
 		}
 	}
 
@@ -221,18 +305,24 @@ func prepareAndApplyModelBatch(req *pb.ChatRequest, works []modelWork) bool {
 			"user_prompt": fmt.Sprintf("Intent: %s\n\nConversation context:\n%s\n\nTool output:\n%s\n\nExtract only the parts relevant to the intent.",
 				work.intent, ctxStr, truncateForPrompt(work.message.Content, maxOffloadInputChars)),
 		})
-		result, err := sdk.HostCall("torana_offload_completion", string(payload))
-		if err != nil || result == "" {
-			continue
+		result, herr, err := sdk.HostCallExtension("torana_offload_completion", payload)
+		if err != nil {
+			return false, fmt.Errorf("compactor: offload: %w", err)
 		}
-		var response struct {
-			Status     string     `json:"status"`
-			Completion string     `json:"completion"`
-			Provider   string     `json:"provider"`
-			Model      string     `json:"model"`
-			Usage      tokenUsage `json:"usage"`
+		if herr != nil {
+			switch herr.Code {
+			case pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE:
+				// Advisory: operator/transient. Skip this candidate; do NOT
+				// retry in the same request (duplicate spend).
+				continue
+			default:
+				return false, fmt.Errorf("compactor: offload refused: %s", herr.Message)
+			}
 		}
-		if json.Unmarshal([]byte(result), &response) != nil || response.Status != "ok" || response.Completion == "" || len(response.Completion) >= len(work.message.Content) {
+		var response offloadResponse
+		if json.Unmarshal(result, &response) != nil || response.Completion == "" || len(response.Completion) >= len(work.message.Content) {
+			// Malformed or unusable domain body: skip, like a transient
+			// failure — the host framed every refusal already.
 			continue
 		}
 		candidates = append(candidates, modelCandidate{
@@ -241,22 +331,32 @@ func prepareAndApplyModelBatch(req *pb.ChatRequest, works []modelWork) bool {
 		})
 	}
 	if len(candidates) == 0 {
-		return false
+		return false, nil
 	}
 	report, ok := modelBatchReport(req, candidates, true)
-	if !ok || !evaluateModelReport(report) {
-		return false
+	if !ok {
+		return false, nil
+	}
+	approve, err := evaluateModelReport(report)
+	if err != nil {
+		return false, err
+	}
+	if !approve {
+		return false, nil
 	}
 	for _, candidate := range candidates {
 		candidate.message.Content = candidate.replacement
 		if candidate.source == "transformation" {
-			payload, _ := json.Marshal(map[string]string{"key": candidate.cacheKey, "value": candidate.replacement})
-			_, _ = sdk.HostCall("env.cache_set", string(payload))
+			// Best-effort: the replacement is already applied in memory; a
+			// refused write cannot corrupt it, and the host logs the refusal.
+			_, _ = sdk.CacheSet(candidate.cacheKey, candidate.replacement)
 		}
 	}
 	payload, _ := json.Marshal(report)
-	_, _ = sdk.HostCall("torana_record_savings", string(payload))
-	return true
+	// Best-effort observability: the batch is applied; rolling back after
+	// cache/report side effects would be worse. The host logs refusals.
+	_, _, _ = sdk.HostCallExtension("torana_record_savings", payload)
+	return true, nil
 }
 
 func optimisticModelCandidates(works []modelWork) ([]modelCandidate, bool) {
@@ -281,7 +381,7 @@ func optimisticModelCandidates(works []modelWork) ([]modelCandidate, bool) {
 	return candidates, hasUncached
 }
 
-func modelBatchReport(req *pb.ChatRequest, candidates []modelCandidate, includeOffload bool) (map[string]any, bool) {
+func modelBatchReport(req *pbv2.ChatRequest, candidates []modelCandidate, includeOffload bool) (map[string]any, bool) {
 	if len(candidates) == 0 {
 		return nil, false
 	}
@@ -316,7 +416,7 @@ func modelBatchReport(req *pb.ChatRequest, candidates []modelCandidate, includeO
 		usage.InputIncludesCacheRead = usage.InputIncludesCacheRead || candidate.usage.InputIncludesCacheRead
 	}
 
-	tail := proto.Clone(req).(*pb.ChatRequest)
+	tail := proto.Clone(req).(*pbv2.ChatRequest)
 	tail.Messages = tail.Messages[earliest:]
 	rewriteBytes := proto.Size(tail) - originalBytes + finalBytes
 	report := map[string]any{
@@ -338,19 +438,30 @@ func modelBatchReport(req *pb.ChatRequest, candidates []modelCandidate, includeO
 	return report, true
 }
 
-func evaluateModelReport(report map[string]any) bool {
+// evaluateModelReport asks the host's economic gate. Advisory refusals
+// (NOT_CONFIGURED/UNAVAILABLE) decline the batch without error; contract
+// refusals error the hook.
+func evaluateModelReport(report map[string]any) (bool, error) {
 	payload, _ := json.Marshal(report)
-	result, err := sdk.HostCall("torana_evaluate_compaction", string(payload))
+	result, herr, err := sdk.HostCallExtension("torana_evaluate_compaction", payload)
 	if err != nil {
-		return false
+		return false, fmt.Errorf("compactor: evaluate_compaction: %w", err)
+	}
+	if herr != nil {
+		switch herr.Code {
+		case pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE:
+			return false, nil
+		default:
+			return false, fmt.Errorf("compactor: evaluate_compaction refused: %s", herr.Message)
+		}
 	}
 	var decision struct {
 		Apply bool `json:"apply"`
 	}
-	if json.Unmarshal([]byte(result), &decision) != nil || !decision.Apply {
-		return false
+	if json.Unmarshal(result, &decision) != nil || !decision.Apply {
+		return false, nil
 	}
-	return true
+	return true, nil
 }
 
 func estimateTokens(bytes int) int {
@@ -360,7 +471,7 @@ func estimateTokens(bytes int) int {
 	return (bytes + 3) / 4
 }
 
-func assistantMessageCountsAfter(messages []*pb.Message) []int {
+func assistantMessageCountsAfter(messages []*pbv2.Message) []int {
 	counts := make([]int, len(messages))
 	count := 0
 	for i := len(messages) - 1; i >= 0; i-- {
@@ -372,33 +483,48 @@ func assistantMessageCountsAfter(messages []*pb.Message) []int {
 	return counts
 }
 
-func applyDeterministicPolicy(msg *pb.Message, toolName, toolArgs string, rule sdk.ToolPolicyRule, markerOnly bool) bool {
+func applyDeterministicPolicy(msg *pbv2.Message, toolName, toolArgs string, rule sdk.ToolPolicyRule) (bool, error) {
 	cacheKey := sdk.ContentAddressedCacheKey(policyCompactionCache,
 		"v2", toolName, toolArgs, msg.Content, rule.Mode, rule.Rerun)
-	cached, _ := sdk.HostCall("env.cache_get", cacheKey)
-	if cached != "" {
+	cached, herr, err := sdk.CacheGet(cacheKey)
+	if err != nil {
+		return false, fmt.Errorf("compactor: policy cache_get: %w", err)
+	}
+	if herr != nil && !sdk.IsNotFound(herr) {
+		return false, fmt.Errorf("compactor: policy cache_get refused: %s", herr.Message)
+	}
+	// A present-empty cached value is unusable (it would erase the result):
+	// recompute, exactly like a miss.
+	if herr == nil && cached != "" {
 		recordSavings(len(msg.Content), len(cached), "cache_reuse")
 		msg.Content = cached
-		return true
+		return true, nil
 	}
-	replacement := sdk.DeterministicToolReplacement(toolName, toolArgs, msg.Content, rule.Mode, rule.Rerun, markerOnly)
+	replacement := sdk.DeterministicToolReplacement(toolName, toolArgs, msg.Content, rule.Mode, rule.Rerun, false)
 	if len(replacement) >= len(msg.Content) {
-		return false
+		return false, nil
 	}
 	recordSavings(len(msg.Content), len(replacement), "transformation")
 	msg.Content = replacement
-	payload, _ := json.Marshal(map[string]string{"key": cacheKey, "value": replacement})
-	_, _ = sdk.HostCall("env.cache_set", string(payload))
-	return true
+	// Best-effort: the replacement is already applied; a refused write cannot
+	// corrupt it, and the host logs the refusal.
+	_, _ = sdk.CacheSet(cacheKey, replacement)
+	return true, nil
 }
 
 // recordSavings reports compaction byte savings to /stats via the host.
+// Best-effort by contract: it runs after the mutation and must never change
+// the applied replacement.
 func recordSavings(originalBytes, finalBytes int, source string) {
-	sdk.HostCall("torana_record_savings",
-		fmt.Sprintf(`{"original_bytes":%d,"final_bytes":%d,"source":%q}`, originalBytes, finalBytes, source))
+	payload, _ := json.Marshal(map[string]any{
+		"original_bytes": originalBytes,
+		"final_bytes":    finalBytes,
+		"source":         source,
+	})
+	_, _, _ = sdk.HostCallExtension("torana_record_savings", payload)
 }
 
-func extractConversationContext(msgs []*pb.Message, excludeToolCallID string) string {
+func extractConversationContext(msgs []*pbv2.Message, excludeToolCallID string) string {
 	var parts []string
 	collected := 0
 	for i := len(msgs) - 1; i >= 0 && collected < 5; i-- {
@@ -444,16 +570,6 @@ func truncateForPrompt(content string, maxChars int) string {
 	half := maxChars / 2
 	return truncHead(content, half) + "\n\n... [truncated] ...\n\n" + truncTail(content, half)
 }
-
-// Torana truncates by byte budget, but a byte index can land in the middle of a
-// UTF-8 rune. These back the cut off to the nearest boundary, so the result is
-// always within budget and always valid UTF-8.
-//
-// Here the truncated text goes into a JSON payload for an offload completion,
-// not into a proto3 string, so a mid-rune cut does not trap — json.Marshal
-// substitutes U+FFFD. It silently corrupts the last character of the text a
-// model is about to summarise instead. (In keyword_compactor the same cut DOES
-// trap, because the result is assigned to Message.Content.)
 
 // truncHead returns the longest prefix of s that is at most n bytes and does
 // not split a rune.
