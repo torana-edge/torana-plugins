@@ -147,7 +147,14 @@ func extractScannable(msg *pbv2.Message) extraction {
 		// null is not a valid array.
 		return extraction{text: msg.Content, complete: false}
 	}
-	text := msg.Content
+	// Every wire-order text part becomes a SEGMENT, empty strings included:
+	// explicit newline separators between parts must survive even when a part
+	// is empty, or a later finding would report the wrong line. The scalar
+	// Content leads when non-empty.
+	var segments []string
+	if msg.Content != "" {
+		segments = append(segments, msg.Content)
+	}
 	complete := true
 	for _, r := range raw {
 		var part struct {
@@ -171,12 +178,9 @@ func extractScannable(msg *pbv2.Message) extraction {
 			complete = false // malformed text part (non-string), continue
 			continue
 		}
-		if text != "" {
-			text += "\n"
-		}
-		text += textVal
+		segments = append(segments, textVal)
 	}
-	return extraction{text: text, complete: complete}
+	return extraction{text: strings.Join(segments, "\n"), complete: complete}
 }
 
 func init() {
@@ -222,8 +226,8 @@ func init() {
 			// the extraction is incomplete or the provider/model pair is
 			// misconfigured — on_error governs the UNAVAILABLE contextual
 			// scan, never a deterministic finding already made.
-			if f := regexScan(ex.text); len(f) > 0 {
-				sdk.BlockRequest(422, "pii_detected", blockMessage(toolName, f))
+			if f, overflow := regexScan(ex.text); len(f) > 0 {
+				sdk.BlockRequest(422, "pii_detected", blockMessage(toolName, f, overflow))
 				return sdk.PassRequest(), nil
 			}
 			if !ex.complete {
@@ -256,7 +260,7 @@ func init() {
 				continue
 			}
 
-			findings, err := scan(ex.text, toolName)
+			findings, overflow, err := scan(ex.text, toolName)
 			if err != nil {
 				var sf *scannerFailure
 				if !errors.As(err, &sf) {
@@ -274,7 +278,7 @@ func init() {
 				return sdk.PassRequest(), nil
 			}
 			if len(findings) > 0 {
-				sdk.BlockRequest(422, "pii_detected", blockMessage(toolName, findings))
+				sdk.BlockRequest(422, "pii_detected", blockMessage(toolName, findings, overflow))
 				return sdk.PassRequest(), nil
 			}
 			// Complete extraction was scannable and clean: cache the verdict.
@@ -285,6 +289,14 @@ func init() {
 }
 
 func failClosed() bool { return cfg.OnError != "allow" }
+
+// maxReportedFindings bounds how many findings a block message renders. A
+// security refusal must be small and actionable, not a memory/response
+// amplification path: a hostile or noisy scanner input can produce thousands
+// of findings, and each rendered finding grows the message. All producers
+// stop at the cap and flag overflow; blockMessage additionally caps any
+// caller.
+const maxReportedFindings = 20
 
 // scannerFailure marks a SCANNER failure — advisory refusals, an invalid
 // provider/model pair, or an unparseable model verdict — which the plugin's
@@ -334,34 +346,41 @@ func toolAllowed(name string) bool {
 // over the retained text in the hook (before completeness and pair checks),
 // so a deterministic finding can never be demoted by on_error or a
 // misconfigured pair.
-func scan(content, toolName string) ([]finding, error) {
+func scan(content, toolName string) ([]finding, bool, error) {
 	if !cfg.scannerPairValid() {
 		// Exactly one of provider/model: an invalid scanner configuration,
 		// driven through on_error — with NO offload call.
-		return nil, &scannerFailure{"pii scanner configuration invalid: set both provider and model, or neither"}
+		return nil, false, &scannerFailure{"pii scanner configuration invalid: set both provider and model, or neither"}
 	}
 	if cfg.Provider == "" {
 		// No local model configured: regex-only mode. Nothing more to check.
-		return nil, nil
+		return nil, false, nil
 	}
 	return modelScan(content, toolName)
 }
 
-func regexScan(content string) []finding {
+func regexScan(content string) ([]finding, bool) {
 	var out []finding
 	seen := map[string]bool{}
+	overflow := false
 	for i, line := range strings.Split(content, "\n") {
 		for _, p := range piiPatterns {
 			if p.re.MatchString(line) {
 				key := fmt.Sprintf("%s:%d", p.name, i+1)
 				if !seen[key] {
+					if len(out) >= maxReportedFindings {
+						// Enough to prove the cap was exceeded: stop, so the
+						// result and the dedupe map never grow with the whole
+						// request.
+						return out, true
+					}
 					seen[key] = true
 					out = append(out, finding{Type: p.name, Line: i + 1})
 				}
 			}
 		}
 	}
-	return out
+	return out, overflow
 }
 
 const piiSystemPrompt = `You are a PII detector. Examine the tool output and decide whether it contains personally identifiable information or secrets: emails, phone numbers, physical addresses, government IDs (e.g. SSNs), credit-card or bank numbers, API keys, passwords, private keys, or access tokens.
@@ -371,7 +390,7 @@ Respond with ONLY a JSON object and no other text:
 
 Never include the actual PII values — only the category and line number. If there is no PII, respond {"pii": false, "findings": []}.`
 
-func modelScan(content, toolName string) ([]finding, error) {
+func modelScan(content, toolName string) ([]finding, bool, error) {
 	scanContent := content
 	if cfg.MaxScanBytes > 0 && len(scanContent) > cfg.MaxScanBytes {
 		// Byte budget with rune-safe boundary repair: a mid-rune cut would
@@ -388,7 +407,7 @@ func modelScan(content, toolName string) ([]finding, error) {
 	res, herr, err := sdk.HostCallExtension("torana_offload_completion", payload)
 	if err != nil {
 		// Malformed frame / transport / protocol defect: hook error.
-		return nil, err
+		return nil, false, err
 	}
 	if herr != nil {
 		// Advisory refusals are a scanner failure (on_error decides);
@@ -396,9 +415,9 @@ func modelScan(content, toolName string) ([]finding, error) {
 		// regardless of on_error.
 		switch herr.Code {
 		case pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE:
-			return nil, &scannerFailure{"pii scan failed: " + herr.Message}
+			return nil, false, &scannerFailure{"pii scan failed: " + herr.Message}
 		default:
-			return nil, fmt.Errorf("pii offload refused: %s", herr.Message)
+			return nil, false, fmt.Errorf("pii offload refused: %s", herr.Message)
 		}
 	}
 	// The v2 offload result carries NO status field; refusals arrive only in
@@ -407,7 +426,7 @@ func modelScan(content, toolName string) ([]finding, error) {
 		Completion string `json:"completion"`
 	}
 	if json.Unmarshal(res, &resp) != nil {
-		return nil, fmt.Errorf("pii scan: unparseable offload reply")
+		return nil, false, fmt.Errorf("pii scan: unparseable offload reply")
 	}
 	// The verdict SHAPE is validated explicitly: pii must be present,
 	// non-null, and boolean; findings must be a documented array (or absent).
@@ -418,14 +437,14 @@ func modelScan(content, toolName string) ([]finding, error) {
 		Findings json.RawMessage `json:"findings"`
 	}
 	if json.Unmarshal([]byte(extractJSON(resp.Completion)), &verdict) != nil {
-		return nil, &scannerFailure{"pii scan: unparseable verdict"}
+		return nil, false, &scannerFailure{"pii scan: unparseable verdict"}
 	}
 	if len(verdict.PII) == 0 || string(verdict.PII) == "null" {
-		return nil, &scannerFailure{"pii scan: verdict missing or null pii"}
+		return nil, false, &scannerFailure{"pii scan: verdict missing or null pii"}
 	}
 	var pii bool
 	if err := json.Unmarshal(verdict.PII, &pii); err != nil {
-		return nil, &scannerFailure{"pii scan: verdict pii is not a boolean"}
+		return nil, false, &scannerFailure{"pii scan: verdict pii is not a boolean"}
 	}
 	var findings []struct {
 		Type string `json:"type"`
@@ -433,26 +452,41 @@ func modelScan(content, toolName string) ([]finding, error) {
 	}
 	if len(verdict.Findings) > 0 {
 		if string(verdict.Findings) == "null" {
-			return nil, &scannerFailure{"pii scan: verdict findings is null, not an array"}
+			return nil, false, &scannerFailure{"pii scan: verdict findings is null, not an array"}
 		}
 		if err := json.Unmarshal(verdict.Findings, &findings); err != nil {
-			return nil, &scannerFailure{"pii scan: verdict findings is not an array"}
+			return nil, false, &scannerFailure{"pii scan: verdict findings is not an array"}
 		}
 	}
 	if !pii && len(findings) > 0 {
-		return nil, &scannerFailure{"pii scan: contradictory verdict (pii false with findings)"}
+		return nil, false, &scannerFailure{"pii scan: contradictory verdict (pii false with findings)"}
 	}
 	if !pii {
-		return nil, nil
+		return nil, false, nil
 	}
+	// Bound the reporting: a hostile but valid model reply can return
+	// thousands of findings; render at most the cap and flag overflow.
+	overflow := false
+	if len(findings) > maxReportedFindings {
+		findings = findings[:maxReportedFindings]
+		overflow = true
+	}
+	// Lines are validated against the ACTUAL scanned text: a line beyond the
+	// text's line count (or below 1) is implausible and omitted — never
+	// displayed as a plausible location.
+	lineCount := strings.Count(scanContent, "\n") + 1
 	out := make([]finding, 0, len(findings))
 	for _, f := range findings {
-		out = append(out, finding{Type: f.Type, Line: f.Line})
+		line := f.Line
+		if line < 1 || line > lineCount {
+			line = 0
+		}
+		out = append(out, finding{Type: f.Type, Line: line})
 	}
 	if len(out) == 0 {
 		out = append(out, finding{Type: "unspecified"})
 	}
-	return out, nil
+	return out, overflow, nil
 }
 
 // extractJSON pulls the first complete {...} object out of a model reply that
@@ -531,24 +565,26 @@ func normalizeCategory(cat string) string {
 	return "unspecified"
 }
 
-func blockMessage(toolName string, findings []finding) string {
-	parts := make([]string, 0, len(findings))
-	for _, f := range findings {
+func blockMessage(toolName string, findings []finding, overflow bool) string {
+	// Defensive cap for ANY caller: never render more than the bound, and
+	// append one fixed safe note when findings were omitted.
+	parts := make([]string, 0, min(len(findings), maxReportedFindings))
+	for _, f := range findings[:min(len(findings), maxReportedFindings)] {
 		cat := normalizeCategory(f.Type)
-		line := f.Line
-		if line < 1 || line > 1_000_000 {
-			line = 0 // clamp: only display sane 1-based line numbers
-		}
-		if line > 0 {
-			parts = append(parts, fmt.Sprintf("%s (line %d)", cat, line))
+		if f.Line > 0 {
+			parts = append(parts, fmt.Sprintf("%s (line %d)", cat, f.Line))
 		} else {
 			parts = append(parts, cat)
 		}
 	}
-	return fmt.Sprintf(
+	msg := fmt.Sprintf(
 		"Blocked: PII detected in %s and NOT sent upstream. Found: %s. "+
 			"Do not resend this content; reformulate to exclude or redact these values before returning the tool result.",
 		toolLabel(toolName), strings.Join(parts, ", "))
+	if overflow {
+		msg += " Additional findings omitted."
+	}
+	return msg
 }
 
 // toolLabel displays a tool name ONLY after conservative validation: a short

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -108,6 +109,10 @@ func TestExtractScannableTable(t *testing.T) {
 		{"image part", "", "[" + imagePart() + "]", "", false},
 		{"image after text retains text", "", "[" + textPart("kept") + "," + imagePart() + "]", "kept", false},
 		{"text after image retained", "", "[" + imagePart() + "," + textPart("kept") + "]", "kept", false},
+		{"leading empty text part", "", "[" + textPart("") + "," + textPart("x") + "]", "\nx", true},
+		{"middle empty text part", "", "[" + textPart("a") + "," + textPart("") + "," + textPart("b") + "]", "a\n\nb", true},
+		{"consecutive empty text parts", "", "[" + textPart("") + "," + textPart("") + "," + textPart("x") + "]", "\n\nx", true},
+		{"empty part before unsupported", "", "[" + textPart("") + "," + imagePart() + "," + textPart("x") + "]", "\nx", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -229,10 +234,8 @@ func TestRegexCategoriesBlock(t *testing.T) {
 			if res.Err != nil || !res.PassedThrough {
 				t.Fatalf("err=%v", res.Err)
 			}
+			assertBlocked(t, h, "pii_detected")
 			args := sdktest.DecodeBlockArgs(t, h.BlockCalls()[0].Args)
-			if args.Status != 422 || args.Code != "pii_detected" {
-				t.Fatalf("status/code wrong: %d %q", args.Status, args.Code)
-			}
 			if !strings.Contains(args.Message, tc.wantType) {
 				t.Fatalf("block must name the category: %q", args.Message)
 			}
@@ -251,29 +254,29 @@ func TestDuplicateToolCallIDsAmbiguous(t *testing.T) {
 	for name, mk := range map[string]func() *pbv2.ChatRequest{
 		"read then excluded": func() *pbv2.ChatRequest {
 			return &pbv2.ChatRequest{Messages: []*pbv2.Message{
-				{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "same", Name: "read"}}},
-				{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "same", Name: "excluded"}}},
+				{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "same", Name: "read", ArgumentsJson: []byte(`{}`)}}},
+				{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "same", Name: "excluded", ArgumentsJson: []byte(`{}`)}}},
 				toolMsg("same", "", email, nil),
 			}}
 		},
 		"excluded then read": func() *pbv2.ChatRequest {
 			return &pbv2.ChatRequest{Messages: []*pbv2.Message{
-				{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "same", Name: "excluded"}}},
-				{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "same", Name: "read"}}},
+				{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "same", Name: "excluded", ArgumentsJson: []byte(`{}`)}}},
+				{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "same", Name: "read", ArgumentsJson: []byte(`{}`)}}},
 				toolMsg("same", "", email, nil),
 			}}
 		},
 		"same-name duplicates": func() *pbv2.ChatRequest {
 			return &pbv2.ChatRequest{Messages: []*pbv2.Message{
-				{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "same", Name: "read"}}},
-				{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "same", Name: "read"}}},
+				{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "same", Name: "read", ArgumentsJson: []byte(`{}`)}}},
+				{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "same", Name: "read", ArgumentsJson: []byte(`{}`)}}},
 				toolMsg("same", "", email, nil),
 			}}
 		},
 		"reuse in a later message": func() *pbv2.ChatRequest {
 			return &pbv2.ChatRequest{Messages: []*pbv2.Message{
-				{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "same", Name: "read"}}},
-				{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "same", Name: "excluded"}}},
+				{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "same", Name: "read", ArgumentsJson: []byte(`{}`)}}},
+				{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "same", Name: "excluded", ArgumentsJson: []byte(`{}`)}}},
 				{Role: "user", Content: "later"},
 				toolMsg("same", "", email, nil),
 			}}
@@ -296,8 +299,8 @@ func TestDuplicateToolCallIDsAmbiguous(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(`{"tools":["read"]}`)
 	req := &pbv2.ChatRequest{Messages: []*pbv2.Message{
-		{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "same", Name: "read"}}},
-		{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "same", Name: "excluded"}}},
+		{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "same", Name: "read", ArgumentsJson: []byte(`{}`)}}},
+		{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "same", Name: "excluded", ArgumentsJson: []byte(`{}`)}}},
 		toolMsg("same", "read", "contact someone@example.com", nil),
 	}}
 	res := h.BeforeRequest(req)
@@ -443,34 +446,25 @@ func TestModelVerdictShapeValidation(t *testing.T) {
 		"contradictory false with findings": `{"pii":false,"findings":[{"type":"email","line":1}]}`,
 	}
 	for name, completion := range completions {
-		t.Run(name, func(t *testing.T) {
-			h := newHarness(t)
-			h.SetConfig(`{"provider":"local","model":"qwen","on_error":"block"}`)
-			h.StubHostCall("torana_offload_completion", offloadStub(completion))
-			res := h.BeforeRequest(reqWith(toolMsg("c1", "read", "text", nil)))
-			if res.Err != nil || !res.PassedThrough {
-				t.Fatalf("err=%v", res.Err)
-			}
-			assertBlocked(t, h, "pii_scan_failed")
-			if n := countCommand(h, "env.cache_set"); n != 0 {
-				t.Fatalf("a malformed verdict must never be cached, got %d writes", n)
-			}
-		})
-	}
-
-	// Under allow the malformed verdict forwards but is never cached.
-	h := newHarness(t)
-	h.SetConfig(`{"provider":"local","model":"qwen","on_error":"allow"}`)
-	h.StubHostCall("torana_offload_completion", offloadStub(`{}`))
-	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", "text", nil)))
-	if res.Err != nil || !res.PassedThrough {
-		t.Fatalf("err=%v", res.Err)
-	}
-	if len(h.BlockCalls()) != 0 {
-		t.Fatal("allow must forward a malformed verdict")
-	}
-	if n := countCommand(h, "env.cache_set"); n != 0 {
-		t.Fatalf("a malformed verdict must never be cached, got %d writes", n)
+		for mode, onError := range map[string]string{"block": "block", "allow": "allow"} {
+			t.Run(name+"/"+mode, func(t *testing.T) {
+				h := newHarness(t)
+				h.SetConfig(`{"provider":"local","model":"qwen","on_error":"` + onError + `"}`)
+				h.StubHostCall("torana_offload_completion", offloadStub(completion))
+				res := h.BeforeRequest(reqWith(toolMsg("c1", "read", "text", nil)))
+				if res.Err != nil || !res.PassedThrough {
+					t.Fatalf("err=%v", res.Err)
+				}
+				if onError == "block" {
+					assertBlocked(t, h, "pii_scan_failed")
+				} else if len(h.BlockCalls()) != 0 {
+					t.Fatalf("allow must forward a malformed verdict: %+v", h.BlockCalls())
+				}
+				if n := countCommand(h, "env.cache_set"); n != 0 {
+					t.Fatalf("a malformed verdict must never be cached, got %d writes", n)
+				}
+			})
+		}
 	}
 }
 
@@ -821,4 +815,142 @@ func TestDeterminismOverIdenticalRequests(t *testing.T) {
 	if string(b1) != string(b2) {
 		t.Fatal("identical requests produced different output")
 	}
+}
+
+// TestEmptyPartPreservesLineBoundary — finding 1 (round 2): an empty first
+// text part must keep its newline, so a later finding reports line 2, not
+// line 1.
+func TestEmptyPartPreservesLineBoundary(t *testing.T) {
+	h := newHarness(t)
+	parts := "[" + textPart("") + "," + textPart("contact victim@example.com") + "]"
+	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", "", []byte(parts))))
+	if res.Err != nil || !res.PassedThrough {
+		t.Fatalf("err=%v", res.Err)
+	}
+	assertBlocked(t, h, "pii_detected", "victim@example.com")
+	args := sdktest.DecodeBlockArgs(t, h.BlockCalls()[0].Args)
+	if !strings.Contains(args.Message, "line 2") {
+		t.Fatalf("the empty leading part must push the finding to line 2: %q", args.Message)
+	}
+}
+
+// TestRegexFindingCapAndMessageBound — a request producing more findings than
+// the cap renders exactly the cap, flags overflow, and keeps the message
+// bounded and deterministic.
+func TestRegexFindingCapAndMessageBound(t *testing.T) {
+	content := ""
+	for i := 0; i < 100; i++ {
+		content += "line with someone" + itoa(i) + "@example.com\n"
+	}
+	h := newHarness(t)
+	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", content, nil)))
+	if res.Err != nil || !res.PassedThrough {
+		t.Fatalf("err=%v", res.Err)
+	}
+	args := sdktest.DecodeBlockArgs(t, h.BlockCalls()[0].Args)
+	if !strings.Contains(args.Message, "Additional findings omitted") {
+		t.Fatalf("overflow note missing: %q", args.Message)
+	}
+	if len(args.Message) > 4096 {
+		t.Fatalf("block message unbounded: %d bytes", len(args.Message))
+	}
+	// Deterministic ordering: findings render in line order.
+	first := strings.Index(args.Message, "line 1")
+	second := strings.Index(args.Message, "line 2")
+	if first < 0 || second < 0 || first > second {
+		t.Fatalf("findings out of order: %q", args.Message)
+	}
+}
+
+// TestModelFindingCapAndLineValidation — a hostile model reply with thousands
+// of findings renders at most the cap; line numbers beyond the actual scanned
+// text are omitted; the message stays bounded.
+func TestModelFindingCapAndLineValidation(t *testing.T) {
+	findings := ""
+	for i := 0; i < 100; i++ {
+		findings += `{"type":"email","line":1},`
+	}
+	findings = findings[:len(findings)-1]
+	h := newHarness(t)
+	h.SetConfig(`{"provider":"local","model":"qwen"}`)
+	h.StubHostCall("torana_offload_completion", offloadStub(`{"pii":true,"findings":[`+findings+`]}`))
+	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", "one line", nil)))
+	if res.Err != nil || !res.PassedThrough {
+		t.Fatalf("err=%v", res.Err)
+	}
+	args := sdktest.DecodeBlockArgs(t, h.BlockCalls()[0].Args)
+	if !strings.Contains(args.Message, "Additional findings omitted") {
+		t.Fatalf("overflow note missing: %q", args.Message)
+	}
+	if len(args.Message) > 4096 {
+		t.Fatalf("block message unbounded: %d bytes", len(args.Message))
+	}
+
+	// A one-line input with model lines 2 and 999999: both implausible and
+	// omitted (the category renders without a bogus line).
+	h2 := newHarness(t)
+	h2.SetConfig(`{"provider":"local","model":"qwen"}`)
+	h2.StubHostCall("torana_offload_completion", offloadStub(
+		`{"pii":true,"findings":[{"type":"email","line":2},{"type":"email","line":999999}]}`))
+	res2 := h2.BeforeRequest(reqWith(toolMsg("c1", "read", "one line", nil)))
+	if res2.Err != nil || !res2.PassedThrough {
+		t.Fatalf("err=%v", res2.Err)
+	}
+	args2 := sdktest.DecodeBlockArgs(t, h2.BlockCalls()[0].Args)
+	if strings.Contains(args2.Message, "line 2") || strings.Contains(args2.Message, "999999") {
+		t.Fatalf("implausible lines must be omitted: %q", args2.Message)
+	}
+	if !strings.Contains(args2.Message, "email") {
+		t.Fatalf("the category must still render: %q", args2.Message)
+	}
+}
+
+// TestCleanCacheKeyAuthoritativeInputs — every clean-cache input changes the
+// key: tool-call ID, resolved name, exact scalar, exact structured bytes, and
+// each policy field.
+func TestCleanCacheKeyAuthoritativeInputs(t *testing.T) {
+	msg := toolMsg("c1", "read", "scalar", nil)
+	// Deterministic base under the DEFAULT config.
+	baseHarness := newHarness(t)
+	baseHarness.Run(func() { loadConfig() })
+	base := piiCleanCacheKey(msg, "read")
+	cases := []struct {
+		name string
+		key  func() string
+	}{
+		{"tool call id", func() string { return piiCleanCacheKey(toolMsg("c2", "read", "scalar", nil), "read") }},
+		{"resolved name", func() string { return piiCleanCacheKey(msg, "other") }},
+		{"exact scalar", func() string { return piiCleanCacheKey(toolMsg("c1", "read", "scalar!", nil), "read") }},
+		{"structured bytes", func() string {
+			return piiCleanCacheKey(toolMsg("c1", "read", "", []byte("["+textPart("x")+"]")), "read")
+		}},
+	}
+	for _, tc := range cases {
+		if tc.key() == base {
+			t.Errorf("%s must change the cache key", tc.name)
+		}
+	}
+	// Each policy field is folded in.
+	policyCases := []struct {
+		name string
+		cfg  string
+	}{
+		{"provider", `{"provider":"local","model":"qwen"}`},
+		{"model", `{"model":"qwen"}`},
+		{"tools", `{"tools":["read"]}`},
+		{"on_error", `{"on_error":"allow"}`},
+		{"max_scan_bytes", `{"max_scan_bytes":100}`},
+	}
+	for _, tc := range policyCases {
+		h := newHarness(t)
+		h.SetConfig(tc.cfg)
+		h.Run(func() { loadConfig() })
+		if got := piiCleanCacheKey(msg, "read"); got == base {
+			t.Errorf("policy field %s must change the cache key", tc.name)
+		}
+	}
+}
+
+func itoa(n int) string {
+	return strconv.Itoa(n)
 }
