@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -684,9 +685,29 @@ func TestSchemaDefaultsMatchRuntimeDefaults(t *testing.T) {
 	if string(schema.Properties["interval_seconds_override"].Default) != "0" {
 		t.Fatal("schema interval default != 0")
 	}
+	// The RUNTIME default must equal the schema default (45) — a user who
+	// configures only conversations gets the advertised time bound.
 	rt := parseConfig("")
-	if rt.Conversations != "" || rt.WarmForMinutes != 0 || rt.IntervalSecondsOverride != 0 {
+	if rt.Conversations != "" || rt.WarmForMinutes != 45 || rt.IntervalSecondsOverride != 0 {
 		t.Fatalf("runtime defaults %+v do not match the schema", rt)
+	}
+}
+
+// TestParseConfigWarmForMinutesDefaults — absence, omission, explicit zero,
+// and explicit nonzero are distinguished: omitted -> 45 (schema default),
+// explicit zero -> break-even only.
+func TestParseConfigWarmForMinutesDefaults(t *testing.T) {
+	if got := parseConfig("").WarmForMinutes; got != 45 {
+		t.Fatalf("empty config: warm_for_minutes=%d, want 45", got)
+	}
+	if got := parseConfig(`{"conversations":"c"}`).WarmForMinutes; got != 45 {
+		t.Fatalf("omitted field: warm_for_minutes=%d, want 45", got)
+	}
+	if got := parseConfig(`{"conversations":"c","warm_for_minutes":0}`).WarmForMinutes; got != 0 {
+		t.Fatalf("explicit zero: warm_for_minutes=%d, want 0 (break-even only)", got)
+	}
+	if got := parseConfig(`{"conversations":"c","warm_for_minutes":60}`).WarmForMinutes; got != 60 {
+		t.Fatalf("explicit nonzero: warm_for_minutes=%d, want 60", got)
 	}
 }
 
@@ -716,3 +737,88 @@ func TestNoUnauthorizedCalls(t *testing.T) {
 		}
 	}
 }
+
+// TestTickInvalidEntryZeroPricingZeroSends — durable-state shape validation
+// runs FIRST: invalid schema/identity/accounting/state-phase rows must reach
+// ZERO pricing calls and ZERO sends, and must be stopped.
+func TestTickInvalidEntryZeroPricingZeroSends(t *testing.T) {
+	badKey := func(conv string) string {
+		return "warm/attacker/" + conv
+	}
+	valid := warmEntrySeed(t)
+	cases := []struct {
+		name string
+		key  string
+		mut  func(*warmEntry)
+	}{
+		{"unsupported schema", "warm/conv-1", func(e *warmEntry) { e.SchemaVersion = 1 }},
+		{"key not exactly bound", badKey("conv-1"), func(e *warmEntry) {}},
+		{"missing provider", "warm/conv-1", func(e *warmEntry) { e.Provider = "" }},
+		{"negative last refresh", "warm/conv-1", func(e *warmEntry) { e.LastRefreshMillis = -1 }},
+		{"negative deadline", "warm/conv-1", func(e *warmEntry) { e.DeadlineMillis = -1 }},
+		{"negative attempt", "warm/conv-1", func(e *warmEntry) { e.AttemptMillis = -1 }},
+		{"orphaned attempt in fresh state", "warm/conv-1", func(e *warmEntry) { e.AttemptMillis = 50_000 }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.SetConfig(warmerCfg)
+			h.StubHostCall("torana_cache_pricing", pricingStub())
+			h.StubHostCall("torana_send_request", hitStub())
+			entry := valid
+			tc.mut(&entry)
+			b, _ := json.Marshal(entry)
+			h.SeedState(tc.key, string(b))
+			tickAt(h, 300_000)
+			if n := countCommand(h, "torana_cache_pricing"); n != 0 {
+				t.Fatalf("an invalid entry must reach ZERO pricing calls, got %d", n)
+			}
+			if n := countCommand(h, "torana_send_request"); n != 0 {
+				t.Fatalf("an invalid entry must send ZERO times, got %d", n)
+			}
+			raw, ok := h.State(tc.key)
+			if !ok || !strings.Contains(raw, `"stopped"`) {
+				t.Fatalf("the invalid entry must be stopped and retained: %s", raw)
+			}
+		})
+	}
+}
+
+// TestTickIntervalOverrideBoundary — an override at or beyond the provider's
+// shortest cache lifetime is rejected with zero sends; just below it is due
+// and sends.
+func TestTickIntervalOverrideBoundary(t *testing.T) {
+	for name, override := range map[string]int{
+		"equal to TTL":   300,
+		"beyond the TTL": 301,
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			h.SetConfig(`{"conversations":"conv-1","interval_seconds_override":` + itoa(override) + `}`)
+			h.StubHostCall("torana_cache_pricing", pricingStub())
+			h.StubHostCall("torana_send_request", hitStub())
+			seedEntry(t, h, warmEntrySeed(t))
+			tickAt(h, 300_000)
+			if n := countCommand(h, "torana_send_request"); n != 0 {
+				t.Fatalf("an override at/beyond the TTL must send ZERO times, got %d", n)
+			}
+			raw, _ := h.State("warm/conv-1")
+			if !strings.Contains(raw, `"refresh interval exceeds cache lifetime"`) {
+				t.Fatalf("the invalid override must be stopped: %s", raw)
+			}
+		})
+	}
+
+	// Just below the TTL (299 < 300): due and sends.
+	h := newHarness(t)
+	h.SetConfig(`{"conversations":"conv-1","interval_seconds_override":299}`)
+	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("torana_send_request", hitStub())
+	seedEntry(t, h, warmEntrySeed(t))
+	tickAt(h, 300_000)
+	if n := countCommand(h, "torana_send_request"); n != 1 {
+		t.Fatalf("an override just below the TTL must send once, got %d", n)
+	}
+}
+
+func itoa(n int) string { return strconv.Itoa(n) }

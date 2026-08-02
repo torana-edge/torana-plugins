@@ -8,6 +8,7 @@ import (
 
 	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 	"github.com/torana-edge/torana-plugin-sdk/sdktest"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
@@ -54,35 +55,46 @@ func TestDecisionWithoutUsableClockOrTTLDoesNotExpire(t *testing.T) {
 // additive proto field cannot silently escape the fingerprint), while the
 // deliberately excluded top-level fields and suffix messages must NOT change
 // the key.
+//
+// Each table builds a PREPARED baseline that already carries its nested
+// object; every row then clones that exact baseline, mutates ONE descriptor
+// field, and compares the two keys. Without the prepared baseline the
+// ToolDef/ToolCall rows would pass merely because a whole nested object
+// appeared in the clone — the targeted field could be dropped from the
+// projection and the test would stay green.
 func TestFingerprintReflectionInventory(t *testing.T) {
-	// Every nested field: mutating it inside the prefix changes the key.
 	tables := []struct {
-		name string
-		pick func(*pbv2.ChatRequest) protoreflect.Message
+		name  string
+		build func() *pbv2.ChatRequest
+		pick  func(*pbv2.ChatRequest) protoreflect.Message
 	}{
-		{"Message", func(r *pbv2.ChatRequest) protoreflect.Message { return r.Messages[0].ProtoReflect() }},
-		{"ToolDef", func(r *pbv2.ChatRequest) protoreflect.Message {
+		{"Message", func() *pbv2.ChatRequest {
+			return baseRequest()
+		}, func(r *pbv2.ChatRequest) protoreflect.Message { return r.Messages[0].ProtoReflect() }},
+		{"ToolDef", func() *pbv2.ChatRequest {
+			r := baseRequest()
 			r.Tools = []*pbv2.ToolDef{{Name: "read", Description: "d", ParametersJson: []byte(`{}`), CacheControlJson: []byte(`{"type":"ephemeral"}`)}}
 			r.Messages[0].CacheControlJson = []byte(`{"type":"ephemeral"}`)
-			return r.Tools[0].ProtoReflect()
-		}},
-		{"ToolCall", func(r *pbv2.ChatRequest) protoreflect.Message {
+			return r
+		}, func(r *pbv2.ChatRequest) protoreflect.Message { return r.Tools[0].ProtoReflect() }},
+		{"ToolCall", func() *pbv2.ChatRequest {
+			r := baseRequest()
 			r.Messages[0].ToolCalls = []*pbv2.ToolCall{{Id: "c1", Name: "read", ArgumentsJson: []byte(`{}`), Signature: "sig"}}
-			return r.Messages[0].ToolCalls[0].ProtoReflect()
-		}},
+			return r
+		}, func(r *pbv2.ChatRequest) protoreflect.Message { return r.Messages[0].ToolCalls[0].ProtoReflect() }},
 	}
 	for _, tbl := range tables {
 		t.Run(tbl.name, func(t *testing.T) {
-			base := tbl.pick(baseRequest())
-			fields := base.Descriptor().Fields()
+			base := tbl.build()
+			before := cachePrefixKey(base)
+			if before == "" {
+				t.Fatal("fixture has no breakpoint; vacuous")
+			}
+			fields := tbl.pick(base).Descriptor().Fields()
 			for i := 0; i < fields.Len(); i++ {
 				fd := fields.Get(i)
 				t.Run(fd.TextName(), func(t *testing.T) {
-					before := cachePrefixKey(baseRequest())
-					if before == "" {
-						t.Fatal("fixture has no breakpoint; vacuous")
-					}
-					changed := baseRequest()
+					changed := proto.Clone(base).(*pbv2.ChatRequest)
 					mutateField(t, tbl.pick(changed), fd)
 					if got := cachePrefixKey(changed); got == before {
 						t.Errorf("changing %s did not change the fingerprint — it is part of the cached prefix", fd.TextName())
@@ -658,4 +670,81 @@ func mustJSON(t *testing.T, v any) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// TestStoredDecisionClockClassification — with a stored decision, an advisory
+// clock failure may reapply the already-sticky marker, but a contract clock
+// failure must error exactly as on the fresh-decision path (never swallowed).
+func TestStoredDecisionClockClassification(t *testing.T) {
+	// Advisory clock + stored decision: reapply, no error.
+	h := newHarness(t)
+	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.now", func(string) (string, error) {
+		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no clock"), nil
+	})
+	req := reqWith(t, h)
+	h.SeedState("decision/"+cachePrefixKey(req), mustJSON(t, decision{
+		Marker: map[string]any{"type": "ephemeral", "ttl": "1h"}, TierTTL: 3600, DecidedAtMillis: 900_000,
+	}))
+	res := h.BeforeRequest(req)
+	if res.Err != nil {
+		t.Fatalf("advisory clock must allow reapplication, err=%v", res.Err)
+	}
+
+	// Contract clock + stored decision: hook error.
+	h2 := newHarness(t)
+	h2.StubHostCall("torana_cache_pricing", pricingStub())
+	h2.StubHostCall("env.now", func(string) (string, error) {
+		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub"), nil
+	})
+	req2 := reqWith(t, h2)
+	h2.SeedState("decision/"+cachePrefixKey(req2), mustJSON(t, decision{
+		Marker: map[string]any{"type": "ephemeral", "ttl": "1h"}, TierTTL: 3600, DecidedAtMillis: 900_000,
+	}))
+	if res2 := h2.BeforeRequest(req2); res2.Err == nil {
+		t.Fatal("a contract clock refusal must error the hook even with a stored decision")
+	}
+}
+
+// TestActivityPersistenceFailureClasses — mode short so no decision write can
+// mask the activity outcome: only ADVISORY activity-write failures are
+// swallowed; contract refusals and malformed frames surface.
+func TestActivityPersistenceFailureClasses(t *testing.T) {
+	// Advisory: pass.
+	h := newHarness(t)
+	h.SetConfig(`{"mode":"short"}`)
+	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.SetNow(1_000_000)
+	h.StubHostCall("env.state_set", func(args string) (string, error) {
+		if strings.Contains(args, "activity/") {
+			return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no store"), nil
+		}
+		return sdktest.HostResultValue(nil), nil
+	})
+	res := h.BeforeRequest(reqWith(t, h))
+	if res.Err != nil || !res.PassedThrough {
+		t.Fatalf("an advisory activity write must be swallowed, err=%v", res.Err)
+	}
+
+	// Contract: hook error.
+	h2 := newHarness(t)
+	h2.SetConfig(`{"mode":"short"}`)
+	h2.StubHostCall("torana_cache_pricing", pricingStub())
+	h2.SetNow(1_000_000)
+	h2.DenyPermission("env.state_set")
+	if res2 := h2.BeforeRequest(reqWith(t, h2)); res2.Err == nil {
+		t.Fatal("a contract activity write refusal must error the hook")
+	}
+
+	// Malformed frame: hook error (a plain protocol error, not a refusal).
+	h3 := newHarness(t)
+	h3.SetConfig(`{"mode":"short"}`)
+	h3.StubHostCall("torana_cache_pricing", pricingStub())
+	h3.SetNow(1_000_000)
+	h3.StubHostCall("env.state_set", func(string) (string, error) {
+		return "not a frame", nil
+	})
+	if res3 := h3.BeforeRequest(reqWith(t, h3)); res3.Err == nil {
+		t.Fatal("a malformed activity write frame must error the hook")
+	}
 }

@@ -194,7 +194,20 @@ func init() {
 			found = true
 		}
 		if found {
-			if clockErr != nil || !decisionExpired(prior, now) {
+			switch {
+			case clockErr != nil && !isAdvisory(clockErr):
+				// Contract/protocol clock failure: surface exactly as on the
+				// fresh-decision path — never swallow it because a sticky
+				// decision happens to exist.
+				return sdk.RequestResult{}, clockErr
+			case clockErr != nil:
+				// Advisory clock failure: the decision is already sticky and
+				// byte-identical, so reapplying it is safe.
+				if applyMarker(req, idx, prior.Marker) {
+					return sdk.ReplaceRequest(req), nil
+				}
+				return sdk.PassRequest(), nil
+			case !decisionExpired(prior, now):
 				if applyMarker(req, idx, prior.Marker) {
 					return sdk.ReplaceRequest(req), nil
 				}
@@ -333,12 +346,14 @@ func recordActivity(convKey string, now int64) (activity, error) {
 	act.LastSeenMillis = now
 	act.Turns++
 	if err := sdk.StateSetJSON(key, act); err != nil {
-		var refusal *sdk.HostCallRefusalError
-		if errors.As(err, &refusal) && !isAdvisory(err) {
-			return act, err
+		// Swallow ONLY advisory refusals: an unpersisted activity must not
+		// create a churning mutation, and the decision persist gates any
+		// application. Contract refusals and malformed frames (plain protocol
+		// errors) surface.
+		if isAdvisory(err) {
+			return act, nil
 		}
-		// Advisory write failure: proceed; the decision persist gates the
-		// mutation (an unpersisted decision is never applied).
+		return act, err
 	}
 	return act, nil
 }

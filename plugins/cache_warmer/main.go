@@ -109,10 +109,27 @@ type config struct {
 // parseConfig is the pure config decoder; the host validates config against
 // schema.json at write time, so an unmarshal failure is unreachable in
 // practice and falls back to defaults. Loaded per call — no process globals.
+//
+// warm_for_minutes defaults to 45 (the schema default): a user who configures
+// only `conversations` gets the advertised time-bounded warming. An EXPLICIT
+// zero is preserved as "break-even count alone" — absence and zero are
+// distinguished by the pointer decode.
 func parseConfig(raw string) config {
-	var cfg config
+	var c struct {
+		Conversations           string `json:"conversations"`
+		WarmForMinutes          *int   `json:"warm_for_minutes"`
+		IntervalSecondsOverride int    `json:"interval_seconds_override"`
+	}
 	if raw != "" {
-		_ = json.Unmarshal([]byte(raw), &cfg)
+		_ = json.Unmarshal([]byte(raw), &c)
+	}
+	cfg := config{
+		Conversations:           c.Conversations,
+		WarmForMinutes:          45,
+		IntervalSecondsOverride: c.IntervalSecondsOverride,
+	}
+	if c.WarmForMinutes != nil {
+		cfg.WarmForMinutes = *c.WarmForMinutes
 	}
 	return cfg
 }
@@ -266,6 +283,15 @@ func init() {
 				_, _ = sdk.StateDelete(key)
 				continue
 			}
+			// Durable-state shape validation is the FIRST step after decoding
+			// — before pricing and before any spend-related decision. Invalid
+			// entries must never reach a pricing call or a send.
+			entry.Stopped = validateEntry(&entry, key)
+			if entry.Stopped != "" {
+				persistStop(key, &entry)
+				notes = append(notes, fmt.Sprintf("%s: stopped, %s", short(entry.ConversationID), entry.Stopped))
+				continue
+			}
 
 			action, note, err := refreshOne(&entry, cfg, key, tick.UnixMillis)
 			if err != nil {
@@ -345,6 +371,17 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 			short(entry.ConversationID), entry.RefreshesSpent), nil
 	}
 
+	// An interval override at or beyond the provider's shortest cache
+	// lifetime would always arrive after the entry expired — the refresh
+	// could only rebuild and waste money. Zero means the provider-derived
+	// cadence; anything else must be strictly inside the lifetime.
+	if cfg.IntervalSecondsOverride > 0 &&
+		cfg.IntervalSecondsOverride >= pricing.ShortestTTLSeconds {
+		entry.Stopped = "refresh interval exceeds cache lifetime"
+		persistStop(key, entry)
+		return false, fmt.Sprintf("%s: stopped, refresh interval %ds not below the %ds cache lifetime",
+			short(entry.ConversationID), cfg.IntervalSecondsOverride, pricing.ShortestTTLSeconds), nil
+	}
 	interval := int64(pricing.WarmIntervalSeconds) * 1000
 	if cfg.IntervalSecondsOverride > 0 {
 		interval = int64(cfg.IntervalSecondsOverride) * 1000
@@ -360,20 +397,6 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 	}
 	if now-last < interval {
 		return false, "", nil // not due yet
-	}
-
-	// Durable-entry validation (schema + identity) BEFORE any reservation.
-	if entry.SchemaVersion != schemaVersion {
-		entry.Stopped = "unsupported entry schema"
-		persistStop(key, entry)
-		return false, fmt.Sprintf("%s: stopped, unsupported entry schema", short(entry.ConversationID)), nil
-	}
-	if entry.Provider == "" || entry.Model == "" || entry.Path == "" || entry.ConversationID == "" ||
-		!strings.HasSuffix(key, "/"+entry.ConversationID) ||
-		entry.RefreshesSpent < 0 || entry.LastSeenMillis < 0 {
-		entry.Stopped = "invalid warm entry"
-		persistStop(key, entry)
-		return false, fmt.Sprintf("%s: stopped, invalid warm entry", short(entry.ConversationID)), nil
 	}
 
 	req, err := sdk.DecodeRequest(entry.PrefixPB)
@@ -523,6 +546,34 @@ func readHostMeta(req *pbv2.ChatRequest) hostMeta {
 	}
 	_ = json.Unmarshal(req.ToranaMetaJson, &meta)
 	return meta
+}
+
+// validateEntry checks the durable-state SHAPE of an entry and returns a stop
+// reason, or "" when the entry is coherent. It runs before any pricing or
+// spend-related decision. The key must bind EXACTLY to the conversation
+// (warm/<conversation_id> — a suffix match would let warm/attacker/conv-1
+// masquerade as conv-1); every accounting/timestamp field must be
+// nonnegative; and a fresh state (Stopped == "") must carry no prior attempt
+// (an orphaned positive AttemptMillis would let a crashed reservation spend
+// again). There is no compatibility handling for old entries.
+func validateEntry(entry *warmEntry, key string) string {
+	if entry.SchemaVersion != schemaVersion {
+		return "unsupported entry schema"
+	}
+	if key != entryPrefix+entry.ConversationID {
+		return "invalid warm entry"
+	}
+	if entry.Provider == "" || entry.Model == "" || entry.Path == "" || entry.ConversationID == "" {
+		return "invalid warm entry"
+	}
+	if entry.RefreshesSpent < 0 || entry.LastSeenMillis < 0 || entry.LastRefreshMillis < 0 ||
+		entry.DeadlineMillis < 0 || entry.AttemptMillis < 0 {
+		return "invalid warm entry"
+	}
+	if entry.Stopped == "" && entry.AttemptMillis != 0 {
+		return "invalid warm entry"
+	}
+	return ""
 }
 
 func short(id string) string {
