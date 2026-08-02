@@ -495,9 +495,12 @@ func applyDeterministicPolicy(msg *pbv2.Message, toolName, toolArgs string, rule
 	if herr != nil && !sdk.IsNotFound(herr) {
 		return false, fmt.Errorf("compactor: policy cache_get refused: %s", herr.Message)
 	}
-	// A present-empty cached value is unusable (it would erase the result):
-	// recompute, exactly like a miss.
-	if herr == nil && cached != "" {
+	// Trust the cached value only when it is non-empty AND shorter than the
+	// original. Missing, present-empty, and NON-SHORTER values are unusable
+	// and recomputed locally — the replacement is a pure function of the
+	// inputs, so a corrupt or stale entry must never be applied (applying a
+	// non-shorter value would expand the request) or cached forever.
+	if herr == nil && cached != "" && len(cached) < len(msg.Content) {
 		recordSavings(len(msg.Content), len(cached), "cache_reuse")
 		msg.Content = cached
 		return true, nil

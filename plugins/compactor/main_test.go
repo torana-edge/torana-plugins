@@ -1149,3 +1149,27 @@ func TestSchemaDefaultsMatchRuntimeDefaults(t *testing.T) {
 		t.Fatalf("runtime defaults %+v do not match the schema defaults", rt)
 	}
 }
+
+// TestDeterministicNonShorterCacheRecomputes — the batch-2 consistency fix:
+// a NON-SHORTER deterministic-policy cache value is unusable (applying it
+// would expand the request) and is recomputed locally; the applied output is
+// the computed replacement, never the cached value.
+func TestDeterministicNonShorterCacheRecomputes(t *testing.T) {
+	cfg := `{"tool_policies":[{"match":"read*","mode":"deterministic","first_pass":true}]}`
+	content := bigContent()
+	args := `{"path":"server.go"}`
+	key := sdk.ContentAddressedCacheKey(policyCompactionCache, "v2", "read", args, content, "deterministic", "")
+	h := newHarness(t)
+	h.SetConfig(cfg)
+	h.SeedCache(key, content+"extra bytes making the cached value non-shorter")
+	res := h.BeforeRequest(bigToolRequest(content))
+	if res.Err != nil || res.Request == nil {
+		t.Fatalf("expected a recomputed replacement, err=%v", res.Err)
+	}
+	if res.Request.Messages[3].Content == content+"extra bytes making the cached value non-shorter" {
+		t.Fatal("a non-shorter cached value must never be applied")
+	}
+	if res.Request.Messages[3].Content == content {
+		t.Fatal("a non-shorter cached value must be recomputed, not left untouched")
+	}
+}
