@@ -480,6 +480,8 @@ func TestRegistryWirePresenceDistinctions(t *testing.T) {
 		"empty path":          `{"version":1,"tools":{"t":[{"path":[]}]}}`,
 		"empty mutations":     `{"version":1,"tools":{"t":[]}}`,
 		"unknown version":     `{"version":2,"tools":{}}`,
+		"lone high surrogate": `{"version":1,"tools":{"t":[{"path":[{"field":"\ud800","each":false}]}]}}`,
+		"lone low surrogate":  `{"version":1,"tools":{"\udc00":[{"path":[{"field":"a","each":false}]}]}}`,
 		"trailing JSON":       `{"version":1,"tools":{}} {}`,
 		"null envelope":       `null`,
 		"field wrong type":    `{"version":1,"tools":{"t":[{"path":[{"field":7,"each":false}]}]}}`,
@@ -1389,4 +1391,151 @@ func TestStreamStrictReversalClasses(t *testing.T) {
 			t.Fatalf("signature must be preserved on a semantic no-op, got %q", sig)
 		}
 	})
+}
+
+// ==========================================================================
+// Round-2 pins (lossless JSON / token boundaries)
+// ==========================================================================
+
+// TestLosslessNumbers — JSON numbers must keep their exact lexeme through
+// schema translation and strict reversal. float64 decoding rounds
+// 9007199254740993 to 9007199254740992, changing validation and executable
+// tool input. The emitted lexeme is compared, not float-decoded.
+func TestLosslessNumbers(t *testing.T) {
+	lexemes := []string{
+		"9007199254740991", "9007199254740992", "9007199254740993",
+		"18446744073709551615", "-18446744073709551615",
+		"0.123456789012345678901234567890", "-0", "1.0", "1e+100",
+	}
+	for _, lex := range lexemes {
+		t.Run("schema "+lex, func(t *testing.T) {
+			raw := `{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}},"n":{"type":"number","minimum":` + lex + `}}}`
+			// Lossless decode in the harness too: plain float64 unmarshal
+			// would round the lexeme before the translator ever sees it.
+			dec := json.NewDecoder(strings.NewReader(raw))
+			dec.UseNumber()
+			var schema map[string]any
+			if err := dec.Decode(&schema); err != nil {
+				t.Fatal(err)
+			}
+			translateSchema(schema, nil, siteRoot)
+			out, err := json.Marshal(schema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(out), `"minimum":`+lex) {
+				t.Fatalf("schema number lexeme changed: %s", out)
+			}
+		})
+		t.Run("args "+lex, func(t *testing.T) {
+			paths := []mutationPath{{steps: []pathStep{{field: "env", each: false}}}}
+			args := `{"env":[{"key":"A","value":` + lex + `}]}`
+			reversed, changed, err := reverseTranslate("t", args, paths)
+			if err != nil {
+				t.Fatalf("reverse: %v", err)
+			}
+			if !changed {
+				t.Fatal("no conversion reported")
+			}
+			if !strings.Contains(reversed, `"A":`+lex) {
+				t.Fatalf("argument number lexeme changed: %s", reversed)
+			}
+		})
+	}
+}
+
+// TestLosslessNumbersThroughHook — the reviewer's exact reproduction: a
+// schema carrying minimum:9007199254740993 alongside an unrelated open map is
+// replaced, and the emitted ParametersJson must keep the exact lexeme.
+func TestLosslessNumbersThroughHook(t *testing.T) {
+	raw := `{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}},"n":{"type":"number","minimum":9007199254740993}}}`
+	h := newHarness(t)
+	res := h.BeforeRequest(reqWithTools(raw))
+	if res.Err != nil || res.Request == nil {
+		t.Fatalf("expected replacement, err=%v", res.Err)
+	}
+	got := string(res.Request.Tools[0].ParametersJson)
+	if !strings.Contains(got, `9007199254740993`) {
+		t.Fatalf("schema number rounded through the hook: %s", got)
+	}
+}
+
+// TestLosslessNumbersAtStreamBoundary — the reviewer's argument reproduction
+// through the real fragmented stream.
+func TestLosslessNumbersAtStreamBoundary(t *testing.T) {
+	h := newHarness(t)
+	h.BeforeRequest(reqWithTools(`{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}}}}`))
+	res := streamBlock(t, h, 0, "call_1", "read", "sig", `{"env":[{"key":"A","value":9007199254740993}]}`)
+	if got := emittedArgs(t, res); got != `{"env":{"A":9007199254740993}}` {
+		t.Fatalf("argument number rounded through the stream: %q", got)
+	}
+}
+
+// TestTextualBoundaries — raw invalid UTF-8 and lone surrogate escapes must
+// terminate or be rejected everywhere strings carry data, while a valid
+// surrogate pair and literal text survive (never normalized to U+FFFD).
+func TestTextualBoundaries(t *testing.T) {
+	paths := []mutationPath{{steps: []pathStep{{field: "env", each: false}}}}
+	for name, args := range map[string]string{
+		"raw invalid UTF-8 in key":   "{\"env\":[{\"key\":\"k\xff\",\"value\":\"v\"}]}",
+		"lone high surrogate in key": `{"env":[{"key":"\ud800","value":"v"}]}`,
+		"lone low surrogate in key":  `{"env":[{"key":"\udc00","value":"v"}]}`,
+		"lone high in value":         `{"env":[{"key":"k","value":"\ud801"}]}`,
+	} {
+		t.Run("terminates "+name, func(t *testing.T) {
+			if _, _, err := reverseTranslate("t", args, paths); err == nil {
+				t.Fatalf("must terminate: %q", args)
+			}
+		})
+	}
+	for name, tc := range map[string]struct{ args, want string }{
+		"valid surrogate pair":  {`{"env":[{"key":"\ud83d\ude00","value":"v"}]}`, `{"env":{"😀":"v"}}`},
+		"literal escaped slash": {`{"env":[{"key":"\\ud800","value":"v"}]}`, `{"env":{"\\ud800":"v"}}`},
+		"literal U+FFFD":        {"{\"env\":[{\"key\":\"k\xef\xbf\xbd\",\"value\":\"v\"}]}", "{\"env\":{\"k\xef\xbf\xbd\":\"v\"}}"},
+	} {
+		t.Run("accepts "+name, func(t *testing.T) {
+			reversed, changed, err := reverseTranslate("t", tc.args, paths)
+			if err != nil {
+				t.Fatalf("must succeed: %v", err)
+			}
+			if !changed {
+				t.Fatal("no conversion reported")
+			}
+			var gotM, wantM map[string]any
+			if err := json.Unmarshal([]byte(reversed), &gotM); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(tc.want), &wantM); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(gotM, wantM) {
+				t.Fatalf("got %q, want %q", reversed, tc.want)
+			}
+		})
+	}
+}
+
+// TestTextuallyInvalidSchemasAreCarriedUnchanged — invalid UTF-8 or lone
+// surrogates in a schema make it untranslatable (never panicking, never
+// normalized); the raw bytes travel byte-identical.
+func TestTextuallyInvalidSchemasAreCarriedUnchanged(t *testing.T) {
+	for name, params := range map[string]string{
+		"raw invalid UTF-8 in property": "{\"type\":\"object\",\"properties\":{\"k\xff\":{\"type\":\"object\"}}}",
+		"lone surrogate in property":    `{"type":"object","properties":{"\ud800":{"type":"object"}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			req := &pbv2.ChatRequest{Tools: []*pbv2.ToolDef{{Name: "t", ParametersJson: []byte(params)}}}
+			res := h.BeforeRequest(req)
+			if !res.PassedThrough || res.Err != nil {
+				t.Fatalf("expected pass-through, err=%v", res.Err)
+			}
+			if env := publishedEnvelope(t, h); env != `{"version":1,"tools":{}}` {
+				t.Fatalf("envelope = %s", env)
+			}
+			if string(req.Tools[0].ParametersJson) != params {
+				t.Fatal("the raw schema bytes were normalized")
+			}
+		})
+	}
 }

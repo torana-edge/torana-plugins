@@ -124,34 +124,66 @@ func init() {
 
 // requestHeaders extracts the allowlisted request headers the host injects
 // into ToranaMeta under _request_headers (only when the env.request_headers
-// grant is held). Malformed host-provided metadata is a protocol defect.
+// grant is held). Malformed host-provided metadata — including textually
+// invalid JSON — is a protocol defect, and the decode is lossless
+// (decodeJSONObject) so no header byte is normalized before the token
+// grammar sees it.
 func requestHeaders(req *pbv2.ChatRequest) (map[string]any, error) {
 	if len(req.ToranaMetaJson) == 0 {
 		return nil, nil
 	}
-	var meta map[string]any
-	if err := json.Unmarshal(req.ToranaMetaJson, &meta); err != nil {
+	meta, err := decodeJSONObject(req.ToranaMetaJson)
+	if err != nil {
 		return nil, fmt.Errorf("auth: malformed ToranaMetaJson: %w", err)
+	}
+	if meta == nil {
+		return nil, nil
 	}
 	headers, _ := meta["_request_headers"].(map[string]any)
 	return headers, nil
 }
 
+// validVirtualKey is the ONE virtual-key validator shared by both header
+// sources. The v2 token grammar is explicitly ASCII: the prefix "sk-torana-"
+// followed by at least one printable ASCII byte (0x21..0x7e), with no
+// controls, whitespace, DEL, non-ASCII, or empty suffix. The host injects
+// headers through JSON metadata and this plugin sends JSON to the verifier,
+// so non-ASCII bytes cannot satisfy the promise that the token reaches
+// verification unchanged — they would be normalized by a JSON marshal before
+// the plugin even sees them. This stays flexible about the private verifier's
+// punctuation/alphabet while making JSON transport lossless.
+func validVirtualKey(token string) bool {
+	if !strings.HasPrefix(token, virtualKeyPrefix) {
+		return false
+	}
+	rest := token[len(virtualKeyPrefix):]
+	if rest == "" {
+		return false
+	}
+	for i := 0; i < len(rest); i++ {
+		if rest[i] < 0x21 || rest[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
 // virtualKeyCandidate picks the single resolvable credential:
 //
 //   - an Authorization bearer that parses under the exact Bearer grammar and
-//     carries a virtual key WINS over X-Api-Key (deterministic; verification
-//     happens exactly once, and same-token duplication still verifies once);
-//   - otherwise an X-Api-Key virtual key;
+//     carries a valid virtual key WINS over X-Api-Key (deterministic;
+//     verification happens exactly once, and same-token duplication still
+//     verifies once);
+//   - otherwise an X-Api-Key virtual key (same validator);
 //   - otherwise nothing. Unverified JWT-shaped bearers, provider keys, and
 //     X-Torana-* headers are NOT candidates.
 func virtualKeyCandidate(headers map[string]any) (string, bool) {
 	if auth, ok := headers["Authorization"].(string); ok {
-		if token, ok := parseBearer(auth); ok && strings.HasPrefix(token, virtualKeyPrefix) {
+		if token, ok := parseBearer(auth); ok && validVirtualKey(token) {
 			return token, true
 		}
 	}
-	if apiKey, ok := headers["X-Api-Key"].(string); ok && strings.HasPrefix(apiKey, virtualKeyPrefix) {
+	if apiKey, ok := headers["X-Api-Key"].(string); ok && validVirtualKey(apiKey) {
 		return apiKey, true
 	}
 	return "", false

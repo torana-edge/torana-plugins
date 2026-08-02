@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"unicode/utf8"
 
 	"google.golang.org/protobuf/proto"
 
@@ -347,14 +348,18 @@ func translateTools(tools []*pbv2.ToolDef) (*registry, []*pbv2.ToolDef, bool) {
 			continue
 		}
 		nt := proto.Clone(tool).(*pbv2.ToolDef)
-		if counts[tool.Name] > 1 || len(tool.ParametersJson) == 0 {
+		if !validJSONString(tool.Name) || counts[tool.Name] > 1 || len(tool.ParametersJson) == 0 {
+			// An invalid tool name would be normalized by the envelope's JSON
+			// encoding, making the recorded key unreachable or shared; it is
+			// never translated or recorded.
 			newTools = append(newTools, nt)
 			continue
 		}
-		var params map[string]any
-		if err := json.Unmarshal(tool.ParametersJson, &params); err != nil || params == nil {
-			// Malformed, null, array, or scalar schema: cannot translate,
-			// not recorded, carried byte-identical.
+		params, err := decodeJSONObject(tool.ParametersJson)
+		if err != nil || params == nil {
+			// Malformed, null, array, scalar, or textually invalid (bad UTF-8,
+			// lone surrogates) schema: cannot translate, not recorded, carried
+			// byte-identical.
 			newTools = append(newTools, nt)
 			continue
 		}
@@ -378,6 +383,24 @@ func translateTools(tools []*pbv2.ToolDef) (*registry, []*pbv2.ToolDef, bool) {
 		newTools = append(newTools, nt)
 	}
 	return reg, newTools, changed
+}
+
+// validJSONString reports whether s can travel through JSON encoding without
+// normalization: valid UTF-8 and no lone surrogate code points. A string with
+// invalid bytes or an unpaired surrogate would be rewritten by json.Marshal
+// (U+FFFD substitution), so a tool name that fails this check is never
+// recorded in the registry envelope (its stream-side lookup would be
+// unreachable or shared).
+func validJSONString(s string) bool {
+	if !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if r >= 0xD800 && r <= 0xDFFF {
+			return false
+		}
+	}
+	return true
 }
 
 // isAdvisory reports whether a refusal code means "try without this
@@ -616,12 +639,13 @@ func reverseTranslate(toolName string, argsJSON string, paths []mutationPath) (s
 	if len(paths) == 0 {
 		return argsJSON, false, nil
 	}
-	if err := rejectDuplicateKeys([]byte(argsJSON)); err != nil {
+	// Lossless decode: validateJSONText (UTF-8 + surrogate invariants),
+	// duplicate-key rejection, UseNumber (number lexemes survive), and an
+	// exact one-value check. Empty bytes, null, arrays, scalars, malformed
+	// JSON, and textually invalid input all error here.
+	args, err := decodeJSONObject([]byte(argsJSON))
+	if err != nil {
 		return "", false, fmt.Errorf("schema_translator: cannot reverse %q: %w", toolName, err)
-	}
-	var args map[string]any
-	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-		return "", false, fmt.Errorf("schema_translator: cannot reverse %q: arguments are not a JSON object", toolName)
 	}
 	if args == nil {
 		return "", false, fmt.Errorf("schema_translator: cannot reverse %q: arguments are null", toolName)

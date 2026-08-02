@@ -125,6 +125,9 @@ func TestDecodeVerifyResponseGrammar(t *testing.T) {
 		"rejected without message": `{"status":"rejected"}`,
 		"rejected with empty msg":  `{"status":"rejected","message":""}`,
 		"rejected 1024-byte msg":   `{"status":"rejected","message":"` + strings.Repeat("x", 1024) + `"}`,
+		"valid surrogate pair":     `{"status":"ok","tenant_id":"\ud83d\ude00"}`,
+		"literal escaped slash":    `{"status":"ok","tenant_id":"\\ud800"}`,
+		"literal U+FFFD":           `{"status":"ok","tenant_id":"` + "\uFFFD" + `"}`,
 	} {
 		t.Run("accept "+name, func(t *testing.T) {
 			if _, err := decodeVerifyResponse([]byte(raw)); err != nil {
@@ -151,6 +154,9 @@ func TestDecodeVerifyResponseGrammar(t *testing.T) {
 		"invalid UTF-8 tenant":  "{\"status\":\"ok\",\"tenant_id\":\"t\xff\"}",
 		"invalid UTF-8 user":    "{\"status\":\"ok\",\"user_id\":\"u\x00\"}",
 		"invalid UTF-8 message": "{\"status\":\"rejected\",\"message\":\"m\xff\"}",
+		"lone high surrogate":   `{"status":"ok","tenant_id":"\ud800"}`,
+		"lone low surrogate":    `{"status":"ok","tenant_id":"\udc00"}`,
+		"distinct lone highs":   `{"status":"ok","tenant_id":"\ud801"}`,
 	} {
 		t.Run("reject "+name, func(t *testing.T) {
 			if _, err := decodeVerifyResponse([]byte(raw)); err == nil {
@@ -620,5 +626,93 @@ func TestRequestIsNeverMutated(t *testing.T) {
 	}
 	if res.Request != nil {
 		t.Fatal("the request must never be replaced")
+	}
+}
+
+// ==========================================================================
+// Round-2 pins (lossless JSON / token boundaries)
+// ==========================================================================
+
+// TestValidVirtualKeyGrammar — the v2 virtual-key token is ASCII by contract:
+// "sk-torana-" followed by at least one printable ASCII byte (0x21..0x7e).
+// Controls, whitespace, DEL, non-ASCII, and an empty suffix are not tokens —
+// so JSON transport of the token is lossless. Both header sources share this
+// validator.
+func TestValidVirtualKeyGrammar(t *testing.T) {
+	cases := []struct {
+		name  string
+		token string
+		ok    bool
+	}{
+		{"minimum suffix", "sk-torana-a", true},
+		{"space boundary 0x20", "sk-torana- ", false},
+		{"bang boundary 0x21", "sk-torana-!", true},
+		{"tilde boundary 0x7e", "sk-torana-~", true},
+		{"DEL boundary 0x7f", "sk-torana-\x7f", false},
+		{"non-ASCII 0x80", "sk-torana-\x80", false},
+		{"invalid UTF-8 0xff", "sk-torana-\xff", false},
+		{"unicode char", "sk-torana-é", false},
+		{"empty suffix", "sk-torana-", false},
+		{"no prefix", "sk-proj-abc", false},
+		{"control inside", "sk-torana-a\x01b", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := validVirtualKey(tc.token); got != tc.ok {
+				t.Fatalf("validVirtualKey(%q) = %v, want %v", tc.token, got, tc.ok)
+			}
+		})
+	}
+}
+
+// TestNonASCIIVirtualKeysNeverVerify — invalid-token bytes from either header
+// source produce no verify call and no verdict.
+func TestNonASCIIVirtualKeysNeverVerify(t *testing.T) {
+	for name, headers := range map[string]map[string]string{
+		"Authorization 0xff": {"Authorization": "Bearer sk-torana-\xff"},
+		"X-Api-Key 0xff":     {"X-Api-Key": "sk-torana-\xff"},
+		"Authorization 0x80": {"Authorization": "Bearer sk-torana-\x80"},
+		"X-Api-Key unicode":  {"X-Api-Key": "sk-torana-é"},
+		"empty suffix":       {"X-Api-Key": "sk-torana-"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			stubVerify(t, h, func(string) (string, bool) {
+				t.Fatal("verify must not be called")
+				return "", false
+			})
+			res := h.BeforeRequest(reqWithHeaders(headers))
+			if !res.PassedThrough || res.Err != nil {
+				t.Fatalf("expected pass-through, err=%v", res.Err)
+			}
+			if ids := identityCalls(t, h); len(ids) != 0 {
+				t.Fatalf("an invalid token produced a verdict: %v", ids)
+			}
+			if keys := verifyKeys(t, h); len(keys) != 0 {
+				t.Fatalf("an invalid token reached the verifier: %v", keys)
+			}
+		})
+	}
+}
+
+// TestSameTokenThroughBothHeaders — the same accepted token arriving through
+// both headers is still verified exactly once (Authorization wins).
+func TestSameTokenThroughBothHeaders(t *testing.T) {
+	h := newHarness(t)
+	stubVerify(t, h, func(token string) (string, bool) {
+		if token != "sk-torana-same~!x" {
+			t.Fatalf("verify called with %q", token)
+		}
+		return okReply(`,"tenant_id":"t","team_id":"tm","user_id":"u"`), true
+	})
+	res := h.BeforeRequest(reqWithHeaders(map[string]string{
+		"Authorization": "Bearer sk-torana-same~!x",
+		"X-Api-Key":     "sk-torana-same~!x",
+	}))
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	if keys := verifyKeys(t, h); len(keys) != 1 {
+		t.Fatalf("verification must happen exactly once, got %v", keys)
 	}
 }
