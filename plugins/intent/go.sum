@@ -1,6 +1,6 @@
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
-github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260801174506-e2e579759ce9 h1:nN5rImjrsnuN45biWJ6aeq5+ZWnBWmKojCpPNiY2leY=
-github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260801174506-e2e579759ce9/go.mod h1:AQgCa3xORFCvKFibrhN2QYWYwXjx0aLUA64I5S9UMwk=
+github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260802125903-d4908a648024 h1:SDJxt5BAH1u4KNqaWydgdrpdyCDb7XmZPKCdU6uOTHQ=
+github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260802125903-d4908a648024/go.mod h1:AQgCa3xORFCvKFibrhN2QYWYwXjx0aLUA64I5S9UMwk=
 google.golang.org/protobuf v1.36.11 h1:fV6ZwhNocDyBLK0dj+fg8ektcVegBBuEolpbTQyBNVE=
 google.golang.org/protobuf v1.36.11/go.mod h1:HTf+CrKn2C3g5S8VImy6tdcUvCska2kB7j23XfzDpco=

@@ -30,16 +30,35 @@
 // be invalidated. A plugin that re-decided per turn would cost money rather than
 // save it, and would fail Torana's determinism test — which is the test that
 // exists to catch precisely this class of bug.
+//
+// # v2 semantics
+//
+//   - The only request mutation is the cache breakpoint marker, governed by
+//     the dedicated ir.cache_control.write grant — never content, role, tool
+//     schema, or any other field.
+//   - The prefix fingerprint is LOSSLESS: the canonical prefix projection
+//     (model + complete tool definitions + complete messages through the
+//     breakpoint) is protobuf-marshaled deterministically and hashed with
+//     sdk.ContentAddressedCacheKey. A reflection-backed inventory forces a
+//     deliberate test update when a proto field is added, so no field can
+//     silently escape the fingerprint.
+//   - State refusals split by class: advisory declines safely (the request
+//     passes unchanged); contract/protocol failures error the hook. Corrupt
+//     stored JSON is key-local. The decision persistence must succeed before
+//     any marker is applied — an unpersisted marker would churn bytes next
+//     turn and bust the cache.
 package main
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	"google.golang.org/protobuf/proto"
 )
 
 func main() {}
@@ -69,18 +88,17 @@ type config struct {
 	// Mode is "auto" (choose per observed gaps), "short", "long", or "off".
 	Mode string `json:"mode"`
 	// MinGapSecondsForLongTier is how long an observed pause must be before the
-	// longer tier is bought. Defaults to 30% of the long tier's TTL, which
-	// keeps a single unusual pause from committing a short conversation.
+	// longer tier is bought. Defaults to 30% of the long tier's TTL.
 	MinGapSecondsForLongTier int `json:"min_gap_seconds_for_long_tier"`
-	// ActivityRetentionDays bounds per-conversation history. Decisions have a
-	// shorter natural lifetime: once the provider cache tier expires, changing
-	// its marker cannot invalidate a live cache entry.
+	// ActivityRetentionDays bounds per-conversation history.
 	ActivityRetentionDays int `json:"activity_retention_days"`
 }
 
-func loadConfig() config {
+// parseConfig applies the runtime defaults. Loaded per call — no process
+// globals.
+func parseConfig(raw string) config {
 	cfg := config{Mode: "auto", ActivityRetentionDays: 30}
-	if raw := sdk.PluginConfig(); raw != "" {
+	if raw != "" {
 		_ = json.Unmarshal([]byte(raw), &cfg)
 	}
 	if cfg.Mode == "" {
@@ -92,32 +110,55 @@ func loadConfig() config {
 	return cfg
 }
 
+func loadConfig() config { return parseConfig(sdk.PluginConfig()) }
+
+// isAdvisory reports whether err is an advisory refusal (NOT_CONFIGURED or
+// UNAVAILABLE) — the operator/transient class a plugin may decline safely.
+func isAdvisory(err error) bool {
+	if errors.Is(err, sdk.ErrStateUnavailable) {
+		return true
+	}
+	var refusal *sdk.HostCallRefusalError
+	if errors.As(err, &refusal) {
+		return refusal.Code == pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED ||
+			refusal.Code == pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE
+	}
+	return false
+}
+
 func init() {
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv2.ChatRequest) (sdk.RequestResult, error) {
 		cfg := loadConfig()
 		if cfg.Mode == "off" {
-			return nil, nil
+			return sdk.PassRequest(), nil
 		}
 
 		// The request must already carry a breakpoint. This plugin chooses
 		// which lifetime to buy; it never decides that something should be
-		// cached, because that judgement belongs to whoever placed the marker.
+		// cached.
 		idx := lastCacheBreakpoint(req)
 		if idx < 0 {
-			return nil, nil
+			return sdk.PassRequest(), nil
 		}
 
 		meta := readHostMeta(req)
 		pricing, err := sdk.GetCachePricing(meta.Provider, req.Model)
-		if err != nil || !pricing.Available() {
-			// Unknown economics: leave the request exactly as it arrived.
-			// Guessing here spends the operator's money on a hunch.
-			return nil, nil
+		if err != nil {
+			// Authoritative read: advisory pricing declines (unknown
+			// economics — guessing spends the operator's money on a hunch);
+			// contract/protocol defects surface.
+			if isAdvisory(err) {
+				return sdk.PassRequest(), nil
+			}
+			return sdk.RequestResult{}, err
+		}
+		if !pricing.Available() {
+			return sdk.PassRequest(), nil
 		}
 
 		prefixKey := cachePrefixKey(req)
 		if prefixKey == "" {
-			return nil, nil
+			return sdk.PassRequest(), nil
 		}
 
 		now, clockErr := sdk.Now()
@@ -126,51 +167,105 @@ func init() {
 		// verbatim until the provider cache itself has expired.
 		var prior decision
 		decisionKey := "decision/" + prefixKey
-		found, stateErr := sdk.StateGetJSON(decisionKey, &prior)
-		if stateErr != nil {
-			logStateError("read "+decisionKey, stateErr)
-			return nil, nil
+		// The decision read is AUTHORITATIVE, so the failure classes must be
+		// distinguishable: a malformed host frame or transport failure is a
+		// protocol defect (hook error); a refusal is advisory or contract by
+		// code; a value that is present but not the expected JSON is a
+		// key-local data error (decline for this key only, never absence).
+		// StateGetJSON would collapse the frame error and the decode error
+		// into one plain-error channel, so the raw typed read is used here.
+		raw, herr, err := sdk.StateGet(decisionKey)
+		found := false
+		switch {
+		case err != nil:
+			return sdk.RequestResult{}, err
+		case herr != nil && sdk.IsNotFound(herr):
+			// fresh
+		case herr != nil && (herr.Code == pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED || herr.Code == pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE):
+			return sdk.PassRequest(), nil
+		case herr != nil:
+			return sdk.RequestResult{}, fmt.Errorf("cache_tier_selector: state_get %s refused: %s", decisionKey, herr.Message)
+		case json.Unmarshal([]byte(raw), &prior) != nil:
+			// Corrupt stored JSON: key-local data error — decline for this
+			// key without poisoning unrelated ones and without treating it
+			// as absence.
+			return sdk.PassRequest(), nil
+		default:
+			found = true
 		}
 		if found {
 			if clockErr != nil || !decisionExpired(prior, now) {
-				return applyMarker(req, idx, prior.Marker), nil
+				if applyMarker(req, idx, prior.Marker) {
+					return sdk.ReplaceRequest(req), nil
+				}
+				return sdk.PassRequest(), nil
 			}
-			if err := sdk.StateSet(decisionKey, ""); err != nil {
-				logStateError("delete expired "+decisionKey, err)
-				return nil, nil
+			// The provider tier has elapsed; the decision may be reconsidered.
+			// Deleting is governed by env.state_set (StateDeletePermission).
+			if herr, err := sdk.StateDelete(decisionKey); err != nil || herr != nil {
+				if err != nil {
+					return sdk.RequestResult{}, err
+				}
+				if herr.Code == pbv2.ErrorCode_ERROR_CODE_NOT_FOUND {
+					// Already gone — fine.
+				} else if herr.Code == pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED ||
+					herr.Code == pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE {
+					// Advisory: decline (an expired decision held in place is
+					// harmless — the marker stays sticky).
+					return sdk.PassRequest(), nil
+				} else {
+					return sdk.RequestResult{}, fmt.Errorf("cache_tier_selector: delete expired %s refused: %s", decisionKey, herr.Message)
+				}
 			}
 		}
 
 		// Without a clock there is no gap history to reason from, so the
 		// conversation keeps whatever tier the harness asked for.
 		if clockErr != nil {
-			return nil, nil
+			if isAdvisory(clockErr) {
+				return sdk.PassRequest(), nil
+			}
+			return sdk.RequestResult{}, clockErr
 		}
 		cleanupExpiredState(now, cfg)
 		act, err := recordActivity(meta.ConversationID, now)
 		if err != nil {
-			logStateError("record activity", err)
-			return nil, nil
+			// A failed advisory activity write must not create an
+			// unpersisted/churning mutation: continue with the in-memory
+			// history, but the DECISION persistence below is the gate that
+			// decides whether any marker is applied.
+			if !isAdvisory(err) {
+				return sdk.RequestResult{}, err
+			}
 		}
 
 		marker, ttl := chooseTier(cfg, pricing, act, now)
 		if marker == nil {
-			return nil, nil
+			return sdk.PassRequest(), nil
 		}
 
+		// Persist BEFORE applying: an unpersisted marker would allow the next
+		// identical request to choose different bytes and bust the cache.
 		if err := sdk.StateSetJSON(decisionKey, decision{
 			Marker:          marker,
 			TierTTL:         ttl,
 			DecidedAtMillis: now,
 		}); err != nil {
-			// Applying a marker that was not persisted would allow the next
-			// identical request to choose different bytes and bust the cache.
-			logStateError("persist "+decisionKey, err)
-			return nil, nil
+			// Advisory: pass unchanged (no marker applied). Contract/protocol:
+			// surface — a plugin that can never persist a decision is broken.
+			if isAdvisory(err) {
+				return sdk.PassRequest(), nil
+			}
+			return sdk.RequestResult{}, err
 		}
-		_, _ = sdk.HostCall("torana_plugin_counter", counterPayload("tier_decisions", 1))
+		// Best-effort observability; the decision is already durable.
+		payload, _ := json.Marshal(map[string]any{"counter": "tier_decisions", "delta": 1})
+		_, _, _ = sdk.HostCallExtension("torana_plugin_counter", payload)
 
-		return applyMarker(req, idx, marker), nil
+		if applyMarker(req, idx, marker) {
+			return sdk.ReplaceRequest(req), nil
+		}
+		return sdk.PassRequest(), nil
 	})
 }
 
@@ -182,8 +277,6 @@ func chooseTier(cfg config, pricing sdk.CachePricing, act activity, now int64) (
 		return nil, 0
 	}
 
-	// The provider's own tier menu, as the operator declared it. A provider
-	// selling only one lifetime has nothing to choose between.
 	long, ok := pricing.LongestTier()
 	if !ok || long.Marker == nil {
 		return nil, 0
@@ -209,14 +302,27 @@ func chooseTier(cfg config, pricing sdk.CachePricing, act activity, now int64) (
 }
 
 // recordActivity updates and returns this conversation's gap history.
+// Advisory refusals return the in-memory history so the caller can still
+// decide (the decision persistence gates any mutation); contract/protocol
+// errors surface.
 func recordActivity(convKey string, now int64) (activity, error) {
 	var act activity
 	if convKey == "" || now == 0 {
 		return act, nil
 	}
 	key := "activity/" + convKey
-	if _, err := sdk.StateGetJSON(key, &act); err != nil {
-		return act, err
+	raw, herr, err := sdk.StateGet(key)
+	switch {
+	case err != nil:
+		return act, err // transport/protocol/frame
+	case herr != nil && !sdk.IsNotFound(herr):
+		if herr.Code != pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED && herr.Code != pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE {
+			return act, fmt.Errorf("cache_tier_selector: state_get %s refused: %s", key, herr.Message)
+		}
+		// Advisory: proceed with fresh history; the decision persist gates
+		// any mutation.
+	case herr == nil && json.Unmarshal([]byte(raw), &act) != nil:
+		// Corrupt stored JSON: key-local — proceed with fresh history.
 	}
 
 	if act.LastSeenMillis > 0 {
@@ -227,7 +333,12 @@ func recordActivity(convKey string, now int64) (activity, error) {
 	act.LastSeenMillis = now
 	act.Turns++
 	if err := sdk.StateSetJSON(key, act); err != nil {
-		return act, err
+		var refusal *sdk.HostCallRefusalError
+		if errors.As(err, &refusal) && !isAdvisory(err) {
+			return act, err
+		}
+		// Advisory write failure: proceed; the decision persist gates the
+		// mutation (an unpersisted decision is never applied).
 	}
 	return act, nil
 }
@@ -241,7 +352,8 @@ func decisionExpired(value decision, now int64) bool {
 
 // cleanupExpiredState runs at most hourly and deletes a bounded number of keys
 // per request, so a large legacy store cannot turn one request into a long
-// pause. Repeated traffic eventually drains the whole backlog.
+// pause. Ancillary: every failure is best-effort and logged — garbage
+// collection must never discard an otherwise safe sticky decision.
 func cleanupExpiredState(now int64, cfg config) {
 	const (
 		cleanupKey      = "_cleanup_at"
@@ -255,8 +367,8 @@ func cleanupExpiredState(now int64, cfg config) {
 	} else if found && now-last < cleanupInterval {
 		return
 	}
-	keys, err := sdk.StateKeys()
-	if err != nil {
+	keys, herr, err := sdk.StateKeys()
+	if err != nil || herr != nil {
 		logStateError("list state for cleanup", err)
 		return
 	}
@@ -286,7 +398,7 @@ func cleanupExpiredState(now int64, cfg config) {
 			expired = found && value.LastSeenMillis > 0 && now-value.LastSeenMillis >= retentionMillis
 		}
 		if expired {
-			if err := sdk.StateSet(key, ""); err != nil {
+			if herr, err := sdk.StateDelete(key); err != nil || herr != nil {
 				logStateError("delete "+key, err)
 				continue
 			}
@@ -302,19 +414,21 @@ func logStateError(operation string, err error) {
 	sdk.Log(fmt.Sprintf("cache_tier_selector: %s: %v", operation, err), sdk.LogLevelInfo)
 }
 
-// applyMarker sets the breakpoint marker on the message at idx. Returning the
-// request unchanged when the marker already matches avoids a pointless
-// re-serialisation.
-func applyMarker(req *pb.ChatRequest, idx int, marker map[string]any) *pb.ChatRequest {
+// applyMarker sets the breakpoint marker on the message at idx and reports
+// whether the request changed. An already-matching marker returns false,
+// avoiding a pointless re-serialisation. The ONLY request mutation this
+// plugin performs is the cache-control marker — governed by
+// ir.cache_control.write.
+func applyMarker(req *pbv2.ChatRequest, idx int, marker map[string]any) bool {
 	if marker == nil || idx < 0 || idx >= len(req.Messages) {
-		return nil
+		return false
 	}
 	current := sdk.CacheControl(req.Messages[idx])
 	if sameMarker(current, marker) {
-		return nil
+		return false
 	}
 	sdk.SetCacheBreakpoint(req.Messages[idx], marker)
-	return req
+	return true
 }
 
 func sameMarker(a, b map[string]any) bool {
@@ -331,7 +445,7 @@ func sameMarker(a, b map[string]any) bool {
 
 // lastCacheBreakpoint returns the index of the last message carrying a cache
 // breakpoint — the boundary of the cached prefix — or -1.
-func lastCacheBreakpoint(req *pb.ChatRequest) int {
+func lastCacheBreakpoint(req *pbv2.ChatRequest) int {
 	last := -1
 	for i, m := range req.Messages {
 		if len(m.CacheControlJson) > 0 {
@@ -341,51 +455,32 @@ func lastCacheBreakpoint(req *pb.ChatRequest) int {
 	return last
 }
 
-// cachePrefixKey fingerprints the bytes the provider will cache: the model plus
-// every message up to and including the breakpoint. It mirrors the host's own
-// CachePrefixKey closely enough for stickiness, which only needs "has this
-// prefix changed", not an exact match with the host's value.
-func cachePrefixKey(req *pb.ChatRequest) string {
+// cachePrefixKey fingerprints the bytes the provider will cache: the model,
+// the COMPLETE tool definitions, and the COMPLETE messages up to and including
+// the breakpoint. The projection is protobuf-marshaled LOSSLESSLY
+// (Deterministic: true — key order is irrelevant in a proto) and hashed with
+// sdk.ContentAddressedCacheKey, so every current and FUTURE nested field of
+// Message/ToolDef/ToolCall flows into the bytes automatically (the
+// reflection-backed inventory in the tests forces a deliberate update when
+// one is added). Deliberately excluded top-level fields: stream, params,
+// provider extensions, safety settings, and host metadata (torana_meta_json)
+// are not part of the provider's cached prefix; suffix messages after the
+// breakpoint are not either.
+func cachePrefixKey(req *pbv2.ChatRequest) string {
 	idx := lastCacheBreakpoint(req)
 	if idx < 0 {
 		return ""
 	}
-	h := newHash()
-	h.add(req.Model)
-	for _, t := range req.Tools {
-		h.add("tool")
-		h.add(t.Name)
-		h.add(string(t.ParametersJson))
+	projection := &pbv2.ChatRequest{
+		Model:    req.Model,
+		Tools:    req.Tools,
+		Messages: req.Messages[:idx+1],
 	}
-	for _, m := range req.Messages[:idx+1] {
-		h.add(m.Role)
-		h.add(m.Content)
-		h.add(string(m.ContentPartsJson))
-		// Extended-thinking blocks are part of what goes upstream and therefore
-		// part of the prefix the provider hashes. Omitting them let two
-		// conversations with identical text but different reasoning produce the
-		// same Torana fingerprint — so a tier decision was reused for a prefix
-		// the provider will treat as new, and the expensive long-tier write it
-		// implies is made against something that cannot hit. That is precisely
-		// the economics this plugin exists to protect.
-		h.add(m.Thinking)
-		h.add(m.ThinkingSignature)
-		h.add(m.RedactedThinking)
-		// cache_control is what DEFINES the breakpoint. The same content marked
-		// differently is a different cached prefix upstream.
-		h.add(string(m.CacheControlJson))
-		// Tool results: the id and name mirror the originating assistant call,
-		// which is hashed below, so these are usually redundant — but only when
-		// that call is inside the prefix, and cheap enough not to reason about.
-		h.add(m.ToolCallId)
-		h.add(m.ToolName)
-		for _, tc := range m.ToolCalls {
-			h.add(tc.Id)
-			h.add(tc.Name)
-			h.add(string(tc.ArgumentsJson))
-		}
+	raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(projection)
+	if err != nil {
+		return ""
 	}
-	return h.sum()
+	return sdk.ContentAddressedCacheKey("tier", string(raw))
 }
 
 // hostMeta is the routing context the host publishes on every request.
@@ -396,7 +491,7 @@ type hostMeta struct {
 
 // readHostMeta decodes it. Empty fields mean the host did not supply them, in
 // which case the plugin declines to act rather than guessing.
-func readHostMeta(req *pb.ChatRequest) hostMeta {
+func readHostMeta(req *pbv2.ChatRequest) hostMeta {
 	var meta hostMeta
 	if len(req.ToranaMetaJson) == 0 {
 		return meta
@@ -404,30 +499,3 @@ func readHostMeta(req *pb.ChatRequest) hostMeta {
 	_ = json.Unmarshal(req.ToranaMetaJson, &meta)
 	return meta
 }
-
-func counterPayload(name string, delta int64) string {
-	b, _ := json.Marshal(map[string]any{"counter": name, "delta": delta})
-	return string(b)
-}
-
-// A tiny FNV-1a so the plugin carries no hashing dependency into WASM.
-type hasher struct{ h uint64 }
-
-func newHash() *hasher { return &hasher{h: 14695981039346656037} }
-
-func (x *hasher) add(s string) {
-	// Length-prefix every field so that field boundaries cannot be forged by
-	// content: without it "ab"+"cd" and "a"+"bcd" hash identically, and two
-	// different prefixes would share a decision.
-	x.write(fmt.Sprintf("%d:", len(s)))
-	x.write(s)
-}
-
-func (x *hasher) write(s string) {
-	for i := 0; i < len(s); i++ {
-		x.h ^= uint64(s[i])
-		x.h *= 1099511628211
-	}
-}
-
-func (x *hasher) sum() string { return fmt.Sprintf("%016x", x.h) }
