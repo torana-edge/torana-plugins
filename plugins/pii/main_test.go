@@ -930,22 +930,31 @@ func TestCleanCacheKeyAuthoritativeInputs(t *testing.T) {
 			t.Errorf("%s must change the cache key", tc.name)
 		}
 	}
-	// Each policy field is folded in.
+	// Each policy field is authoritative: a NON-default baseline, and every
+	// row mutates EXACTLY ONE field (the provider row must not change model
+	// at the same time, or it would not independently prove provider
+	// authority).
+	baseline := `{"provider":"p","model":"m","tools":["read"],"on_error":"allow","max_scan_bytes":123}`
+	baseHarness.Run(func() { loadConfig() }) // ensure defaults first
+	h0 := newHarness(t)
+	h0.SetConfig(baseline)
+	h0.Run(func() { loadConfig() })
+	baseKey := piiCleanCacheKey(msg, "read")
 	policyCases := []struct {
 		name string
 		cfg  string
 	}{
-		{"provider", `{"provider":"local","model":"qwen"}`},
-		{"model", `{"model":"qwen"}`},
-		{"tools", `{"tools":["read"]}`},
-		{"on_error", `{"on_error":"allow"}`},
-		{"max_scan_bytes", `{"max_scan_bytes":100}`},
+		{"provider", `{"provider":"p2","model":"m","tools":["read"],"on_error":"allow","max_scan_bytes":123}`},
+		{"model", `{"provider":"p","model":"m2","tools":["read"],"on_error":"allow","max_scan_bytes":123}`},
+		{"tools", `{"provider":"p","model":"m","tools":["grep"],"on_error":"allow","max_scan_bytes":123}`},
+		{"on_error", `{"provider":"p","model":"m","tools":["read"],"on_error":"block","max_scan_bytes":123}`},
+		{"max_scan_bytes", `{"provider":"p","model":"m","tools":["read"],"on_error":"allow","max_scan_bytes":456}`},
 	}
 	for _, tc := range policyCases {
 		h := newHarness(t)
 		h.SetConfig(tc.cfg)
 		h.Run(func() { loadConfig() })
-		if got := piiCleanCacheKey(msg, "read"); got == base {
+		if got := piiCleanCacheKey(msg, "read"); got == baseKey {
 			t.Errorf("policy field %s must change the cache key", tc.name)
 		}
 	}
@@ -953,4 +962,128 @@ func TestCleanCacheKeyAuthoritativeInputs(t *testing.T) {
 
 func itoa(n int) string {
 	return strconv.Itoa(n)
+}
+
+// TestBlockMessageDirectBound — the final boundedness proof calls
+// blockMessage DIRECTLY with 100,000 findings and no caller-supplied flag:
+// the message stays < 4 KiB, is deterministic, renders exactly 20 findings,
+// and carries the omission note.
+func TestBlockMessageDirectBound(t *testing.T) {
+	findings := make([]finding, 100_000)
+	for i := range findings {
+		findings[i] = finding{Type: "email", Line: i + 1}
+	}
+	msg := blockMessage("read", findings)
+	if len(msg) > 4096 {
+		t.Fatalf("block message unbounded: %d bytes", len(msg))
+	}
+	if n := strings.Count(msg, "(line "); n != 20 {
+		t.Fatalf("rendered %d findings, want exactly 20", n)
+	}
+	if !strings.Contains(msg, "Additional findings omitted") {
+		t.Fatal("the omission note must be present")
+	}
+	if again := blockMessage("read", findings); again != msg {
+		t.Fatal("block message must be deterministic")
+	}
+}
+
+// TestFindingCapBoundaries — cap-1, cap, and cap+1 for BOTH producers: the
+// note appears only past the cap, and the message stays bounded.
+func TestFindingCapBoundaries(t *testing.T) {
+	// Regex producer: one unique email per line.
+	regexContent := func(n int) string {
+		var b strings.Builder
+		for i := 0; i < n; i++ {
+			b.WriteString("someone" + itoa(i) + "@example.com\n")
+		}
+		return b.String()
+	}
+	for _, n := range []int{19, 20, 21} {
+		t.Run("regex/"+itoa(n), func(t *testing.T) {
+			h := newHarness(t)
+			res := h.BeforeRequest(reqWith(toolMsg("c1", "read", regexContent(n), nil)))
+			if res.Err != nil || !res.PassedThrough {
+				t.Fatalf("err=%v", res.Err)
+			}
+			args := sdktest.DecodeBlockArgs(t, h.BlockCalls()[0].Args)
+			note := strings.Contains(args.Message, "Additional findings omitted")
+			if (n > 20) != note {
+				t.Fatalf("n=%d: note present=%v, want %v", n, note, n > 20)
+			}
+		})
+	}
+
+	// Model producer.
+	modelCompletion := func(n int) string {
+		var b strings.Builder
+		b.WriteString(`{"pii":true,"findings":[`)
+		for i := 0; i < n; i++ {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			b.WriteString(`{"type":"email","line":1}`)
+		}
+		b.WriteString(`]}`)
+		return b.String()
+	}
+	for _, n := range []int{19, 20, 21} {
+		t.Run("model/"+itoa(n), func(t *testing.T) {
+			h := newHarness(t)
+			h.SetConfig(`{"provider":"local","model":"qwen"}`)
+			h.StubHostCall("torana_offload_completion", offloadStub(modelCompletion(n)))
+			res := h.BeforeRequest(reqWith(toolMsg("c1", "read", "one line", nil)))
+			if res.Err != nil || !res.PassedThrough {
+				t.Fatalf("err=%v", res.Err)
+			}
+			args := sdktest.DecodeBlockArgs(t, h.BlockCalls()[0].Args)
+			note := strings.Contains(args.Message, "Additional findings omitted")
+			if (n > 20) != note {
+				t.Fatalf("n=%d: note present=%v, want %v", n, note, n > 20)
+			}
+		})
+	}
+}
+
+// TestEmptyLineNumberingAfterSplitSeq — leading, middle, and trailing empty
+// lines keep their positions with the allocation-free iterator.
+func TestEmptyLineNumberingAfterSplitSeq(t *testing.T) {
+	content := "\n\ncontact someone@example.com\n\n"
+	findings := regexScan(content)
+	if len(findings) != 1 {
+		t.Fatalf("findings=%d, want 1", len(findings))
+	}
+	if findings[0].Line != 3 {
+		t.Fatalf("line=%d, want 3 (two leading empty lines)", findings[0].Line)
+	}
+	h := newHarness(t)
+	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", content, nil)))
+	if res.Err != nil || !res.PassedThrough {
+		t.Fatalf("err=%v", res.Err)
+	}
+	args := sdktest.DecodeBlockArgs(t, h.BlockCalls()[0].Args)
+	if !strings.Contains(args.Message, "line 3") {
+		t.Fatalf("hook-level line numbering wrong: %q", args.Message)
+	}
+}
+
+// BenchmarkRegexScanLargeSuffix — evidence that the bounded scan does not
+// allocate per suffix line: the findings sit in the first cap+1 lines, and a
+// large noise suffix follows. Allocation must not scale with the suffix.
+func BenchmarkRegexScanLargeSuffix(b *testing.B) {
+	var sb strings.Builder
+	for i := 0; i < 21; i++ {
+		sb.WriteString("someone" + itoa(i) + "@example.com\n")
+	}
+	for i := 0; i < 100_000; i++ {
+		sb.WriteString("noise line without matches\n")
+	}
+	content := sb.String()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		out := regexScan(content)
+		if len(out) != 21 {
+			b.Fatalf("len=%d, want 21 (cap+1 sentinel)", len(out))
+		}
+	}
 }
