@@ -146,12 +146,13 @@ func requestHeaders(req *pbv2.ChatRequest) (map[string]any, error) {
 // validVirtualKey is the ONE virtual-key validator shared by both header
 // sources. The v2 token grammar is explicitly ASCII: the prefix "sk-torana-"
 // followed by at least one printable ASCII byte (0x21..0x7e), with no
-// controls, whitespace, DEL, non-ASCII, or empty suffix. The host injects
-// headers through JSON metadata and this plugin sends JSON to the verifier,
-// so non-ASCII bytes cannot satisfy the promise that the token reaches
-// verification unchanged — they would be normalized by a JSON marshal before
-// the plugin even sees them. This stays flexible about the private verifier's
-// punctuation/alphabet while making JSON transport lossless.
+// controls, whitespace, DEL, non-ASCII, or empty suffix. ASCII is the
+// normative token grammar for a simple, interoperable, byte-stable
+// credential contract: valid non-ASCII Unicode is preserved by JSON
+// encoding, but INVALID UTF-8 is not (encoding/json substitutes U+FFFD), and
+// the host injects headers through JSON metadata before this plugin sees
+// them. A printable-ASCII contract keeps the token byte-stable end to end
+// while staying flexible about the private verifier's punctuation/alphabet.
 func validVirtualKey(token string) bool {
 	if !strings.HasPrefix(token, virtualKeyPrefix) {
 		return false

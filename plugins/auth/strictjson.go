@@ -117,7 +117,7 @@ func hexVal(b byte) int {
 	return -1
 }
 
-// decodeJSONObject decodes exactly one JSON value as a LOSSESS object:
+// decodeJSONObject decodes exactly one JSON value as a LOSSLESS object:
 // validateJSONText (UTF-8 + surrogate invariants), duplicate-key rejection,
 // UseNumber decoding (numbers keep their exact lexeme through any later
 // re-marshalling), and an exact one-value/EOF check. "null" yields a nil map
