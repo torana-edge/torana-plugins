@@ -33,7 +33,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strings"
 	"sync"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
@@ -142,22 +141,25 @@ func init() {
 // handleToolCall extracts and caches the intent from one assembled tool call,
 // then strips "i" (unless the tool natively declares it) so the harness never
 // sees the field Torana injected.
+//
+// Pass-through is SEMANTIC: whenever the plugin does not actually delete a
+// field, the ORIGINAL argument bytes and the bound signature must travel
+// unchanged. JSON formatting or key order in the model's output is never a
+// reason to rewrite the block.
 func handleToolCall(call sdk.ToolCall) (sdk.ToolCallAction, error) {
-	// Not a JSON object (or not parseable): nothing to extract, and the
-	// original arguments must be re-emitted untouched — the v1 behaviour of
-	// emitting the raw buffer unchanged.
-	if !strings.HasPrefix(call.Arguments, "{") {
-		return sdk.PassToolCall(), nil
-	}
+	// Parse regardless of leading whitespace (json.Unmarshal accepts it);
+	// invalid, non-object, and "null" arguments (args stays nil) are not
+	// representable and pass the exact bytes.
 	var args map[string]any
-	if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
+	if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil || args == nil {
 		return sdk.PassToolCall(), nil
 	}
 
 	// Extract and cache intent. Phase 0 observability: count how often the
 	// model actually follows the convention, per tool.
 	labels := map[string]string{"tool": call.Name}
-	if intent, ok := args[intentField].(string); ok && intent != "" {
+	intent, hasIntent := args[intentField].(string)
+	if hasIntent && intent != "" {
 		// Key by tool_call_id (works when the harness echoes IDs, e.g. most
 		// OpenAI clients) AND by tool name+args content. The content key
 		// survives harnesses that reassign tool_call_ids across turns (Claude
@@ -182,31 +184,40 @@ func handleToolCall(call sdk.ToolCall) (sdk.ToolCallAction, error) {
 		sdk.Log(fmt.Sprintf("intent[%s %s]: ABSENT", call.Name, call.ID), sdk.LogLevelDebug)
 	}
 
-	// Strip "i" if not originally in the schema. A refusal to READ the
-	// hadI marker is a protocol failure (the key is only written by this
-	// plugin's request side): log and return an error so StreamHandler
-	// re-emits the original block — never a guess about whether to strip.
+	// The plugin only rewrites the block when it actually deletes an
+	// injected (non-empty string) "i". Everything else — no "i", a native
+	// "i", an empty or non-string "i", unrepresentable arguments — passes
+	// the exact original bytes and signature.
+	if !hasIntent || intent == "" {
+		return sdk.PassToolCall(), nil
+	}
+
+	// Decide whether the present "i" is the field THIS plugin injected. A
+	// refusal to READ the hadI marker is a protocol failure (the key is only
+	// written by this plugin's request side): log and return an error so
+	// StreamHandler re-emits the original block — never a guess about
+	// whether to strip.
+	hadI := ""
 	if call.Name != "" {
-		hadI, herr, err := sdk.MetaGet("hadI:" + call.Name)
+		var herr *pbv2.HostError
+		var err error
+		hadI, herr, err = sdk.MetaGet("hadI:" + call.Name)
 		if err != nil || (herr != nil && !sdk.IsNotFound(herr)) {
 			sdk.Log(fmt.Sprintf("intent: hadI meta_get refused: %v %v", herr, err), sdk.LogLevelInfo)
 			return sdk.ToolCallAction{}, fmt.Errorf("intent: hadI meta_get failed: %v %v", herr, err)
 		}
-		// NOT_FOUND means the request side never marked the tool as natively
-		// declaring "i" (or no request side ran) — strip, exactly like v1
-		// treated a missing marker.
-		if hadI != "true" {
-			delete(args, intentField)
-		}
 	}
-
-	modifiedJSON, err := json.Marshal(args)
-	if err != nil {
+	if hadI == "true" {
+		// Native field: the original block (with "i" and its signature)
+		// passes byte-identical.
 		return sdk.PassToolCall(), nil
 	}
-	if string(modifiedJSON) == call.Arguments {
-		// Pass keeps the original ref and signature byte-identical; the
-		// assembled block is re-emitted unchanged.
+
+	// Injected "i": delete it, marshal the changed object, and replace —
+	// the arguments changed, so StreamHandler clears the bound signature.
+	delete(args, intentField)
+	modifiedJSON, err := json.Marshal(args)
+	if err != nil {
 		return sdk.PassToolCall(), nil
 	}
 	return sdk.ReplaceToolArguments(string(modifiedJSON)), nil
@@ -246,7 +257,10 @@ func rehydrateHistoryIntents(req *pbv2.ChatRequest) (bool, error) {
 			var args map[string]any
 			if len(tc.ArgumentsJson) == 0 {
 				args = map[string]any{}
-			} else if json.Unmarshal(tc.ArgumentsJson, &args) != nil {
+			} else if json.Unmarshal(tc.ArgumentsJson, &args) != nil || args == nil {
+				// Unrepresentable history arguments: null (which decodes as a
+				// nil map), arrays, scalars, malformed JSON. Leave them
+				// unchanged — assigning into a nil map would panic.
 				continue
 			}
 			if _, ok := args[intentField]; ok {

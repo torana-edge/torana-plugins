@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
@@ -394,12 +395,10 @@ func TestRehydrationPresentEmptyIsUnusable(t *testing.T) {
 	if err := json.Unmarshal(hist.ArgumentsJson, &args); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := args[intentField].(string); got == "" || strings.Contains(got, "what ") == false && got != "" {
-		// The fill is "what <subject> shows" — assert it is the FILL, not the
-		// (empty) cached value.
-		if !strings.HasPrefix(got, "what ") {
-			t.Fatalf("expected the heuristic fill for a present-empty cache entry, got %q", got)
-		}
+	// The fill is deterministic: "what <first-string-arg, 80 runes> shows".
+	got, _ := args[intentField].(string)
+	if want := "what server.go shows"; got != want {
+		t.Fatalf("present-empty cache entry must take the exact heuristic fill, got %q want %q", got, want)
 	}
 	if _, ok := h.Cache("intent:call_1"); ok {
 		t.Fatal("present-empty value must not be bridged")
@@ -431,15 +430,16 @@ func TestNativeIFieldRecordsMarkerAndIsNotStripped(t *testing.T) {
 		t.Fatal(res.Err)
 	}
 	// The description was upgraded to the example-carrying form, and the
-	// response side can now read hadI:read.
+	// response side can now read hadI:read. The native path is SEMANTIC
+	// pass-through: the exact original bytes and the bound signature travel
+	// unchanged.
 	res2 := streamCall(t, h, "call_1", "read", "sig", `{"path":"server.go","i":"native intent"}`)
 	out := emittedArgs(t, res2)
-	var args map[string]any
-	if err := json.Unmarshal([]byte(out), &args); err != nil {
-		t.Fatal(err)
+	if out != `{"path":"server.go","i":"native intent"}` {
+		t.Fatalf("native \"i\" must pass the EXACT bytes, got %q", out)
 	}
-	if _, ok := args[intentField]; !ok {
-		t.Fatal("native \"i\" must not be stripped")
+	if sig := emittedSig(t, res2); sig != "sig" {
+		t.Fatalf("native pass must keep the signature, got %q", sig)
 	}
 	if got, _ := h.Cache("intent:call_1"); got != "native intent" {
 		t.Fatalf("native intent not captured: %q", got)
@@ -616,3 +616,159 @@ func TestRequestSideDeterminismWithoutHarnessLeak(t *testing.T) {
 // compile-time guard: the stream handler is registered once in init().
 var _ = context.Background
 var _ = sdk.MetricCounter
+
+// ==========================================================================
+// Round-1 additions: semantic pass-through table, unrepresentable history
+// arguments, malformed rehydration replies, schema-default parity.
+// ==========================================================================
+
+// TestStreamSemanticHandlingTable — the plugin rewrites the block ONLY when
+// it actually deletes an injected "i". JSON formatting, key order, leading
+// whitespace, empty/non-string "i", and unrepresentable arguments must pass
+// the EXACT original bytes with the signature intact; only injected-"i"
+// replacement canonicalizes and clears the signature.
+func TestStreamSemanticHandlingTable(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    string
+		want    string
+		replace bool // wantReplace: emitted args differ from the input
+		wantSig string
+		// native marks the tool as natively declaring "i" (hadI:read=true).
+		native bool
+	}{
+		{"whitespace prefix, no i", `  {"path":"server.go"}`, `  {"path":"server.go"}`, false, "sig", false},
+		{"reversed key order, no i", `{"z":1,"path":"server.go"}`, `{"z":1,"path":"server.go"}`, false, "sig", false},
+		{"no i", `{"path":"server.go"}`, `{"path":"server.go"}`, false, "sig", false},
+		{"empty i", `{"path":"server.go","i":""}`, `{"path":"server.go","i":""}`, false, "sig", false},
+		{"non-string i", `{"path":"server.go","i":5}`, `{"path":"server.go","i":5}`, false, "sig", false},
+		{"native i", `{"path":"server.go","i":"native intent"}`, `{"path":"server.go","i":"native intent"}`, false, "sig", true},
+		{"injected i", `{"path":"server.go","i":"find the bug"}`, `{"path":"server.go"}`, true, "", false},
+		{"whitespace prefix, injected i", `  {"path":"server.go","i":"find the bug"}`, `{"path":"server.go"}`, true, "", false},
+		{"null", `null`, `null`, false, "sig", false},
+		{"array", `[1,2]`, `[1,2]`, false, "sig", false},
+		{"scalar", `42`, `42`, false, "sig", false},
+		{"malformed", `{`, `{`, false, "sig", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := sdktest.New(t)
+			if tc.native {
+				// Drive the request side so hadI:read=true is recorded on this
+				// harness (the marker lives in the harness's meta store).
+				h.BeforeRequest(&pbv2.ChatRequest{Tools: []*pbv2.ToolDef{{
+					Name:           "read",
+					ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"},"i":{"type":"string"}},"required":["path","i"]}`),
+				}}})
+			}
+			res := streamCall(t, h, "call_1", "read", "sig", tc.args)
+			if res.Err != nil {
+				t.Fatalf("dispatch error: %v", res.Err)
+			}
+			if got := emittedArgs(t, res); got != tc.want {
+				t.Fatalf("emitted args=%q, want %q", got, tc.want)
+			}
+			if sig := emittedSig(t, res); sig != tc.wantSig {
+				t.Fatalf("signature=%q, want %q", sig, tc.wantSig)
+			}
+		})
+	}
+}
+
+// TestRehydrationUnrepresentableArgumentsNoPanic — historical arguments_json
+// that is null (which decodes to a nil map), an array, a scalar, or malformed
+// JSON must be left byte-identical; only a real JSON object may be filled.
+// Regression for the nil-map assignment panic on "null".
+func TestRehydrationUnrepresentableArgumentsNoPanic(t *testing.T) {
+	cases := []string{
+		"null",
+		`[1,2]`,
+		`"str"`,
+		`42`,
+		`{`,
+	}
+	for _, raw := range cases {
+		t.Run(raw, func(t *testing.T) {
+			h := sdktest.New(t)
+			req := &pbv2.ChatRequest{Tools: []*pbv2.ToolDef{{
+				Name:           "read",
+				ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"}}}`),
+			}}}
+			req.Messages = []*pbv2.Message{
+				{Role: "user", Content: "hi"},
+				{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "call_1", Name: "read", ArgumentsJson: []byte(raw)}}},
+			}
+			res := h.BeforeRequest(req)
+			if res.Err != nil {
+				t.Fatalf("hook error (must not panic): %v", res.Err)
+			}
+			out := res.Request.Messages[2].ToolCalls[0].ArgumentsJson
+			if string(out) != raw {
+				t.Fatalf("unrepresentable arguments were changed: %q -> %q", raw, out)
+			}
+		})
+	}
+
+	// An EMPTY OBJECT is representable and must be filled.
+	h := sdktest.New(t)
+	req := &pbv2.ChatRequest{Tools: []*pbv2.ToolDef{{
+		Name:           "read",
+		ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"}}}`),
+	}}}
+	req.Messages = []*pbv2.Message{
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "call_1", Name: "read", ArgumentsJson: []byte(`{}`)}}},
+	}
+	res := h.BeforeRequest(req)
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	if !strings.Contains(string(res.Request.Messages[2].ToolCalls[0].ArgumentsJson), `"i"`) {
+		t.Fatalf("an empty object must be filled: %s", res.Request.Messages[1].ToolCalls[0].ArgumentsJson)
+	}
+}
+
+// TestRehydrationMalformedReplyErrors — a malformed HostCallResult on the
+// rehydration cache read is a protocol error: the hook errors.
+func TestRehydrationMalformedReplyErrors(t *testing.T) {
+	h := sdktest.New(t)
+	h.StubHostCall("env.cache_get", func(string) (string, error) {
+		return "not a host-call-result frame", nil
+	})
+	res := h.BeforeRequest(reqWith(`{"path":"server.go"}`))
+	if res.Err == nil {
+		t.Fatal("a malformed cache reply must error the hook")
+	}
+}
+
+// TestSchemaDefaultsMatchRuntimeDefaults — parity against schema.json: the
+// schema's fill default must equal the runtime default ("heuristic"), so a
+// schema/runtime drift cannot pass unnoticed.
+func TestSchemaDefaultsMatchRuntimeDefaults(t *testing.T) {
+	raw, err := os.ReadFile("schema.json")
+	if err != nil {
+		t.Fatalf("read schema.json: %v", err)
+	}
+	var schema struct {
+		Properties map[string]struct {
+			Default json.RawMessage `json:"default"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatalf("parse schema.json: %v", err)
+	}
+	prop, ok := schema.Properties["fill"]
+	if !ok {
+		t.Fatal("schema.json has no fill property")
+	}
+	var want string
+	if err := json.Unmarshal(prop.Default, &want); err != nil {
+		t.Fatal(err)
+	}
+	if want != "heuristic" {
+		t.Fatalf("schema fill default=%q, want heuristic", want)
+	}
+	if got := parseConfig(""); got != "heuristic" {
+		t.Fatalf("runtime fill default=%q does not match the schema", got)
+	}
+}

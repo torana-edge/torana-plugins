@@ -49,20 +49,22 @@ const (
 	minOffloadChars       = 2000
 )
 
-// maxOffloadInputChars caps how much of a tool output is sent to the cheap
-// summarizer. 0 (the default) means UNBOUNDED — the complete tool output is
-// sent. A positive value is opt-in via plugins.config.compactor and truncates
-// head+tail to that many chars. Loaded once, lazily, from the plugin config.
+// maxOffloadInputBytes caps how many SOURCE bytes of a tool output are sent
+// to the cheap summarizer. 0 (the default) means UNBOUNDED — the complete
+// tool output is sent. A positive value is opt-in via
+// plugins.config.compactor and retains head+tail within that many bytes (the
+// truncation marker is ADDITIONAL framing, not part of the budget). Loaded
+// once, lazily, from the plugin config.
 var (
 	cfgOnce              sync.Once
-	maxOffloadInputChars int
+	maxOffloadInputBytes int
 	toolPolicies         []sdk.ToolPolicyRule
 	expectedApplications int64
 )
 
 // config is the plugin's decoded configuration.
 type config struct {
-	MaxOffloadInputChars int                  `json:"max_offload_input_chars"`
+	MaxOffloadInputBytes int                  `json:"max_offload_input_bytes"`
 	ToolPolicies         []sdk.ToolPolicyRule `json:"tool_policies"`
 	ExpectedApplications int64                `json:"expected_applications"`
 }
@@ -76,8 +78,8 @@ func parseConfig(raw string) config {
 	if raw != "" {
 		_ = json.Unmarshal([]byte(raw), &c)
 	}
-	if c.MaxOffloadInputChars < 0 {
-		c.MaxOffloadInputChars = 0
+	if c.MaxOffloadInputBytes < 0 {
+		c.MaxOffloadInputBytes = 0
 	}
 	if c.ExpectedApplications < 0 {
 		c.ExpectedApplications = 0
@@ -88,7 +90,7 @@ func parseConfig(raw string) config {
 func loadConfig() {
 	cfgOnce.Do(func() {
 		c := parseConfig(sdk.PluginConfig())
-		maxOffloadInputChars = c.MaxOffloadInputChars
+		maxOffloadInputBytes = c.MaxOffloadInputBytes
 		toolPolicies = c.ToolPolicies
 		expectedApplications = c.ExpectedApplications
 	})
@@ -98,7 +100,7 @@ func loadConfig() {
 // fresh config. Production never calls it; the once-only loader is unchanged.
 func resetConfigForTest() {
 	cfgOnce = sync.Once{}
-	maxOffloadInputChars = 0
+	maxOffloadInputBytes = 0
 	toolPolicies = nil
 	expectedApplications = 0
 }
@@ -303,7 +305,7 @@ func prepareAndApplyModelBatch(req *pbv2.ChatRequest, works []modelWork) (bool, 
 		payload, _ := json.Marshal(map[string]any{
 			"system_prompt": "You are a tool output summarizer. Given a tool output and an extraction intent, return ONLY the relevant parts. Be concise. Do not add commentary.",
 			"user_prompt": fmt.Sprintf("Intent: %s\n\nConversation context:\n%s\n\nTool output:\n%s\n\nExtract only the parts relevant to the intent.",
-				work.intent, ctxStr, truncateForPrompt(work.message.Content, maxOffloadInputChars)),
+				work.intent, ctxStr, truncateForPrompt(work.message.Content, maxOffloadInputBytes)),
 		})
 		result, herr, err := sdk.HostCallExtension("torana_offload_completion", payload)
 		if err != nil {
@@ -559,15 +561,17 @@ func extractConversationContext(msgs []*pbv2.Message, excludeToolCallID string) 
 	return strings.Join(parts, "\n")
 }
 
-// truncateForPrompt bounds the tool output sent to the summarizer. maxChars <= 0
-// means unbounded: the complete output is sent (the default). A positive cap
-// keeps the head and tail (first + last maxChars/2), where signal tends to
-// cluster, dropping the middle.
-func truncateForPrompt(content string, maxChars int) string {
-	if maxChars <= 0 || len(content) <= maxChars {
+// truncateForPrompt bounds the tool output sent to the summarizer.
+// maxBytes <= 0 means unbounded: the complete output is sent (the default).
+// A positive cap is the maximum number of SOURCE bytes retained — the head
+// and tail (first + last maxBytes/2, rune-safe) where signal tends to
+// cluster; the fixed truncation marker is ADDITIONAL framing and does not
+// count against the budget.
+func truncateForPrompt(content string, maxBytes int) string {
+	if maxBytes <= 0 || len(content) <= maxBytes {
 		return content
 	}
-	half := maxChars / 2
+	half := maxBytes / 2
 	return truncHead(content, half) + "\n\n... [truncated] ...\n\n" + truncTail(content, half)
 }
 

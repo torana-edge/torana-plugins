@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
@@ -97,22 +99,47 @@ func TestTruncateForPromptUnboundedByDefault(t *testing.T) {
 }
 
 // TestTruncateForPromptBoundedWhenConfigured: a positive cap keeps head+tail
-// and drops the middle, staying within the configured budget.
+// and drops the middle; the retained SOURCE bytes stay within the budget and
+// the marker is additional framing (the emitted string may exceed the budget
+// by exactly the marker's length).
 func TestTruncateForPromptBoundedWhenConfigured(t *testing.T) {
 	content := ""
 	for i := 0; i < 1000; i++ {
 		content += "abcdefghij" // 10k chars
 	}
-	out := truncateForPrompt(content, 100)
+	const budget = 100
+	out := truncateForPrompt(content, budget)
 	if len(out) >= len(content) {
 		t.Fatalf("expected truncation below %d, got %d", len(content), len(out))
 	}
 	if !containsMarker(out) {
 		t.Fatalf("truncated output missing head/tail marker: %q", out[:min(80, len(out))])
 	}
+	// The SOURCE bytes retained (everything but the framing separator) must
+	// fit the budget; the framing is on top.
+	if retained := len(out) - len(framing); retained > budget {
+		t.Fatalf("retained source bytes=%d exceed the %d-byte budget", retained, budget)
+	}
 	// Short content under the cap is returned intact.
 	if got := truncateForPrompt("small", 100); got != "small" {
 		t.Fatalf("content under cap must be intact, got %q", got)
+	}
+}
+
+// TestTruncateForPromptMultibyteRuneSafety: byte budgets can land mid-rune;
+// the cut must back off to a boundary so the result is valid UTF-8 and still
+// within the source-byte budget.
+func TestTruncateForPromptMultibyteRuneSafety(t *testing.T) {
+	content := strings.Repeat("日本語テキスト", 400) // 6 bytes per rune group
+	out := truncateForPrompt(content, 101)
+	if !utf8.ValidString(out) {
+		t.Fatal("truncation split a rune — output is not valid UTF-8")
+	}
+	if retained := len(out) - len(framing); retained > 101 {
+		t.Fatalf("retained source bytes=%d exceed the 101-byte budget", retained)
+	}
+	if len(out) >= len(content) {
+		t.Fatal("multibyte content was not truncated")
 	}
 }
 
@@ -169,8 +196,14 @@ func TestOptimisticPreflightChargesUncachedRewrite(t *testing.T) {
 	}
 }
 
+// marker is the fixed truncation framing; it is ADDITIONAL to the source-byte
+// budget. framing is the full emitted separator (the marker plus its newlines).
+const (
+	marker  = "... [truncated] ..."
+	framing = "\n\n" + marker + "\n\n"
+)
+
 func containsMarker(s string) bool {
-	const marker = "... [truncated] ..."
 	for i := 0; i+len(marker) <= len(s); i++ {
 		if s[i:i+len(marker)] == marker {
 			return true
@@ -680,7 +713,7 @@ func TestMinOffloadCharsBoundary(t *testing.T) {
 // truncated.
 func TestTruncationMarkerInOffloadPayload(t *testing.T) {
 	h := newHarness(t)
-	h.SetConfig(`{"tool_policies":[{"match":"read*","mode":"model"}],"expected_applications":6,"max_offload_input_chars":100}`)
+	h.SetConfig(`{"tool_policies":[{"match":"read*","mode":"model"}],"expected_applications":6,"max_offload_input_bytes":100}`)
 	h.SeedCache("intent:call_1", "find the bug")
 	var offloadArgs string
 	h.StubHostCall("torana_offload_completion", func(args string) (string, error) {
@@ -879,4 +912,240 @@ func mustJSON(t *testing.T, req *pbv2.ChatRequest) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// ==========================================================================
+// Round-1 additions: present-empty recompute, malformed replies, economic
+// gate refusal classes, preflight-then-decline, schema-default parity.
+// ==========================================================================
+
+// TestModelPresentEmptyReplacementRecomputes — a present-empty model-cache
+// value is unusable: it must never erase the tool result; the work is
+// recomputed through offload.
+func TestModelPresentEmptyReplacementRecomputes(t *testing.T) {
+	h := newHarness(t)
+	h.SetConfig(modelConfig)
+	h.SeedCache("intent:call_1", "find the bug")
+	content := bigContent()
+	modelKey := sdk.ContentAddressedCacheKey(compactionCache, "v3", "read", `{"path":"server.go"}`, content, "find the bug", "model")
+	h.SeedCache(modelKey, "") // present, empty
+	h.StubHostCall("torana_offload_completion", offloadStub("summary"))
+	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
+	res := h.BeforeRequest(bigToolRequest(content))
+	if res.Err != nil || res.Request == nil {
+		t.Fatalf("expected a recomputed replacement, err=%v", res.Err)
+	}
+	if res.Request.Messages[3].Content != "summary" {
+		t.Fatalf("present-empty cache value must recompute, got %q", res.Request.Messages[3].Content)
+	}
+	if n := countCommand(h, "torana_offload_completion"); n != 1 {
+		t.Fatalf("offload must run for a present-empty cache value, got %d", n)
+	}
+}
+
+// TestDeterministicPresentEmptyReplacementRecomputes — same rule on the
+// deterministic path: an empty cached value must not be applied (it would
+// erase the result); the replacement is recomputed.
+func TestDeterministicPresentEmptyReplacementRecomputes(t *testing.T) {
+	cfg := `{"tool_policies":[{"match":"read*","mode":"deterministic","first_pass":true}]}`
+	h := newHarness(t)
+	h.SetConfig(cfg)
+	content := bigContent()
+	policyKey := sdk.ContentAddressedCacheKey(policyCompactionCache, "v2", "read", `{"path":"server.go"}`, content, "deterministic", "")
+	h.SeedCache(policyKey, "") // present, empty
+	res := h.BeforeRequest(bigToolRequest(content))
+	if res.Err != nil || res.Request == nil {
+		t.Fatalf("expected a recomputed replacement, err=%v", res.Err)
+	}
+	if res.Request.Messages[3].Content == content {
+		t.Fatal("present-empty policy cache value must recompute, not pass through")
+	}
+	if res.Request.Messages[3].Content == "" {
+		t.Fatal("present-empty cache value must never be applied (would erase the result)")
+	}
+}
+
+// TestIntentCacheMalformedReplyErrors — a malformed HostCallResult on the
+// intent read is a protocol error: the hook errors.
+func TestIntentCacheMalformedReplyErrors(t *testing.T) {
+	h := newHarness(t)
+	h.SetConfig(modelConfig)
+	h.StubHostCall("env.cache_get", func(string) (string, error) {
+		return "not a host-call-result frame", nil
+	})
+	res := h.BeforeRequest(bigToolRequest(bigContent()))
+	if res.Err == nil {
+		t.Fatal("a malformed cache reply must error the hook")
+	}
+}
+
+// TestModelCacheMalformedReplyErrors — malformed reply on the MODEL cache
+// read (the intent read succeeds): hook error.
+func TestModelCacheMalformedReplyErrors(t *testing.T) {
+	h := newHarness(t)
+	h.SetConfig(modelConfig)
+	h.SeedCache("intent:call_1", "find the bug")
+	h.StubHostCall("env.cache_get", func(args string) (string, error) {
+		if strings.Contains(args, "intent:call_1") {
+			return sdktest.HostResultValue([]byte("find the bug")), nil
+		}
+		return "not a host-call-result frame", nil
+	})
+	res := h.BeforeRequest(bigToolRequest(bigContent()))
+	if res.Err == nil {
+		t.Fatal("a malformed model-cache reply must error the hook")
+	}
+}
+
+// TestDeterministicCacheMalformedReplyErrors — malformed reply on the
+// deterministic-policy cache read: hook error.
+func TestDeterministicCacheMalformedReplyErrors(t *testing.T) {
+	h := newHarness(t)
+	h.SetConfig(`{"tool_policies":[{"match":"read*","mode":"deterministic","first_pass":true}]}`)
+	h.StubHostCall("env.cache_get", func(string) (string, error) {
+		return "not a host-call-result frame", nil
+	})
+	res := h.BeforeRequest(bigToolRequest(bigContent()))
+	if res.Err == nil {
+		t.Fatal("a malformed policy-cache reply must error the hook")
+	}
+}
+
+// TestEvaluateAdvisoryRefusalDeclinesWithoutRetry — NOT_CONFIGURED on the
+// economic gate declines the batch; the preflight fails so no offload spend
+// happens, and evaluate is called exactly once.
+func TestEvaluateAdvisoryRefusalDeclinesWithoutRetry(t *testing.T) {
+	for _, code := range []pbv2.ErrorCode{
+		pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED,
+		pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE,
+	} {
+		t.Run(code.String(), func(t *testing.T) {
+			h := newHarness(t)
+			h.SetConfig(modelConfig)
+			h.SeedCache("intent:call_1", "find the bug")
+			h.StubHostCall("torana_offload_completion", offloadStub("summary"))
+			h.StubHostCall("torana_evaluate_compaction", func(string) (string, error) {
+				return sdktest.HostResultError(code, "stub"), nil
+			})
+			res := h.BeforeRequest(bigToolRequest(bigContent()))
+			if res.Err != nil {
+				t.Fatalf("advisory refusal must not error the hook: %v", res.Err)
+			}
+			if !res.PassedThrough {
+				t.Fatal("a declined batch must not apply")
+			}
+			if n := countCommand(h, "torana_evaluate_compaction"); n != 1 {
+				t.Fatalf("advisory refusal was retried: %d evaluate calls", n)
+			}
+			if n := countCommand(h, "torana_offload_completion"); n != 0 {
+				t.Fatalf("offload ran despite a declined preflight: %d calls", n)
+			}
+		})
+	}
+}
+
+// TestEvaluateContractRefusalErrors — INVALID_ARGUMENT on the economic gate
+// is a contract defect: the hook errors.
+func TestEvaluateContractRefusalErrors(t *testing.T) {
+	h := newHarness(t)
+	h.SetConfig(modelConfig)
+	h.SeedCache("intent:call_1", "find the bug")
+	h.StubHostCall("torana_offload_completion", offloadStub("summary"))
+	h.StubHostCall("torana_evaluate_compaction", func(string) (string, error) {
+		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "stub"), nil
+	})
+	res := h.BeforeRequest(bigToolRequest(bigContent()))
+	if res.Err == nil {
+		t.Fatal("a contract refusal on the economic gate must error the hook")
+	}
+}
+
+// TestRealEvaluationDeclinesAfterPreflight — the preflight approves, the
+// real evaluation declines: offload spent at most once and NO mutation is
+// applied (a declined batch never half-applies).
+func TestRealEvaluationDeclinesAfterPreflight(t *testing.T) {
+	h := newHarness(t)
+	h.SetConfig(modelConfig)
+	h.SeedCache("intent:call_1", "find the bug")
+	h.StubHostCall("torana_offload_completion", offloadStub("summary"))
+	seq := 0
+	h.StubHostCall("torana_evaluate_compaction", func(string) (string, error) {
+		seq++
+		if seq == 1 {
+			return sdktest.HostResultValue([]byte(`{"apply":true}`)), nil // preflight approves
+		}
+		return sdktest.HostResultValue([]byte(`{"apply":false}`)), nil // real evaluation declines
+	})
+	res := h.BeforeRequest(bigToolRequest(bigContent()))
+	if res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	if !res.PassedThrough {
+		t.Fatal("a declined real evaluation must not apply any mutation")
+	}
+	if n := countCommand(h, "torana_offload_completion"); n != 1 {
+		t.Fatalf("offload spend=%d, want exactly 1 (preflight approved once)", n)
+	}
+}
+
+// TestRealEvaluationRefusalAfterPreflight — preflight approves, the real
+// evaluation contract-refuses: hook error, no mutation, offload spent once.
+func TestRealEvaluationRefusalAfterPreflight(t *testing.T) {
+	h := newHarness(t)
+	h.SetConfig(modelConfig)
+	h.SeedCache("intent:call_1", "find the bug")
+	h.StubHostCall("torana_offload_completion", offloadStub("summary"))
+	seq := 0
+	h.StubHostCall("torana_evaluate_compaction", func(string) (string, error) {
+		seq++
+		if seq == 1 {
+			return sdktest.HostResultValue([]byte(`{"apply":true}`)), nil
+		}
+		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "stub"), nil
+	})
+	res := h.BeforeRequest(bigToolRequest(bigContent()))
+	if res.Err == nil {
+		t.Fatal("a contract refusal on the real evaluation must error the hook")
+	}
+	if n := countCommand(h, "torana_offload_completion"); n != 1 {
+		t.Fatalf("offload spend=%d, want exactly 1", n)
+	}
+}
+
+// TestSchemaDefaultsMatchRuntimeDefaults — parity against schema.json itself,
+// so a schema/default drift cannot pass: the schema's defaults must equal the
+// runtime defaults (0 unbounded / 0 disables the model path / empty policies),
+// and the budget field must be named max_offload_input_bytes.
+func TestSchemaDefaultsMatchRuntimeDefaults(t *testing.T) {
+	raw, err := os.ReadFile("schema.json")
+	if err != nil {
+		t.Fatalf("read schema.json: %v", err)
+	}
+	var schema struct {
+		Properties map[string]struct {
+			Default json.RawMessage `json:"default"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatalf("parse schema.json: %v", err)
+	}
+	prop, ok := schema.Properties["max_offload_input_bytes"]
+	if !ok {
+		t.Fatal("schema.json has no max_offload_input_bytes property (legacy name would drift)")
+	}
+	if string(prop.Default) != "0" {
+		t.Fatalf("schema max_offload_input_bytes default=%s, want 0", prop.Default)
+	}
+	if string(schema.Properties["expected_applications"].Default) != "0" {
+		t.Fatalf("schema expected_applications default=%s, want 0", schema.Properties["expected_applications"].Default)
+	}
+	if string(schema.Properties["tool_policies"].Default) != "[]" {
+		t.Fatalf("schema tool_policies default=%s, want []", schema.Properties["tool_policies"].Default)
+	}
+
+	// Runtime defaults must match: no config -> inert (0/0/nil).
+	rt := parseConfig("")
+	if rt.MaxOffloadInputBytes != 0 || rt.ExpectedApplications != 0 || len(rt.ToolPolicies) != 0 {
+		t.Fatalf("runtime defaults %+v do not match the schema defaults", rt)
+	}
 }
