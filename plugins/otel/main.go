@@ -1,3 +1,17 @@
+// otel emits request-shape metrics on the way in and, on the way out, the
+// per-request signals the host exposes: latency, upstream status class, and
+// provider-reported token usage. Core ops metrics the host can observe more
+// reliably (every response, including vetoes) are also emitted host-side (see
+// internal/metrics); the plugin-side series exist so operators can slice by
+// whatever labels plugins add.
+//
+// The response hook is dispatched for mutable JSON responses, for
+// OBSERVATIONAL stream-shaped dispatches (mutable=false, Message=nil, with
+// completed status/duration/usage facts), and for upstream-error dispatches —
+// the port reports the same factual metrics for all of them and never
+// requires Message. UpstreamStatus == 0 means unobserved: genuinely present
+// facts are still emitted, but no status_class is claimed on ANY series; a
+// positive status adds the same class to every series.
 package main
 
 import (
@@ -6,66 +20,63 @@ import (
 	"fmt"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 func main() {}
 
-// otel emits request-shape metrics on the way in and, on the way out, the
-// per-request signals the host exposes via ToranaMeta._response: latency,
-// upstream status class, and provider-reported token usage. Core ops metrics
-// the host can observe more reliably (every response, including vetoes) are
-// also emitted host-side (see internal/metrics); the plugin-side series exist
-// so operators can slice by whatever labels plugins add.
 func init() {
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv2.ChatRequest) (sdk.RequestResult, error) {
 		labels := map[string]string{"model": req.Model}
 		sdk.EmitMetric("torana_plugin_requests_total", sdk.MetricCounter, 1, labels)
 		sdk.EmitMetric("torana_plugin_request_messages", sdk.MetricHistogram, float64(len(req.Messages)), labels)
 		sdk.EmitMetric("torana_plugin_request_tools", sdk.MetricHistogram, float64(len(req.Tools)), labels)
-		return nil, nil
+		return sdk.PassRequest(), nil
 	})
 
-	sdk.OnAfterResponse(func(ctx context.Context, resp *pb.ChatRequest) (*pb.ChatRequest, error) {
-		for _, m := range responseMetrics(resp.Model, parseResponseMeta(resp.ToranaMetaJson)) {
+	sdk.OnAfterResponse(func(ctx context.Context, resp *pbv2.ChatResponse, mutable bool) (sdk.ResponseResult, error) {
+		for _, m := range responseMetrics(resp) {
 			sdk.EmitMetric(m.Name, m.Kind, m.Value, m.Labels)
 		}
-		return nil, nil
+		return sdk.PassResponse(), nil
 	})
 
 	// Serve a tiny status page at /_torana/plugin/otel/.
 	// This demonstrates the run_on_http_request ABI: the page is intentionally
 	// minimal — a proof of the per-plugin HTTP namespace, not a real dashboard.
-	sdk.OnHTTPRequest(func(ctx context.Context, req *pb.HttpRequest) (*pb.HttpResponse, error) {
-		if req.Path == "/agent/status" {
+	sdk.OnHTTPRequest(func(ctx context.Context, req *pbv2.HttpRequest) (sdk.HTTPResult, error) {
+		switch req.Path {
+		case "/agent/status":
 			hdrsJSON, _ := json.Marshal(map[string][]string{
 				"Content-Type": {"application/json"},
 			})
-			return &pb.HttpResponse{
+			return sdk.ServeHTTP(&pbv2.HttpResponse{
 				Status:      200,
 				HeadersJson: hdrsJSON,
 				Body:        []byte(`{"plugin":"otel","status":"ready","capabilities":["request_metrics","response_metrics","token_metrics"]}`),
-				Handled:     true,
-			}, nil
-		}
-		body := []byte(`<!DOCTYPE html>
+			}), nil
+		case "/":
+			body := []byte(`<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="utf-8"><title>Torana otel plugin</title></head>
 <body><h1>Torana otel plugin</h1></body>
 </html>`)
-		hdrsJSON, _ := json.Marshal(map[string][]string{
-			"Content-Type": {"text/html; charset=utf-8"},
-		})
-		return &pb.HttpResponse{
-			Status:      200,
-			HeadersJson: hdrsJSON,
-			Body:        body,
-			Handled:     true,
-		}, nil
+			hdrsJSON, _ := json.Marshal(map[string][]string{
+				"Content-Type": {"text/html; charset=utf-8"},
+			})
+			return sdk.ServeHTTP(&pbv2.HttpResponse{
+				Status:      200,
+				HeadersJson: hdrsJSON,
+				Body:        body,
+			}), nil
+		default:
+			// Unknown paths pass to the host, which answers 404.
+			return sdk.PassHTTP(), nil
+		}
 	})
 }
 
-func statusClass(status int) string {
+func statusClass(status int32) string {
 	switch {
 	case status >= 500:
 		return "5xx"
@@ -92,30 +103,6 @@ func withLabel(base map[string]string, key, value string) map[string]string {
 	return out
 }
 
-// responseMeta is the slice of ToranaMeta._response these metrics are built
-// from.
-type responseMeta struct {
-	DurationMs     float64 `json:"duration_ms"`
-	UpstreamStatus int     `json:"upstream_status"`
-	Usage          struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
-	} `json:"usage"`
-}
-
-func parseResponseMeta(raw []byte) *responseMeta {
-	if len(raw) == 0 {
-		return nil
-	}
-	var meta struct {
-		Response *responseMeta `json:"_response"`
-	}
-	if err := json.Unmarshal(raw, &meta); err != nil {
-		return nil
-	}
-	return meta.Response
-}
-
 // emission is one metric series, built but not yet sent.
 type emission struct {
 	Name   string
@@ -124,41 +111,39 @@ type emission struct {
 	Labels map[string]string
 }
 
-// responseMetrics builds every series for a completed response.
-//
-// It is separate from the hook so the LABELS can be tested. sdk.EmitMetric is a
-// host call, so anything assembled inline in the closure is unobservable from a
-// test — which is why the bug this fixes (status_class computed and then
-// dropped from the duration and token series) survived with a green suite, and
-// why the first attempt at a test for it also passed against the broken code.
-func responseMetrics(model string, r *responseMeta) []emission {
-	labels := map[string]string{"model": model}
-
-	// No per-response metadata: the only honest series is that a response
-	// happened. It carries no status_class because none was observed —
-	// labelling it "2xx" would invent a measurement.
-	if r == nil {
-		return []emission{{"torana_plugin_responses_total", sdk.MetricCounter, 1, labels}}
+// responseMetrics builds every series for a completed response dispatch —
+// mutable JSON, observational stream-shaped (Message == nil), and
+// upstream-error shapes alike. statusClass is added to EVERY series only when
+// a status was actually observed (UpstreamStatus > 0); status zero emits the
+// genuinely present facts (a response happened, duration, usage) with NO
+// status_class anywhere — labelling an unobserved outcome would invent a
+// measurement.
+func responseMetrics(resp *pbv2.ChatResponse) []emission {
+	if resp == nil {
+		// No response facts at all: the only honest series is that a response
+		// happened, with no status_class.
+		return []emission{{"torana_plugin_responses_total", sdk.MetricCounter, 1, map[string]string{}}}
 	}
 
-	labels["status_class"] = statusClass(r.UpstreamStatus)
+	labels := map[string]string{"model": resp.Model}
+	hasStatus := resp.UpstreamStatus > 0
+	if hasStatus {
+		labels["status_class"] = statusClass(resp.UpstreamStatus)
+	}
 
-	// status_class belongs on EVERY series, not just the counter. The duration
-	// and token metrics used to build fresh label maps holding only the model,
-	// so latency and token spend could not be split by outcome — "how slow are
-	// the 5xx?" and "how many tokens did failed requests burn?" are the first
-	// two questions anyone asks of these, and neither was answerable.
 	out := []emission{
 		{"torana_plugin_responses_total", sdk.MetricCounter, 1, labels},
-		{"torana_plugin_request_duration_ms", sdk.MetricHistogram, r.DurationMs, labels},
+		{"torana_plugin_request_duration_ms", sdk.MetricHistogram, float64(resp.DurationMs), labels},
 	}
-	if r.Usage.InputTokens > 0 {
-		out = append(out, emission{"torana_plugin_tokens", sdk.MetricCounter,
-			float64(r.Usage.InputTokens), withLabel(labels, "direction", "input")})
-	}
-	if r.Usage.OutputTokens > 0 {
-		out = append(out, emission{"torana_plugin_tokens", sdk.MetricCounter,
-			float64(r.Usage.OutputTokens), withLabel(labels, "direction", "output")})
+	if resp.Usage != nil {
+		if resp.Usage.InputTokens > 0 {
+			out = append(out, emission{"torana_plugin_tokens", sdk.MetricCounter,
+				float64(resp.Usage.InputTokens), withLabel(labels, "direction", "input")})
+		}
+		if resp.Usage.OutputTokens > 0 {
+			out = append(out, emission{"torana_plugin_tokens", sdk.MetricCounter,
+				float64(resp.Usage.OutputTokens), withLabel(labels, "direction", "output")})
+		}
 	}
 	return out
 }
