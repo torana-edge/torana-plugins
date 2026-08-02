@@ -156,10 +156,14 @@ func handleToolCall(call sdk.ToolCall) (sdk.ToolCallAction, error) {
 	}
 
 	// Extract and cache intent. Phase 0 observability: count how often the
-	// model actually follows the convention, per tool.
+	// model actually follows the convention, per tool. FIELD PRESENCE and
+	// CAPTURE VALIDITY are independent facts: only a non-empty string is a
+	// usable intent, but ANY present "i" key is Torana's injected field
+	// unless the tool natively declares it (decided by the hadI marker).
 	labels := map[string]string{"tool": call.Name}
-	intent, hasIntent := args[intentField].(string)
-	if hasIntent && intent != "" {
+	rawI, hasIntent := args[intentField]
+	intent, usable := rawI.(string)
+	if usable && intent != "" {
 		// Key by tool_call_id (works when the harness echoes IDs, e.g. most
 		// OpenAI clients) AND by tool name+args content. The content key
 		// survives harnesses that reassign tool_call_ids across turns (Claude
@@ -184,15 +188,14 @@ func handleToolCall(call sdk.ToolCall) (sdk.ToolCallAction, error) {
 		sdk.Log(fmt.Sprintf("intent[%s %s]: ABSENT", call.Name, call.ID), sdk.LogLevelDebug)
 	}
 
-	// The plugin only rewrites the block when it actually deletes an
-	// injected (non-empty string) "i". Everything else — no "i", a native
-	// "i", an empty or non-string "i", unrepresentable arguments — passes
-	// the exact original bytes and signature.
-	if !hasIntent || intent == "" {
+	// No "i" key at all: absent observability already emitted, exact pass
+	// with NO marker lookup, marshal, or signature change.
+	if !hasIntent {
 		return sdk.PassToolCall(), nil
 	}
 
-	// Decide whether the present "i" is the field THIS plugin injected. A
+	// Any present "i" value (string, empty, number, object, boolean, null)
+	// is Torana's injected field unless the tool natively declares it. A
 	// refusal to READ the hadI marker is a protocol failure (the key is only
 	// written by this plugin's request side): log and return an error so
 	// StreamHandler re-emits the original block — never a guess about
@@ -208,13 +211,14 @@ func handleToolCall(call sdk.ToolCall) (sdk.ToolCallAction, error) {
 		}
 	}
 	if hadI == "true" {
-		// Native field: the original block (with "i" and its signature)
-		// passes byte-identical.
+		// Native field: the original block (with "i" of ANY value and its
+		// signature) passes byte-identical.
 		return sdk.PassToolCall(), nil
 	}
 
-	// Injected "i": delete it, marshal the changed object, and replace —
-	// the arguments changed, so StreamHandler clears the bound signature.
+	// Injected "i" of ANY type/value: delete it, marshal the changed
+	// object, and replace — the arguments changed, so StreamHandler clears
+	// the bound signature.
 	delete(args, intentField)
 	modifiedJSON, err := json.Marshal(args)
 	if err != nil {
