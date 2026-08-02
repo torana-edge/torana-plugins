@@ -361,6 +361,17 @@ func selectKeywordLines(lines []string, keywords []string) map[int]bool {
 	})
 
 	keep := make(map[int]bool)
+	// Phase 1: the ranked evidence lines themselves have priority over their
+	// context — the cap can never spend a slot on a noise line while the
+	// match that justified it is absent.
+	for _, sl := range scoredLines {
+		if len(keep) >= maxKeepLines {
+			break
+		}
+		keep[sl.idx] = true
+	}
+	// Phase 2: surrounding context, deterministically in rank order, while
+	// capacity remains.
 	for _, sl := range scoredLines {
 		if len(keep) >= maxKeepLines {
 			break
@@ -445,8 +456,12 @@ func truncateHeadTail(content string, n int) string {
 	}
 
 	noticeLen := len(truncationNotice(len(content)))
-	if noticeLen >= n {
-		// The exact notice cannot fit: a rune-safe raw prefix within n.
+
+	// The exact notice cannot fit strictly (0 < n < noticeLen): a rune-safe
+	// raw prefix within n, with no fabricated or partial notice. At EXACT
+	// equality the notice fits perfectly and the notice-bearing path is used
+	// (head and tail halves are empty, the notice states the full removal).
+	if noticeLen > n {
 		return truncHead(content, n)
 	}
 

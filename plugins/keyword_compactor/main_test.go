@@ -784,3 +784,69 @@ func TestDeterminismOverIdenticalRequests(t *testing.T) {
 		t.Fatal("identical requests produced different bytes — prompt-cache busting input")
 	}
 }
+
+// TestSelectionCapEdgeKeepsEvidence — regression: at the cap boundary the
+// ranked evidence line has priority over its context. Equal-score matches at
+// 2, 7, ..., 192, 196, then 300; the old walker inserted context 298 as line
+// 200 and omitted match 300. The two-phase selector keeps every ranked match
+// first, never context in lieu of the match that justified it, stays at most
+// 200 unique lines, and remains deterministic.
+func TestSelectionCapEdgeKeepsEvidence(t *testing.T) {
+	var lines []string
+	for i := 0; i < 302; i++ {
+		if i >= 2 && i <= 192 && (i-2)%5 == 0 {
+			lines = append(lines, "MATCH")
+			continue
+		}
+		if i == 196 || i == 300 {
+			lines = append(lines, "MATCH")
+			continue
+		}
+		lines = append(lines, "noise")
+	}
+	keep := selectKeywordLines(lines, []string{"match"})
+	if !keep[300] {
+		t.Fatalf("ranked match 300 missing; kept=%d", len(keep))
+	}
+	if keep[298] {
+		t.Fatal("context retained in lieu of the match that justified it")
+	}
+	if len(keep) > maxKeepLines {
+		t.Fatalf("cap exceeded: %d", len(keep))
+	}
+	keep2 := selectKeywordLines(lines, []string{"match"})
+	for i := range keep {
+		if !keep2[i] {
+			t.Fatal("selection differs across identical inputs")
+		}
+	}
+}
+
+// TestTruncationNoticeExactEquality — regression: when n equals the exact
+// notice length, the notice-bearing path is used (the notice states the full
+// removal), not a raw prefix.
+func TestTruncationNoticeExactEquality(t *testing.T) {
+	content := strings.Repeat("x", 1000)
+	n := len(truncationNotice(len(content)))
+	got := truncateHeadTail(content, n)
+	want := truncationNotice(len(content))
+	if got != want {
+		t.Fatalf("equality case: got %q, want the exact notice %q", got, want)
+	}
+	if len(got) != n {
+		t.Fatalf("equality case output %d bytes, want %d", len(got), n)
+	}
+	// The notice's removed-byte count must match the actual removal.
+	if _, rest, ok := strings.Cut(got, "\n\n... ["); ok {
+		claimed, _, _ := strings.Cut(rest, " bytes truncated by Torana]")
+		if claimed != "1000" {
+			t.Fatalf("notice claims %s removed, want 1000", claimed)
+		}
+	} else {
+		t.Fatal("notice missing in the equality case")
+	}
+	// Strictly below equality, the raw-prefix contract still holds.
+	if got := truncateHeadTail(content, n-1); got != strings.Repeat("x", n-1) {
+		t.Fatalf("strictly-below case must be a raw prefix, got %q", got)
+	}
+}
