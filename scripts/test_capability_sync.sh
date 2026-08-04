@@ -13,18 +13,41 @@ set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 validator="${VALIDATOR:-$root/scripts/validate_manifests.go}"
+plugins_dir="${PLUGINS_DIR:-$root/plugins}"
 
-# The pinned SDK module: every plugin go.mod requires the same revision
-# (the atomic Migration-C contract); take the first pin.
-pin=$(grep -h 'github.com/torana-edge/torana-plugin-sdk' "$root"/plugins/*/go.mod | head -1 | awk '{print $3}')
+# The pinned SDK module: EVERY plugin go.mod must require the SAME revision
+# (the atomic Migration-C contract). Parse each module's direct SDK
+# requirement; require exactly one unique non-empty version — a one-module
+# drift fails here, never silently.
+pin=""
+for gomod in "$plugins_dir"/*/go.mod; do
+  mod_pin=$(grep 'github.com/torana-edge/torana-plugin-sdk' "$gomod" | awk '{print $3}')
+  if [[ -z "$mod_pin" ]]; then
+    echo "capability sync: $gomod has no torana-plugin-sdk requirement" >&2
+    exit 1
+  fi
+  if [[ -z "$pin" ]]; then
+    pin="$mod_pin"
+  elif [[ "$mod_pin" != "$pin" ]]; then
+    echo "capability sync: plugin SDK pins disagree: $gomod requires $mod_pin, others require $pin" >&2
+    exit 1
+  fi
+done
 if [[ -z "$pin" ]]; then
-  echo "capability sync: no torana-plugin-sdk pin found in plugins/*/go.mod" >&2
+  echo "capability sync: no torana-plugin-sdk pin found in $plugins_dir/*/go.mod" >&2
   exit 1
 fi
-gomodcache=$(cd "$root" && go env GOMODCACHE)
-sdk="$gomodcache/github.com/torana-edge/torana-plugin-sdk@$pin"
-if [[ ! -f "$sdk/capabilities.go" || ! -f "$sdk/capabilities_write.go" ]]; then
-  echo "capability sync: pinned SDK $pin is not in the module cache ($sdk)" >&2
+
+# Resolve the agreed pin through Go module resolution (GOWORK=off) from a
+# plugin module: a CLEAN checkout must work without a pre-warmed cache — the
+# resolver downloads the declared dependency and returns its module directory.
+first_module=$(echo "$plugins_dir"/*/go.mod | awk '{print $1}')
+module_dir=$(dirname "$first_module")
+# go mod download -json downloads the declared dependency (a clean
+# GOMODCACHE works) and reports its module directory.
+sdk=$(cd "$module_dir" && GOWORK=off go mod download -json github.com/torana-edge/torana-plugin-sdk 2>/dev/null | awk -F'"' '/"Dir"/{print $4; exit}')
+if [[ -z "$sdk" || ! -f "$sdk/capabilities.go" || ! -f "$sdk/capabilities_write.go" ]]; then
+  echo "capability sync: pinned SDK $pin could not be resolved (go mod download from $module_dir)" >&2
   exit 1
 fi
 
@@ -76,4 +99,4 @@ if ! diff <(echo "$hooks_sdk") <(echo "$hooks_validator") >/dev/null; then
   exit 1
 fi
 
-echo "capability sync: validator matches the SDK ($pin)"
+echo "capability sync: validator matches the SDK ($pin at $sdk)"

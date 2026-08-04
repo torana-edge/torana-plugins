@@ -812,6 +812,11 @@ func TestRehydrationProvenanceAwareWrites(t *testing.T) {
 		{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}},
 		{Role: "assistant", Blocks: []*pbv2.RequestBlock{
 			use("c1", "read", `{"path":"server.go"}`, "call-sig-1"),
+			// A NON-TOOL block interleaved between tool-use blocks: the
+			// views' ordinals (0,1,2) differ from the block indices
+			// (0,2,3), so a regression from tc.Block to the tool-call loop
+			// index would target the wrong blocks (and error on this one).
+			{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "interleaved note"}}},
 			use("c2", "read", `{"path":"other.go","i":"existing"}`, "call-sig-2"),
 			use("c3", "grep", `{"pattern":"x"}`, "call-sig-3"),
 		}},
@@ -844,6 +849,11 @@ func TestRehydrationProvenanceAwareWrites(t *testing.T) {
 	}
 	if got[2].Signature != "" {
 		t.Fatalf("a REAL change must clear c3's token: %q", got[2].Signature)
+	}
+	// The interleaved non-tool block (block index 1) is byte-identical.
+	inter := req.Messages[1].Blocks[1].GetText()
+	if inter == nil || inter.Text != "interleaved note" || inter.Signature != "" {
+		t.Fatalf("the interleaved block was disturbed: %+v", inter)
 	}
 
 	// A request where EVERY call already carries "i" is a no-op preserving

@@ -35,11 +35,11 @@
     },
     {
       "name": "env.meta_get",
-      "description": "Read fragment buffers and tool-call tracking"
+      "description": "Read the native-i marker state"
     },
     {
       "name": "env.meta_set",
-      "description": "Write fragment buffers and tool-call tracking"
+      "description": "Write the native-i marker state"
     },
     {
       "name": "env.plugin_config",
