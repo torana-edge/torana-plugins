@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -571,10 +572,29 @@ func TestTickEntryValidationStopsWithZeroSends(t *testing.T) {
 			if !strings.Contains(raw, `"stopped"`) {
 				t.Fatalf("the invalid entry must be stopped: %s", raw)
 			}
-			// NO reservation write: the only durable write is the stop-reason
-			// persistence; a pending reservation would carry attempt_millis.
-			if strings.Contains(raw, "attempt_millis") {
-				t.Fatalf("an invalid entry must never reserve: %s", raw)
+			// EXACT state_set sequence: exactly ONE durable write — the
+			// permitted stop-reason persistence. The call is decoded and
+			// must carry the terminal stop with NO attempt_millis (a pending
+			// reservation would set it); a second/pending write fails.
+			var stateSets []string
+			for _, c := range h.Calls() {
+				if c.Command == "env.state_set" {
+					stateSets = append(stateSets, c.Args)
+				}
+			}
+			if len(stateSets) != 1 {
+				t.Fatalf("env.state_set calls = %d, want exactly 1 (stop-reason persistence only)", len(stateSets))
+			}
+			// The typed host call carries protobuf-encoded StateSetArgs.
+			var setArgs pbv2.StateSetArgs
+			if err := proto.Unmarshal([]byte(stateSets[0]), &setArgs); err != nil {
+				t.Fatalf("state_set args not a StateSetArgs proto: %v", err)
+			}
+			if setArgs.Key != "warm/conv-1" || !strings.Contains(setArgs.Value, `"stopped"`) {
+				t.Fatalf("the single write is not the stop persistence: %s", stateSets[0])
+			}
+			if strings.Contains(setArgs.Value, "attempt_millis") {
+				t.Fatalf("an invalid entry must never reserve: %s", setArgs.Value)
 			}
 		})
 	}
@@ -1142,8 +1162,15 @@ func sendCall(t *testing.T, payload string) (provider, path string, timeoutMS in
 		Path      string `json:"path"`
 		TimeoutMS int    `json:"timeout_ms"`
 	}
-	if err := json.Unmarshal([]byte(payload), &args); err != nil {
+	// STRICT decoding: no unknown fields, and a second decode must hit EOF —
+	// a payload with extra/renamed members fails.
+	dec := json.NewDecoder(strings.NewReader(payload))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&args); err != nil {
 		t.Fatalf("send payload not JSON: %v", err)
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		t.Fatalf("send payload has trailing content: %v", err)
 	}
 	raw, err := base64.StdEncoding.DecodeString(args.RequestPB)
 	if err != nil {
@@ -1156,13 +1183,50 @@ func sendCall(t *testing.T, payload string) (provider, path string, timeoutMS in
 	return args.Provider, args.Path, args.TimeoutMS, req
 }
 
-// TestTickExactSendPayload — the outgoing warming request is pinned EXACTLY:
-// the real torana_send_request host-call payload is strictly decoded
-// (provider/path/timeout_ms + base64 request_pb → protobuf) and compared
-// with proto.Equal against an INDEPENDENT expected: a direct clone of the
-// decoded stored replay with ONLY max_tokens=1 set — no production mutation
-// helper builds the oracle. stream=false, empty torana_meta_json, and every
-// block/params/extensions/safety/stops field must be unchanged.
+// richWarmRequest is a CONTRACT-VALID replay carrying non-default values for
+// EVERY top-level provider-visible family (params, extensions, safety,
+// stops) plus tools and rich ordered blocks, with a valid non-terminal
+// suffix after the last marker — the exact-send pin must prove each of
+// these survives the round trip.
+func richWarmRequest() *pbv2.ChatRequest {
+	return &pbv2.ChatRequest{
+		Model:                  "claude-sonnet-4",
+		MaxTokens:              proto.Int32(512),
+		Temperature:            proto.Float64(0.7),
+		TopP:                   proto.Float64(0.9),
+		StopSequences:          []string{"END", "STOP"},
+		ProviderExtensionsJson: []byte(`{"custom":{"b":1,"a":2}}`),
+		SafetySettingsJson:     []byte(`[{"category":"A","threshold":"B"}]`),
+		Tools: []*pbv2.ToolDef{{
+			Name: "read", Description: "d", ParametersJson: []byte(`{"type":"object"}`),
+		}},
+		Messages: []*pbv2.Message{
+			{Role: "system", Blocks: []*pbv2.RequestBlock{
+				{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "sys"}}},
+				{Kind: &pbv2.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pbv2.RequestCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}},
+			}},
+			{Role: "user", Blocks: []*pbv2.RequestBlock{
+				{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "u"}}},
+				{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: &pbv2.RequestToolResultBlock{
+					ToolCallId: "c1",
+					Content: []*pbv2.ToolResultContentBlock{{
+						Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: "ok"}},
+					}},
+				}}},
+			}},
+			{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "suffix"}}}}},
+		},
+	}
+}
+
+// TestTickExactSendPayload — the outgoing warming request is pinned EXACTLY
+// with a RICH replay: the real torana_send_request host-call payload is
+// STRICTLY decoded (DisallowUnknownFields + second-decode EOF, exact
+// provider/path/timeout_ms, base64 request_pb → protobuf) and compared with
+// proto.Equal against an INDEPENDENT expected: a direct clone of the decoded
+// stored replay with ONLY max_tokens=1 set — no production mutation helper
+// builds the oracle. Every seeded non-default field must remain present and
+// exact; stream=false and empty torana_meta_json.
 func TestTickExactSendPayload(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(warmerCfg)
@@ -1172,16 +1236,33 @@ func TestTickExactSendPayload(t *testing.T) {
 		sent = payload
 		return sdktest.HostResultValue([]byte(`{"http_status":200,"usage":{"cache_read":1,"cache_write":0}}`)), nil
 	})
-	seedEntry(t, h, warmEntrySeed(t))
+	// Seed a RICH entry: the fingerprint is built INDEPENDENTLY (literal
+	// approved domain over the SDK projection).
+	rich := richWarmRequest()
+	projection, _, err := pbv2.RequestObservablePrefix(rich)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc, err := sdk.EncodeRequest(rich)
+	if err != nil {
+		t.Fatal(err)
+	}
+	richSeed := warmEntrySeed(t)
+	richSeed.PrefixPB = enc
+	richSeed.PrefixFingerprint = sdk.ContentAddressedCacheKey("cache_warmer/prefix", string(projection))
+	seedEntry(t, h, richSeed)
 	tickAt(h, 300_000)
 
+	if n := countCommand(h, "torana_send_request"); n != 1 {
+		t.Fatalf("sends=%d, want exactly 1", n)
+	}
 	provider, path, timeoutMS, sentReq := sendCall(t, sent)
 	if provider != "anthropic" || path != "/v1/messages" || timeoutMS != 0 {
 		t.Fatalf("egress args = (%q, %q, %d), want (anthropic, /v1/messages, 0)", provider, path, timeoutMS)
 	}
 	// INDEPENDENT expected: clone the decoded stored replay, set ONLY
 	// MaxTokens=1.
-	replay, err := sdk.DecodeRequest(warmPrefix(t))
+	replay, err := sdk.DecodeRequest(richSeed.PrefixPB)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1195,6 +1276,32 @@ func TestTickExactSendPayload(t *testing.T) {
 	}
 	if len(sentReq.ToranaMetaJson) != 0 {
 		t.Fatalf("the sent request must carry no host metadata, got %s", sentReq.ToranaMetaJson)
+	}
+	// Every seeded non-default family survives: params, stops, extensions,
+	// safety, tools, and the rich ordered blocks (incl. the suffix).
+	if sentReq.MaxTokens == nil || *sentReq.MaxTokens != 1 {
+		t.Fatalf("max_tokens = %v, want 1", sentReq.MaxTokens)
+	}
+	if sentReq.Temperature == nil || *sentReq.Temperature != 0.7 {
+		t.Fatalf("temperature lost: %v", sentReq.Temperature)
+	}
+	if sentReq.TopP == nil || *sentReq.TopP != 0.9 {
+		t.Fatalf("top_p lost: %v", sentReq.TopP)
+	}
+	if len(sentReq.StopSequences) != 2 || sentReq.StopSequences[0] != "END" || sentReq.StopSequences[1] != "STOP" {
+		t.Fatalf("stops lost: %v", sentReq.StopSequences)
+	}
+	if string(sentReq.ProviderExtensionsJson) != `{"custom":{"b":1,"a":2}}` {
+		t.Fatalf("extensions lost: %s", sentReq.ProviderExtensionsJson)
+	}
+	if string(sentReq.SafetySettingsJson) != `[{"category":"A","threshold":"B"}]` {
+		t.Fatalf("safety lost: %s", sentReq.SafetySettingsJson)
+	}
+	if len(sentReq.Tools) != 1 || sentReq.Tools[0].Name != "read" {
+		t.Fatalf("tools lost: %+v", sentReq.Tools)
+	}
+	if len(sentReq.Messages) != 3 || sentReq.Messages[2].Blocks[0].GetText().Text != "suffix" {
+		t.Fatalf("ordered blocks/suffix lost: %+v", sentReq.Messages)
 	}
 	// Revert proof (a): an expected with ANY extra field changed must fail
 	// the equality — the pin is not vacuous.
@@ -1261,7 +1368,17 @@ func TestRequestPathCarrierFingerprintMatrix(t *testing.T) {
 	indepFingerprint := func(projection []byte) string {
 		return sdk.ContentAddressedCacheKey(domain, string(projection))
 	}
-	for name, req := range carrierInputs() {
+	// A real VALID non-terminal suffix after the last marker: the sanitized
+	// full replay and the SDK projection differ for the intended boundary
+	// reason (the suffix is replayable but not part of the cached prefix).
+	suffixInput := func() *pbv2.ChatRequest {
+		r := carrierInputs()["outer"]
+		r.Messages = append(r.Messages, &pbv2.Message{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "suffix"}}}}})
+		return r
+	}()
+	inputs := carrierInputs()
+	inputs["outer with valid suffix"] = suffixInput
+	for name, req := range inputs {
 		t.Run(name, func(t *testing.T) {
 			req.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
 			h := newHarness(t)
@@ -1299,12 +1416,26 @@ func TestRequestPathCarrierFingerprintMatrix(t *testing.T) {
 			if want := indepFingerprint(projection); entry.PrefixFingerprint != want {
 				t.Fatalf("fingerprint %q, want the independent oracle %q", entry.PrefixFingerprint, want)
 			}
-			// Revert proof (b): bypassing the SDK projection (hashing the raw
-			// request instead) must FAIL the oracle — the pin detects it.
-			rawBytes, _ := proto.Marshal(req)
+			// Revert proof (b): bypassing the SDK projection — hashing the
+			// INDEPENDENTLY SANITIZED full replay (a direct clone with
+			// stream/meta cleared — NOT the raw request, whose torana_meta
+			// would dominate the comparison) — must FAIL the oracle exactly
+			// where the sanitized full replay legitimately differs from the
+			// projection: the tool-only shape (messages excluded) and the
+			// suffix shape (suffix excluded). For the plain outer/nested/
+			// mixed shapes the sanitized full replay legitimately EQUALS the
+			// projection, so no divergence is demanded there.
+			diverges := name == "tool-only" || name == "outer with valid suffix"
+			sanitizedFull := proto.Clone(req).(*pbv2.ChatRequest)
+			sanitizedFull.Stream = false
+			sanitizedFull.ToranaMetaJson = nil
+			rawBytes, _ := proto.Marshal(sanitizedFull)
 			bypassed := indepFingerprint(rawBytes)
-			if bypassed == entry.PrefixFingerprint {
+			if diverges && bypassed == entry.PrefixFingerprint {
 				t.Fatal("revert proof: a projection-bypassing digest matched the stored fingerprint")
+			}
+			if !diverges && bypassed != entry.PrefixFingerprint {
+				t.Fatalf("sanitized full replay must equal its projection for this shape: %q != %q", bypassed, entry.PrefixFingerprint)
 			}
 		})
 	}
@@ -1322,7 +1453,12 @@ func TestRequestPathFingerprintSensitivity(t *testing.T) {
 	}
 	store := func(req *pbv2.ChatRequest) (warmEntry, *pbv2.ChatRequest) {
 		t.Helper()
-		req.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
+		// Preserve CALLER-PROVIDED valid opted-in metadata; inject the
+		// default only when absent (a caller-supplied payload must actually
+		// be the one dispatched).
+		if len(req.ToranaMetaJson) == 0 {
+			req.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
+		}
 		h := newHarness(t)
 		h.SetConfig(warmerCfg)
 		h.SetNow(100_000)
@@ -1346,13 +1482,12 @@ func TestRequestPathFingerprintSensitivity(t *testing.T) {
 			r.Messages[0].Blocks[1].GetCacheBreakpoint().MarkerJson = []byte(`{"type":"standard"}`)
 		},
 		"marker position": func(r *pbv2.ChatRequest) {
-			// Move the marker from blocks[1] to blocks[2]: the projection now
-			// includes the inserted text — a different boundary.
-			marker := r.Messages[0].Blocks[1]
+			// ISOLATED: the same two blocks, only the marker moves from
+			// blocks[1] to blocks[0] — the boundary changes (the text drops
+			// out of the truncated prefix) with NO content added or removed.
 			r.Messages[0].Blocks = []*pbv2.RequestBlock{
-				{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "u"}}},
-				{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "mid"}}},
-				marker,
+				r.Messages[0].Blocks[1],
+				r.Messages[0].Blocks[0],
 			}
 		},
 		"params":     func(r *pbv2.ChatRequest) { r.MaxTokens = proto.Int32(64) },
@@ -1379,20 +1514,31 @@ func TestRequestPathFingerprintSensitivity(t *testing.T) {
 	}
 
 	// Stream and torana metadata: fingerprint UNCHANGED, and the sanitized
-	// replay keeps stream=false + no metadata.
+	// replay keeps stream=false + no metadata. NON-VACUOUS: the caller's
+	// metadata payload is preserved by the store helper and actually
+	// dispatched, so the comparison exercises the metadata difference.
 	t.Run("stream and metadata neutral", func(t *testing.T) {
-		req := proto.Clone(base).(*pbv2.ChatRequest)
-		req.Stream = true
-		req.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x","_request_headers":"secret"}`)
-		entry, decoded := store(req)
-		if entry.PrefixFingerprint != baseEntry.PrefixFingerprint {
+		reqA := proto.Clone(base).(*pbv2.ChatRequest)
+		reqA.Stream = true
+		reqA.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x","_request_headers":"secret-a"}`)
+		entryA, decodedA := store(reqA)
+		reqB := proto.Clone(base).(*pbv2.ChatRequest)
+		reqB.Stream = true
+		reqB.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x","_request_headers":"secret-b"}`)
+		entryB, decodedB := store(reqB)
+		if entryA.PrefixFingerprint != entryB.PrefixFingerprint {
+			t.Fatal("distinct metadata changed the fingerprint")
+		}
+		if entryA.PrefixFingerprint != baseEntry.PrefixFingerprint {
 			t.Fatal("stream/metadata changed the fingerprint")
 		}
-		if decoded.Stream {
-			t.Fatal("the sanitized replay kept stream=true")
-		}
-		if len(decoded.ToranaMetaJson) != 0 {
-			t.Fatalf("the sanitized replay kept metadata: %s", decoded.ToranaMetaJson)
+		for _, decoded := range []*pbv2.ChatRequest{decodedA, decodedB} {
+			if decoded.Stream {
+				t.Fatal("the sanitized replay kept stream=true")
+			}
+			if len(decoded.ToranaMetaJson) != 0 {
+				t.Fatalf("the sanitized replay kept metadata: %s", decoded.ToranaMetaJson)
+			}
 		}
 	})
 }
