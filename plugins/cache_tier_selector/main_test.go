@@ -23,37 +23,18 @@ func msg(role, content string) *pbv2.Message {
 	}}
 }
 
-// lastCarrierMarkerJSON returns the marker bytes of the LAST cache-
-// breakpoint carrier in TRUE serialization order: tools first, then
-// messages (outer blocks, then nested tool-result content). The old
-// lastMarkerJSON walked only outer message carriers — tool/nested
-// regressions could pass; the corrected walk matches the SDK model.
-func lastCarrierMarkerJSON(t *testing.T, req *pbv2.ChatRequest) []byte {
+// carrierMarkerAt reads the marker bytes of a SPECIFIED outer carrier
+// position — every fixture in this suite carries its marker at a known
+// block position, so tests assert the row-designated carrier directly
+// instead of re-implementing the SDK's ordered carrier discovery (which
+// would reintroduce the drift class the SDK-owned seam eliminates).
+func carrierMarkerAt(t *testing.T, req *pbv2.ChatRequest, msg, block int) []byte {
 	t.Helper()
-	last := []byte(nil)
-	for _, td := range req.Tools {
-		if len(td.CacheControlJson) > 0 {
-			last = td.CacheControlJson
-		}
+	cb := req.Messages[msg].Blocks[block].GetCacheBreakpoint()
+	if cb == nil {
+		t.Fatalf("no outer carrier at messages[%d].blocks[%d]", msg, block)
 	}
-	for _, m := range req.Messages {
-		for _, b := range m.Blocks {
-			if cb := b.GetCacheBreakpoint(); cb != nil {
-				last = cb.MarkerJson
-			}
-			if tr := b.GetToolResult(); tr != nil {
-				for _, c := range tr.Content {
-					if cb := c.GetCacheBreakpoint(); cb != nil {
-						last = cb.MarkerJson
-					}
-				}
-			}
-		}
-	}
-	if last == nil {
-		t.Fatal("no marker carrier in the result request")
-	}
-	return last
+	return cb.MarkerJson
 }
 
 // keyFor is a thin test wrapper over the PRODUCTION decisionKey helper.
@@ -299,7 +280,7 @@ func TestStoredDecisionReappliedByteIdentically(t *testing.T) {
 	if first.Err != nil || first.Request == nil {
 		t.Fatalf("expected the stored marker applied, err=%v", first.Err)
 	}
-	out := lastCarrierMarkerJSON(t, first.Request)
+	out := carrierMarkerAt(t, first.Request, 1, 1)
 	var marker map[string]any
 	if err := json.Unmarshal(out, &marker); err != nil {
 		t.Fatal(err)
@@ -400,7 +381,7 @@ func TestAutoModeThreshold(t *testing.T) {
 		t.Fatalf("a long gap must buy the long tier, err=%v", res2.Err)
 	}
 	var marker map[string]any
-	if err := json.Unmarshal(lastCarrierMarkerJSON(t, res2.Request), &marker); err != nil {
+	if err := json.Unmarshal(carrierMarkerAt(t, res2.Request, 1, 1), &marker); err != nil {
 		t.Fatal(err)
 	}
 	if marker["ttl"] != "1h" {
@@ -447,8 +428,8 @@ func TestModesShortAndLong(t *testing.T) {
 	if res2.Err != nil || res2.Request == nil {
 		t.Fatalf("mode long must apply the long marker, err=%v", res2.Err)
 	}
-	if !strings.Contains(string(lastCarrierMarkerJSON(t, res2.Request)), `"ttl":"1h"`) {
-		t.Fatalf("long marker missing: %s", lastCarrierMarkerJSON(t, res2.Request))
+	if !strings.Contains(string(carrierMarkerAt(t, res2.Request, 1, 1)), `"ttl":"1h"`) {
+		t.Fatalf("long marker missing: %s", carrierMarkerAt(t, res2.Request, 1, 1))
 	}
 }
 
@@ -555,8 +536,8 @@ func TestApplyMarkerMatchingMarkerPasses(t *testing.T) {
 	if err != nil || !changed {
 		t.Fatalf("a changed marker must replace the request (changed=%v err=%v)", changed, err)
 	}
-	if !strings.Contains(string(lastCarrierMarkerJSON(t, req2)), `"ttl":"1h"`) {
-		t.Fatalf("marker not applied: %s", lastCarrierMarkerJSON(t, req2))
+	if !strings.Contains(string(carrierMarkerAt(t, req2, 1, 1)), `"ttl":"1h"`) {
+		t.Fatalf("marker not applied: %s", carrierMarkerAt(t, req2, 1, 1))
 	}
 	// No carrier: the sentinel declines without mutation.
 	nomark := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}}}}
@@ -849,10 +830,9 @@ func TestCarrierHookRows(t *testing.T) {
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
-			baseline := proto.Clone(row.req).(*pbv2.ChatRequest)
+			// Inject metadata FIRST, then take the ONE immutable input
+			// baseline.
 			row.req.ToranaMetaJson = []byte(`{"_provider":"anthropic","_conversation_id":"conv-1"}`)
-			// The baseline clone predates the meta injection; capture the
-			// post-meta fixture as the immutable input baseline instead.
 			inputBaseline := proto.Clone(row.req).(*pbv2.ChatRequest)
 
 			h := newHarness(t)
@@ -908,7 +888,6 @@ func TestCarrierHookRows(t *testing.T) {
 			if !proto.Equal(row.req, expected) {
 				t.Fatal("the hook input fixture was mutated beyond the applied marker")
 			}
-			_ = baseline
 		})
 	}
 }
