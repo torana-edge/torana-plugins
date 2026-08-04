@@ -4,5 +4,7 @@ github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260802125903-d4908a648024 h1
 github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260802125903-d4908a648024/go.mod h1:AQgCa3xORFCvKFibrhN2QYWYwXjx0aLUA64I5S9UMwk=
 github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260804080047-a35eef6bd677 h1:IIT08Yjms5TBcosm1m6DbL/I/7+N00FWRC1GGbkfK58=
 github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260804080047-a35eef6bd677/go.mod h1:AQgCa3xORFCvKFibrhN2QYWYwXjx0aLUA64I5S9UMwk=
+github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260804092442-d5c0145c75af h1:/lbPQE2oOh26YBR+bj91sesVlgUEJ3WS/Vn4UKV1ja4=
+github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260804092442-d5c0145c75af/go.mod h1:AQgCa3xORFCvKFibrhN2QYWYwXjx0aLUA64I5S9UMwk=
 google.golang.org/protobuf v1.36.11 h1:fV6ZwhNocDyBLK0dj+fg8ektcVegBBuEolpbTQyBNVE=
 google.golang.org/protobuf v1.36.11/go.mod h1:HTf+CrKn2C3g5S8VImy6tdcUvCska2kB7j23XfzDpco=
