@@ -548,8 +548,6 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 	}
 }
 
-// endsWithUnansweredToolCall reports whether the last message is an assistant
-// turn holding tool calls that nothing answers.
 // endsWithUnansweredToolCall reports whether the FINAL message is an
 // assistant turn containing any tool_use block (ordered request-block
 // model) — a prefix ending on an unanswered tool call is not a request that

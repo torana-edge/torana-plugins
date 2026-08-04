@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"strconv"
@@ -525,8 +526,17 @@ func TestTickEntryValidationStopsWithZeroSends(t *testing.T) {
 		{"unreadable prefix", func(e *warmEntry) { e.PrefixPB = "not base64 protobuf" }},
 		{"mid tool call", func(e *warmEntry) { e.PrefixPB = midToolPrefix() }},
 		{"model mismatch", func(e *warmEntry) { e.PrefixPB = badPrefix() }},
-		{"fingerprint drift", func(e *warmEntry) { e.PrefixFingerprint = "deadbeef" }},
+		{"fingerprint drift", func(e *warmEntry) {
+			// REAL drift: a provider-visible field BEFORE the marker changes
+			// and the request is re-encoded, while the stored fingerprint is
+			// the ORIGINAL (now wrong) one.
+			req := warmRequest()
+			req.Messages[0].Blocks[0].GetText().Text = "mutated before the marker"
+			enc, _ := sdk.EncodeRequest(req)
+			e.PrefixPB = enc
+		}},
 		{"missing fingerprint", func(e *warmEntry) { e.PrefixFingerprint = "" }},
+		{"malformed fingerprint", func(e *warmEntry) { e.PrefixFingerprint = "not-a-valid-shape" }},
 		{"out of domain replay", func(e *warmEntry) {
 			bad := warmRequest()
 			bad.Messages[0].Blocks = bad.Messages[0].Blocks[:0]
@@ -548,6 +558,9 @@ func TestTickEntryValidationStopsWithZeroSends(t *testing.T) {
 			tc.mut(&entry)
 			seedEntry(t, h, entry)
 			tickAt(h, 300_000)
+			if n := countCommand(h, "torana_cache_pricing"); n != 0 {
+				t.Fatalf("an invalid entry reached pricing %d times", n)
+			}
 			if n := countCommand(h, "torana_send_request"); n != 0 {
 				t.Fatalf("an invalid entry must not spend, got %d sends", n)
 			}
@@ -557,6 +570,11 @@ func TestTickEntryValidationStopsWithZeroSends(t *testing.T) {
 			}
 			if !strings.Contains(raw, `"stopped"`) {
 				t.Fatalf("the invalid entry must be stopped: %s", raw)
+			}
+			// NO reservation write: the only durable write is the stop-reason
+			// persistence; a pending reservation would carry attempt_millis.
+			if strings.Contains(raw, "attempt_millis") {
+				t.Fatalf("an invalid entry must never reserve: %s", raw)
 			}
 		})
 	}
@@ -908,7 +926,12 @@ func TestRequestPathSanitizedReplayAndFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode replay: %v", err)
 	}
-	expected := sanitizeReplay(req)
+	// INDEPENDENT expected: a direct clone with the two fields cleared by
+	// hand — never the production sanitizeReplay (the oracle must not share
+	// mutation code with the implementation).
+	expected := proto.Clone(req).(*pbv2.ChatRequest)
+	expected.Stream = false
+	expected.ToranaMetaJson = nil
 	if !proto.Equal(decoded, expected) {
 		t.Fatalf("replay is not the sanitized request\n got: %v\nwant: %v", decoded, expected)
 	}
@@ -1100,5 +1123,336 @@ func TestTickSeededPendingNeverRetries(t *testing.T) {
 	raw, ok := h.State("warm/conv-1")
 	if !ok || !strings.Contains(raw, "refresh outcome unknown") {
 		t.Fatal("the pending entry must remain durable")
+	}
+}
+
+// ==========================================================================
+// Proof batch (review round): exact send payload, carrier/fingerprint
+// matrix, zero-pricing failure table, terminal preservation
+// ==========================================================================
+
+// sendCall decodes the REAL torana_send_request host-call payload: the JSON
+// args with provider/path/timeout_ms and the base64 request_pb, protobuf-
+// decoded.
+func sendCall(t *testing.T, payload string) (provider, path string, timeoutMS int, req *pbv2.ChatRequest) {
+	t.Helper()
+	var args struct {
+		Provider  string `json:"provider"`
+		RequestPB string `json:"request_pb"`
+		Path      string `json:"path"`
+		TimeoutMS int    `json:"timeout_ms"`
+	}
+	if err := json.Unmarshal([]byte(payload), &args); err != nil {
+		t.Fatalf("send payload not JSON: %v", err)
+	}
+	raw, err := base64.StdEncoding.DecodeString(args.RequestPB)
+	if err != nil {
+		t.Fatalf("request_pb not base64: %v", err)
+	}
+	req = &pbv2.ChatRequest{}
+	if err := proto.Unmarshal(raw, req); err != nil {
+		t.Fatalf("request_pb not a proto request: %v", err)
+	}
+	return args.Provider, args.Path, args.TimeoutMS, req
+}
+
+// TestTickExactSendPayload — the outgoing warming request is pinned EXACTLY:
+// the real torana_send_request host-call payload is strictly decoded
+// (provider/path/timeout_ms + base64 request_pb → protobuf) and compared
+// with proto.Equal against an INDEPENDENT expected: a direct clone of the
+// decoded stored replay with ONLY max_tokens=1 set — no production mutation
+// helper builds the oracle. stream=false, empty torana_meta_json, and every
+// block/params/extensions/safety/stops field must be unchanged.
+func TestTickExactSendPayload(t *testing.T) {
+	h := newHarness(t)
+	h.SetConfig(warmerCfg)
+	h.StubHostCall("torana_cache_pricing", pricingStub())
+	var sent string
+	h.StubHostCall("torana_send_request", func(payload string) (string, error) {
+		sent = payload
+		return sdktest.HostResultValue([]byte(`{"http_status":200,"usage":{"cache_read":1,"cache_write":0}}`)), nil
+	})
+	seedEntry(t, h, warmEntrySeed(t))
+	tickAt(h, 300_000)
+
+	provider, path, timeoutMS, sentReq := sendCall(t, sent)
+	if provider != "anthropic" || path != "/v1/messages" || timeoutMS != 0 {
+		t.Fatalf("egress args = (%q, %q, %d), want (anthropic, /v1/messages, 0)", provider, path, timeoutMS)
+	}
+	// INDEPENDENT expected: clone the decoded stored replay, set ONLY
+	// MaxTokens=1.
+	replay, err := sdk.DecodeRequest(warmPrefix(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := proto.Clone(replay).(*pbv2.ChatRequest)
+	expected.MaxTokens = proto.Int32(1)
+	if !proto.Equal(sentReq, expected) {
+		t.Fatalf("sent request is not the sanitized replay with only max_tokens=1\n got: %v\nwant: %v", sentReq, expected)
+	}
+	if sentReq.Stream {
+		t.Fatal("the sent request must be non-streaming")
+	}
+	if len(sentReq.ToranaMetaJson) != 0 {
+		t.Fatalf("the sent request must carry no host metadata, got %s", sentReq.ToranaMetaJson)
+	}
+	// Revert proof (a): an expected with ANY extra field changed must fail
+	// the equality — the pin is not vacuous.
+	tampered := proto.Clone(expected).(*pbv2.ChatRequest)
+	tampered.Temperature = proto.Float64(0.5)
+	if proto.Equal(sentReq, tampered) {
+		t.Fatal("revert proof: an extra outgoing field change went undetected")
+	}
+}
+
+// carrierInputs builds the four carrier shapes (tool-only, outer, nested,
+// mixed tool+outer) as opted-in observation requests.
+func carrierInputs() map[string]*pbv2.ChatRequest {
+	trText := func(s string) *pbv2.ToolResultContentBlock {
+		return &pbv2.ToolResultContentBlock{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: s}}}
+	}
+	trMarker := func() *pbv2.ToolResultContentBlock {
+		return &pbv2.ToolResultContentBlock{Kind: &pbv2.ToolResultContentBlock_CacheBreakpoint{CacheBreakpoint: &pbv2.ToolResultCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}}
+	}
+	outer := func() *pbv2.ChatRequest {
+		return &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{
+			{Role: "user", Blocks: []*pbv2.RequestBlock{
+				{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "u"}}},
+				{Kind: &pbv2.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pbv2.RequestCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}},
+			}},
+		}}
+	}
+	return map[string]*pbv2.ChatRequest{
+		"tool-only": func() *pbv2.ChatRequest {
+			r := outer()
+			r.Tools = []*pbv2.ToolDef{{Name: "read", Description: "d", ParametersJson: []byte(`{}`), CacheControlJson: []byte(`{"type":"ephemeral"}`)}}
+			r.Messages[0].Blocks = r.Messages[0].Blocks[:1]
+			return r
+		}(),
+		"outer": outer(),
+		"nested": func() *pbv2.ChatRequest {
+			r := outer()
+			r.Messages[0].Blocks = []*pbv2.RequestBlock{
+				{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "u"}}},
+				{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: &pbv2.RequestToolResultBlock{
+					ToolCallId: "c1",
+					Content:    []*pbv2.ToolResultContentBlock{trText("r"), trMarker()},
+				}}},
+			}
+			return r
+		}(),
+		"mixed tool+outer (last = outer)": func() *pbv2.ChatRequest {
+			r := outer()
+			r.Tools = []*pbv2.ToolDef{{Name: "read", Description: "d", ParametersJson: []byte(`{}`), CacheControlJson: []byte(`{"type":"ephemeral"}`)}}
+			return r
+		}(),
+	}
+}
+
+// TestRequestPathCarrierFingerprintMatrix — for every carrier shape through
+// the REAL before-request hook: the stored replay equals the INDEPENDENTLY
+// sanitized full input (direct clone + two cleared fields), and the stored
+// fingerprint equals an INDEPENDENT digest oracle — ContentAddressedCacheKey
+// called with the LITERAL approved domain over the SDK projection, never the
+// production helper (a namespace change cannot make producer and test drift
+// together).
+func TestRequestPathCarrierFingerprintMatrix(t *testing.T) {
+	const domain = "cache_warmer/prefix"
+	indepFingerprint := func(projection []byte) string {
+		return sdk.ContentAddressedCacheKey(domain, string(projection))
+	}
+	for name, req := range carrierInputs() {
+		t.Run(name, func(t *testing.T) {
+			req.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
+			h := newHarness(t)
+			h.SetConfig(warmerCfg)
+			h.SetNow(100_000)
+			res := h.BeforeRequest(req)
+			if res.Err != nil || !res.PassedThrough {
+				t.Fatalf("err=%v", res.Err)
+			}
+			raw, ok := h.State("warm/conv-1")
+			if !ok {
+				t.Fatal("no entry stored")
+			}
+			var entry warmEntry
+			if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+				t.Fatal(err)
+			}
+			// Replay == the independent sanitized full input.
+			decoded, err := sdk.DecodeRequest(entry.PrefixPB)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := proto.Clone(req).(*pbv2.ChatRequest)
+			expected.Stream = false
+			expected.ToranaMetaJson = nil
+			if !proto.Equal(decoded, expected) {
+				t.Fatalf("replay != sanitized full input\n got: %v\nwant: %v", decoded, expected)
+			}
+			// Fingerprint == the independent digest oracle over the SDK
+			// projection (never prefixFingerprint).
+			projection, _, err := pbv2.RequestObservablePrefix(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := indepFingerprint(projection); entry.PrefixFingerprint != want {
+				t.Fatalf("fingerprint %q, want the independent oracle %q", entry.PrefixFingerprint, want)
+			}
+			// Revert proof (b): bypassing the SDK projection (hashing the raw
+			// request instead) must FAIL the oracle — the pin detects it.
+			rawBytes, _ := proto.Marshal(req)
+			bypassed := indepFingerprint(rawBytes)
+			if bypassed == entry.PrefixFingerprint {
+				t.Fatal("revert proof: a projection-bypassing digest matched the stored fingerprint")
+			}
+		})
+	}
+}
+
+// TestRequestPathFingerprintSensitivity — the full sensitivity table through
+// the hook: mutations before the boundary, the marker value/position, params,
+// extensions, safety, and stops change the fingerprint; stream and
+// torana metadata change NEITHER the fingerprint NOR the sanitized replay's
+// corresponding fields (which stay cleared/absent).
+func TestRequestPathFingerprintSensitivity(t *testing.T) {
+	const domain = "cache_warmer/prefix"
+	indepFingerprint := func(projection []byte) string {
+		return sdk.ContentAddressedCacheKey(domain, string(projection))
+	}
+	store := func(req *pbv2.ChatRequest) (warmEntry, *pbv2.ChatRequest) {
+		t.Helper()
+		req.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
+		h := newHarness(t)
+		h.SetConfig(warmerCfg)
+		h.SetNow(100_000)
+		if res := h.BeforeRequest(req); res.Err != nil {
+			t.Fatalf("err=%v", res.Err)
+		}
+		raw, _ := h.State("warm/conv-1")
+		var entry warmEntry
+		_ = json.Unmarshal([]byte(raw), &entry)
+		decoded, _ := sdk.DecodeRequest(entry.PrefixPB)
+		return entry, decoded
+	}
+	base := carrierInputs()["outer"]
+	baseEntry, _ := store(base)
+
+	// Before-boundary mutation, marker value, marker position, params,
+	// extensions, safety, stops: the fingerprint CHANGES.
+	mutations := map[string]func(*pbv2.ChatRequest){
+		"before-boundary text": func(r *pbv2.ChatRequest) { r.Messages[0].Blocks[0].GetText().Text = "changed" },
+		"marker value": func(r *pbv2.ChatRequest) {
+			r.Messages[0].Blocks[1].GetCacheBreakpoint().MarkerJson = []byte(`{"type":"standard"}`)
+		},
+		"marker position": func(r *pbv2.ChatRequest) {
+			// Move the marker from blocks[1] to blocks[2]: the projection now
+			// includes the inserted text — a different boundary.
+			marker := r.Messages[0].Blocks[1]
+			r.Messages[0].Blocks = []*pbv2.RequestBlock{
+				{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "u"}}},
+				{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "mid"}}},
+				marker,
+			}
+		},
+		"params":     func(r *pbv2.ChatRequest) { r.MaxTokens = proto.Int32(64) },
+		"extensions": func(r *pbv2.ChatRequest) { r.ProviderExtensionsJson = []byte(`{"x":1}`) },
+		"safety":     func(r *pbv2.ChatRequest) { r.SafetySettingsJson = []byte(`[]`) },
+		"stops":      func(r *pbv2.ChatRequest) { r.StopSequences = []string{"END"} },
+	}
+	for name, mutate := range mutations {
+		t.Run("changes/"+name, func(t *testing.T) {
+			req := proto.Clone(base).(*pbv2.ChatRequest)
+			mutate(req)
+			entry, _ := store(req)
+			projection, _, err := pbv2.RequestObservablePrefix(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := indepFingerprint(projection); entry.PrefixFingerprint != want {
+				t.Fatalf("fingerprint %q != oracle %q", entry.PrefixFingerprint, want)
+			}
+			if entry.PrefixFingerprint == baseEntry.PrefixFingerprint {
+				t.Fatalf("mutation %q did not change the fingerprint", name)
+			}
+		})
+	}
+
+	// Stream and torana metadata: fingerprint UNCHANGED, and the sanitized
+	// replay keeps stream=false + no metadata.
+	t.Run("stream and metadata neutral", func(t *testing.T) {
+		req := proto.Clone(base).(*pbv2.ChatRequest)
+		req.Stream = true
+		req.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x","_request_headers":"secret"}`)
+		entry, decoded := store(req)
+		if entry.PrefixFingerprint != baseEntry.PrefixFingerprint {
+			t.Fatal("stream/metadata changed the fingerprint")
+		}
+		if decoded.Stream {
+			t.Fatal("the sanitized replay kept stream=true")
+		}
+		if len(decoded.ToranaMetaJson) != 0 {
+			t.Fatalf("the sanitized replay kept metadata: %s", decoded.ToranaMetaJson)
+		}
+	})
+}
+
+// TestRequestPathTerminalSuffixPreservesEntry — the terminal-suffix
+// observation NEVER overwrites an existing valid warm entry: with a
+// byte-distinct valid entry seeded, the observed terminal request leaves the
+// state bytes EXACTLY unchanged, with exactly one env.plugin_config call and
+// no clock/state write.
+func TestRequestPathTerminalSuffixPreservesEntry(t *testing.T) {
+	h := newHarness(t)
+	h.SetConfig(warmerCfg)
+	h.SetNow(100_000)
+	// Byte-distinct valid entry: a different model + deadline so any rewrite
+	// would be visible.
+	seed := warmEntrySeed(t)
+	seed.Model = "claude-opus-4"
+	seed.PrefixPB = func() string {
+		req := warmRequest()
+		req.Model = "claude-opus-4"
+		enc, _ := sdk.EncodeRequest(req)
+		return enc
+	}()
+	seed.PrefixFingerprint = func() string {
+		req := warmRequest()
+		req.Model = "claude-opus-4"
+		prefix, _, err := pbv2.RequestObservablePrefix(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return prefixFingerprint(prefix)
+	}()
+	seedBytes, _ := json.Marshal(seed)
+	h.SeedState("warm/conv-1", string(seedBytes))
+
+	terminal := &pbv2.ChatRequest{
+		Model: "m",
+		Messages: []*pbv2.Message{
+			textMsg("user", "u", true),
+			{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "c1", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
+		},
+	}
+	terminal.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
+	res := h.BeforeRequest(terminal)
+	if res.Err != nil || !res.PassedThrough {
+		t.Fatalf("err=%v", res.Err)
+	}
+	raw, ok := h.State("warm/conv-1")
+	if !ok {
+		t.Fatal("the seeded entry vanished")
+	}
+	if raw != string(seedBytes) {
+		t.Fatalf("the terminal observation rewrote the valid entry:\n got: %s\nwant: %s", raw, seedBytes)
+	}
+	calls := h.Calls()
+	if len(calls) != 1 || calls[0].Command != "env.plugin_config" {
+		var got []string
+		for _, c := range calls {
+			got = append(got, c.Command)
+		}
+		t.Fatalf("call multiset = %v, want exactly [env.plugin_config]", got)
 	}
 }
