@@ -1255,7 +1255,12 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 		}
 	})
 
-	// Two results in one message: independent candidates, both applied.
+	// Two results in one message: independent candidates, both applied. The
+	// accounting is pinned exactly: the real evaluate report carries
+	// candidate_count=2, and every per-candidate call fires exactly once per
+	// candidate (intent cache_get x2, model-key cache_get x2, offload x2,
+	// eligible metric x2, cache_set x2) while the batch-level calls fire once
+	// (preflight + real evaluate x2, record_savings x1, plugin_config x1).
 	t.Run("two results in one message", func(t *testing.T) {
 		h := newHarness(t)
 		h.SetConfig(modelConfig)
@@ -1284,16 +1289,54 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 				t.Fatalf("result %s not compacted: %q", id, got)
 			}
 		}
+		if got := countCommand(h, "env.plugin_config"); got != 1 {
+			t.Fatalf("plugin_config calls = %d, want 1", got)
+		}
+		if got := countCommand(h, "env.cache_get"); got != 4 {
+			t.Fatalf("cache_get calls = %d, want 4 (intent + model key per candidate)", got)
+		}
+		if got := countCommand(h, "torana_offload_completion"); got != 2 {
+			t.Fatalf("offload calls = %d, want 2 (one per uncached candidate)", got)
+		}
+		if got := countCommand(h, "torana_evaluate_compaction"); got != 2 {
+			t.Fatalf("evaluate calls = %d, want 2 (optimistic preflight + real report)", got)
+		}
+		if got := countCommand(h, "torana_record_savings"); got != 1 {
+			t.Fatalf("record_savings calls = %d, want 1 (the batch)", got)
+		}
+		if got := countCommand(h, "env.cache_set"); got != 2 {
+			t.Fatalf("cache_set calls = %d, want 2 (best-effort per transformation)", got)
+		}
+		// The REAL evaluate payload must account for both candidates.
+		var lastEval struct {
+			CandidateCount int `json:"candidate_count"`
+		}
+		for _, c := range h.Calls() {
+			if c.Command == "torana_evaluate_compaction" {
+				if err := json.Unmarshal([]byte(c.Args), &lastEval); err != nil {
+					t.Fatalf("evaluate args not JSON: %v (%s)", err, c.Args)
+				}
+			}
+		}
+		if lastEval.CandidateCount != 2 {
+			t.Fatalf("candidate_count = %d, want 2", lastEval.CandidateCount)
+		}
 	})
 
-	// Unsupported shapes decline unchanged with ZERO cache/offload/metrics/
-	// savings calls: zero text arms, multiple text arms, unknown arm.
+	// Unsupported shapes decline unchanged with EXACTLY ONE env.plugin_config
+	// call and ZERO cache/offload/metrics/savings calls. The marker-only row
+	// is IN-DOMAIN (a real cache-breakpoint arm, not the out-of-domain empty
+	// content list); the explicit-empty row is a scalar candidate whose
+	// content is below the minimum threshold — inert with the same zero-spend
+	// multiset.
 	t.Run("unsupported shapes exact multiset", func(t *testing.T) {
 		unknown := &pbv2.ToolResultContentBlock{Kind: &pbv2.ToolResultContentBlock_Unknown{Unknown: &pbv2.ToolResultUnknownBlock{Kind: "provider_blob", PayloadJson: []byte(`{"x":1}`)}}}
+		marker := &pbv2.ToolResultContentBlock{Kind: &pbv2.ToolResultContentBlock_CacheBreakpoint{CacheBreakpoint: &pbv2.ToolResultCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}}
 		rows := map[string]*pbv2.RequestToolResultBlock{
-			"zero text arms": {ToolCallId: "c1", ToolName: "read", Content: []*pbv2.ToolResultContentBlock{}},
+			"marker-only":    {ToolCallId: "c1", ToolName: "read", Content: []*pbv2.ToolResultContentBlock{marker}},
 			"multiple text":  {ToolCallId: "c1", ToolName: "read", Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: "a"}}}, {Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: "b"}}}}},
 			"unknown arm":    {ToolCallId: "c1", ToolName: "read", Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: content}}}, unknown}},
+			"explicit empty": {ToolCallId: "c1", ToolName: "read", Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: ""}}}}},
 		}
 		for name, tr := range rows {
 			t.Run(name, func(t *testing.T) {
@@ -1314,49 +1357,81 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 				if !proto.Equal(req, before) {
 					t.Fatal("an unsupported shape was mutated")
 				}
+				pluginConfig := 0
 				for _, c := range h.Calls() {
-					if c.Command == "torana_cache_get" || c.Command == "torana_offload_completion" ||
-						c.Command == "torana_evaluate_compaction" || c.Command == "torana_record_savings" ||
-						c.Command == "torana_plugin_counter" {
+					if c.Command == "env.plugin_config" {
+						pluginConfig++
+						continue
+					}
+					if c.Command == "env.cache_get" || c.Command == "env.cache_set" || c.Command == "env.emit_metric" ||
+						c.Command == "torana_offload_completion" ||
+						c.Command == "torana_evaluate_compaction" || c.Command == "torana_record_savings" {
 						t.Fatalf("an unsupported shape made a spend call: %s", c.Command)
 					}
+				}
+				if pluginConfig != 1 {
+					t.Fatalf("plugin_config calls = %d, want exactly 1", pluginConfig)
 				}
 			})
 		}
 	})
 }
 
-// TestOrderedSeamContextExtraction — the ported context algorithm: the last
-// FIVE NON-EMPTY qualifying user/assistant messages via sdk.Text, 500-byte
-// rune-safe cap; a mixed [text, tool_result, text] message keeps its
-// surrounding text (the candidate result's content never enters the
-// context); sibling results survive.
+// TestOrderedSeamContextExtraction — the ported context algorithm pinned
+// EXACTLY: the last FIVE NON-EMPTY qualifying user/assistant messages via
+// sdk.Text, in wire order, each prefixed "role: ", joined with "\n", with
+// the 500-source-byte rune-safe cap and the "..." suffix. A mixed
+// [text, tool_result, text] message keeps its surrounding text (the
+// candidate result's content never enters the context); empty and
+// non-qualifying messages are skipped WITHOUT consuming a slot.
 func TestOrderedSeamContextExtraction(t *testing.T) {
 	text := func(s string) *pbv2.RequestBlock {
 		return &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: s}}}
 	}
+	resultBlock := func(id, content string) *pbv2.RequestBlock {
+		return &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: &pbv2.RequestToolResultBlock{
+			ToolCallId: id, ToolName: "read",
+			Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: content}}}},
+		}}}
+	}
+
+	// Six qualifying messages plus an empty user and a system message: the
+	// window keeps the LAST FIVE non-empty in order, skipping the empties
+	// and system rows, and the mixed message contributes its surrounding
+	// text only.
 	msgs := []*pbv2.Message{
 		{Role: "system", Blocks: []*pbv2.RequestBlock{text("sys")}},
 		{Role: "user", Blocks: []*pbv2.RequestBlock{text("first user"), resultBlock("c1", "RESULT-CONTENT-NOT-IN-CONTEXT"), text("second user")}},
 		{Role: "assistant", Blocks: []*pbv2.RequestBlock{text("assistant reply")}},
+		{Role: "user", Blocks: []*pbv2.RequestBlock{text("")}},
 		{Role: "user", Blocks: []*pbv2.RequestBlock{text("third user")}},
+		{Role: "assistant", Blocks: []*pbv2.RequestBlock{text("fourth assistant")}},
+		{Role: "user", Blocks: []*pbv2.RequestBlock{text("fifth user")}},
 	}
-	got := extractConversationContext(msgs)
-	if strings.Contains(got, "RESULT-CONTENT-NOT-IN-CONTEXT") {
-		t.Fatalf("the tool-result content leaked into the context: %q", got)
+	want := "user: first usersecond user\nassistant: assistant reply\nuser: third user\nassistant: fourth assistant\nuser: fifth user"
+	if got := extractConversationContext(msgs); got != want {
+		t.Fatalf("context = %q, want %q", got, want)
 	}
-	if !strings.Contains(got, "first user") || !strings.Contains(got, "second user") ||
-		!strings.Contains(got, "assistant reply") || !strings.Contains(got, "third user") {
-		t.Fatalf("the surrounding text did not survive: %q", got)
+
+	// A seventh qualifying message pushes the OLDEST out of the window.
+	msgs2 := append(msgs, &pbv2.Message{Role: "assistant", Blocks: []*pbv2.RequestBlock{text("sixth assistant")}})
+	want2 := "assistant: assistant reply\nuser: third user\nassistant: fourth assistant\nuser: fifth user\nassistant: sixth assistant"
+	if got := extractConversationContext(msgs2); got != want2 {
+		t.Fatalf("window slide: context = %q, want %q", got, want2)
 	}
-	if strings.Contains(got, "sys") {
-		t.Fatalf("a system message leaked into the context: %q", got)
+
+	// The empty context sentinel.
+	if got := extractConversationContext([]*pbv2.Message{{Role: "system", Blocks: []*pbv2.RequestBlock{text("sys")}}}); got != "no prior conversation context available" {
+		t.Fatalf("empty context = %q", got)
 	}
-	// The 5-message cap + 500-byte rune-safe cap are unchanged (the helper
-	// truncHead is the same function the flat era used).
-	long := strings.Repeat("é", 300) // 600 source bytes
+
+	// The 500-byte rune-safe cap with the "..." suffix, EXACT: 3-byte runes
+	// force the boundary back to the last whole rune (498 bytes = 166 界),
+	// plus "user: " and "...".
+	long := strings.Repeat("界", 200) // 600 source bytes, 3-byte runes
 	capped := extractConversationContext([]*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{text(long)}}})
-	if len(capped) > 510 {
-		t.Fatalf("the 500-byte cap with rune-safe boundary failed: len=%d", len(capped))
+	wantCapped := "user: " + strings.Repeat("界", 166) + "..."
+	if capped != wantCapped {
+		t.Fatalf("capped = %q (len %d), want %q (len %d)", capped, len(capped), wantCapped, len(wantCapped))
 	}
 }

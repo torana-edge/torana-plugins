@@ -877,3 +877,145 @@ func TestTruncationNoticeExactEquality(t *testing.T) {
 		t.Fatalf("strictly-below case must be a raw prefix, got %q", got)
 	}
 }
+
+// TestKeywordOrderedSeamRows — the ordered-body seam rows for keyword
+// compaction: EVERY message's tool-result blocks are candidates (no role
+// gate); each block is identified by (message, block); unsupported shapes
+// decline unchanged with EXACTLY ONE env.plugin_config call and zero spend
+// calls; two results in one message are independent candidates with exact
+// per-candidate call cardinalities.
+func TestKeywordOrderedSeamRows(t *testing.T) {
+	content := keywordContent()
+	result := func(id, text string) *pbv2.RequestBlock {
+		return &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: &pbv2.RequestToolResultBlock{
+			ToolCallId: id, ToolName: "read",
+			Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: text}}}},
+		}}}
+	}
+	assistantAfter := func() *pbv2.Message {
+		return &pbv2.Message{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "the fix is in server.go"}}}}}
+	}
+
+	// User-role result: the gate must not require role "tool".
+	t.Run("user-role result is a candidate", func(t *testing.T) {
+		h := newHarness(t)
+		h.SetConfig(keywordCfg)
+		h.SeedCache("intent:c1", "find the bug in server")
+		req := &pbv2.ChatRequest{Messages: []*pbv2.Message{
+			{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "u"}}}, result("c1", content)}},
+			assistantAfter(),
+		}}
+		res := h.BeforeRequest(req)
+		if res.Err != nil || res.Request == nil {
+			t.Fatalf("err=%v", res.Err)
+		}
+		got := res.Request.Messages[0].Blocks[1].GetToolResult().Content[0].GetText().Text
+		if !worthwhileReduction(len(content), len(got)) {
+			t.Fatalf("user-role result not compacted: %d -> %d", len(content), len(got))
+		}
+		if res.Request.Messages[0].Blocks[0].GetText().Text != "u" {
+			t.Fatal("surrounding text disturbed")
+		}
+	})
+
+	// Two results in one message: independent candidates, both applied,
+	// with exact cardinalities: intent + keyword cache_get per candidate
+	// (4 total), savings per candidate (2: cache_reuse + transformation),
+	// eligible metric per candidate (2), one plugin_config. cache_set
+	// fires ONCE: the candidates share the content-addressed key (same
+	// tool, args, text, intent), so the second candidate reuses the value
+	// the first just stored — determinism across identical inputs.
+	t.Run("two results in one message", func(t *testing.T) {
+		h := newHarness(t)
+		h.SetConfig(keywordCfg)
+		h.SeedCache("intent:c1", "find the bug in server")
+		h.SeedCache("intent:c2", "find the bug in server")
+		req := &pbv2.ChatRequest{Messages: []*pbv2.Message{
+			{Role: "user", Blocks: []*pbv2.RequestBlock{result("c1", content), result("c2", content)}},
+			assistantAfter(),
+		}}
+		res := h.BeforeRequest(req)
+		if res.Err != nil || res.Request == nil {
+			t.Fatalf("err=%v", res.Err)
+		}
+		for _, id := range []string{"c1", "c2"} {
+			got := ""
+			for _, b := range res.Request.Messages[0].Blocks {
+				if tr := b.GetToolResult(); tr != nil && tr.ToolCallId == id {
+					got = tr.Content[0].GetText().Text
+				}
+			}
+			if !worthwhileReduction(len(content), len(got)) {
+				t.Fatalf("result %s not compacted: %d -> %d", id, len(content), len(got))
+			}
+		}
+		if got := countCommand(h, "env.plugin_config"); got != 1 {
+			t.Fatalf("plugin_config calls = %d, want 1", got)
+		}
+		if got := countCommand(h, "env.cache_get"); got != 4 {
+			t.Fatalf("cache_get calls = %d, want 4 (intent + keyword key per candidate)", got)
+		}
+		if got := countCommand(h, "env.cache_set"); got != 1 {
+			t.Fatalf("cache_set calls = %d, want 1 (the second candidate reuses the first's stored value)", got)
+		}
+		if got := countCommand(h, "torana_record_savings"); got != 2 {
+			t.Fatalf("record_savings calls = %d, want 2 (one per candidate)", got)
+		}
+		eligible := 0
+		for _, m := range h.Metrics() {
+			if m.Name == "torana_compact_eligible_total" {
+				eligible += int(m.Value)
+			}
+		}
+		if eligible != 2 {
+			t.Fatalf("eligible metric = %d, want 2 (one per candidate)", eligible)
+		}
+	})
+
+	// Unsupported shapes decline unchanged with EXACTLY ONE env.plugin_config
+	// and zero cache/metric/savings calls: the marker-only row is IN-DOMAIN
+	// (a real cache-breakpoint arm), the explicit-empty row is a scalar below
+	// the minimum threshold — inert with the same zero-spend multiset.
+	t.Run("unsupported shapes exact multiset", func(t *testing.T) {
+		unknown := &pbv2.ToolResultContentBlock{Kind: &pbv2.ToolResultContentBlock_Unknown{Unknown: &pbv2.ToolResultUnknownBlock{Kind: "provider_blob", PayloadJson: []byte(`{"x":1}`)}}}
+		marker := &pbv2.ToolResultContentBlock{Kind: &pbv2.ToolResultContentBlock_CacheBreakpoint{CacheBreakpoint: &pbv2.ToolResultCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}}
+		rows := map[string]*pbv2.RequestToolResultBlock{
+			"marker-only":    {ToolCallId: "c1", ToolName: "read", Content: []*pbv2.ToolResultContentBlock{marker}},
+			"multiple text":  {ToolCallId: "c1", ToolName: "read", Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: "a"}}}, {Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: "b"}}}}},
+			"unknown arm":    {ToolCallId: "c1", ToolName: "read", Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: content}}}, unknown}},
+			"explicit empty": {ToolCallId: "c1", ToolName: "read", Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: ""}}}}},
+		}
+		for name, tr := range rows {
+			t.Run(name, func(t *testing.T) {
+				h := newHarness(t)
+				h.SetConfig(keywordCfg)
+				req := &pbv2.ChatRequest{Messages: []*pbv2.Message{
+					{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: tr}}}},
+					assistantAfter(),
+				}}
+				before := proto.Clone(req).(*pbv2.ChatRequest)
+				res := h.BeforeRequest(req)
+				if res.Err != nil || !res.PassedThrough {
+					t.Fatalf("must pass unchanged, err=%v", res.Err)
+				}
+				if !proto.Equal(req, before) {
+					t.Fatal("an unsupported shape was mutated")
+				}
+				pluginConfig := 0
+				for _, c := range h.Calls() {
+					if c.Command == "env.plugin_config" {
+						pluginConfig++
+						continue
+					}
+					if c.Command == "env.cache_get" || c.Command == "env.cache_set" ||
+						c.Command == "env.emit_metric" || c.Command == "torana_record_savings" {
+						t.Fatalf("an unsupported shape made a spend call: %s", c.Command)
+					}
+				}
+				if pluginConfig != 1 {
+					t.Fatalf("plugin_config calls = %d, want exactly 1", pluginConfig)
+				}
+			})
+		}
+	})
+}
