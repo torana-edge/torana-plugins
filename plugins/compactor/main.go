@@ -132,91 +132,102 @@ func compactToolResults(ctx context.Context, req *pbv2.ChatRequest) (bool, error
 	toolNames := sdk.ToolNamesByCallID(req.Messages)
 	toolCalls := sdk.ToolCallsByID(req.Messages)
 
-	for i, msg := range req.Messages {
-		if msg.Role != "tool" || msg.ToolCallId == "" || len(msg.Content) < minOffloadChars || sdk.IsDeterministicToolReplacement(msg.Content) {
-			continue
-		}
-
-		toolName := msg.ToolName
-		if toolName == "" {
-			toolName = toolNames[msg.ToolCallId]
-		}
-		toolArgs := ""
-		if call := toolCalls[msg.ToolCallId]; call != nil {
-			toolArgs = string(call.ArgumentsJson)
-		}
-		if toolName == "" || sdk.ToolResultMustStayExact(toolName, msg.Content) {
-			continue
-		}
-		rule, matched := sdk.MatchToolPolicy(toolPolicies, toolName)
-		if !matched || rule.Mode == "" || rule.Mode == "exact" {
-			continue
-		}
-
-		// Phase 0 observability: every result big enough to compact.
-		sdk.EmitMetric("torana_compact_eligible_total", sdk.MetricCounter, 1, map[string]string{"tool": toolName})
-
-		switch rule.Mode {
-		case "deterministic":
-			if assistantAfter[i] == 0 && !rule.FirstPass {
+	// Ordered seam: EVERY message's tool-result blocks are candidates (no
+	// role gate); each block is identified by (message index, block index).
+	for mi, msg := range req.Messages {
+		for _, view := range sdk.ToolResults(msg) {
+			// Scalar seam: exactly one text arm, zero unknown arms, any
+			// cache-marker arms. An unsupported shape declines the result
+			// UNCHANGED before any cache/offload/metric/savings call.
+			text, ok := sdk.ToolResultScalarText(view)
+			if !ok {
 				continue
 			}
-			applied, err := applyDeterministicPolicy(msg, toolName, toolArgs, rule)
+			if len(text) < minOffloadChars || sdk.IsDeterministicToolReplacement(text) {
+				continue
+			}
+
+			toolName := view.ToolName
+			if toolName == "" {
+				toolName = toolNames[view.ToolCallId]
+			}
+			toolArgs := ""
+			if call, ok := toolCalls[view.ToolCallId]; ok {
+				toolArgs = string(call.Arguments)
+			}
+			if toolName == "" || sdk.ToolResultMustStayExact(toolName, text) {
+				continue
+			}
+			rule, matched := sdk.MatchToolPolicy(toolPolicies, toolName)
+			if !matched || rule.Mode == "" || rule.Mode == "exact" {
+				continue
+			}
+
+			// Phase 0 observability: every result big enough to compact.
+			sdk.EmitMetric("torana_compact_eligible_total", sdk.MetricCounter, 1, map[string]string{"tool": toolName})
+
+			switch rule.Mode {
+			case "deterministic":
+				if assistantAfter[mi] == 0 && !rule.FirstPass {
+					continue
+				}
+				applied, err := applyDeterministicPolicy(msg, view.Block, text, toolName, toolArgs, rule)
+				if err != nil {
+					return false, err
+				}
+				if applied {
+					modified = true
+				}
+				continue
+			case "source":
+				// Fail closed to exact. Live OMP dogfood showed that aged source
+				// markers can trigger unbounded different-range rereads. Re-enable
+				// only behind the economic/recovery experiment tracked by #178.
+				continue
+			case "model":
+				// A model summary is never allowed before one exact consumption.
+				if assistantAfter[mi] == 0 {
+					continue
+				}
+			default:
+				continue
+			}
+
+			// Get intent from cache (written by the intent plugin). NOT_FOUND and
+			// present-empty are both unusable (skip + metric); any other refusal
+			// or malformed reply is a contract defect — error the hook.
+			intent, herr, err := sdk.CacheGet(intentCacheKey + ":" + view.ToolCallId)
 			if err != nil {
-				return false, err
+				return false, fmt.Errorf("compactor: cache_get %s:%s: %w", intentCacheKey, view.ToolCallId, err)
 			}
-			if applied {
-				modified = true
+			if herr != nil && !sdk.IsNotFound(herr) {
+				return false, fmt.Errorf("compactor: cache_get %s:%s refused: %s", intentCacheKey, view.ToolCallId, herr.Message)
 			}
-			continue
-		case "source":
-			// Fail closed to exact. Live OMP dogfood showed that aged source
-			// markers can trigger unbounded different-range rereads. Re-enable
-			// only behind the economic/recovery experiment tracked by #178.
-			continue
-		case "model":
-			// A model summary is never allowed before one exact consumption.
-			if assistantAfter[i] == 0 {
+			if herr != nil || intent == "" {
+				// Eligible but no usable intent — the money left on the table.
+				sdk.EmitMetric("torana_intent_missing_total", sdk.MetricCounter, 1, map[string]string{"tool": toolName})
 				continue
 			}
-		default:
-			continue
-		}
 
-		// Get intent from cache (written by the intent plugin). NOT_FOUND and
-		// present-empty are both unusable (skip + metric); any other refusal
-		// or malformed reply is a contract defect — error the hook.
-		intent, herr, err := sdk.CacheGet(intentCacheKey + ":" + msg.ToolCallId)
-		if err != nil {
-			return false, fmt.Errorf("compactor: cache_get %s:%s: %w", intentCacheKey, msg.ToolCallId, err)
-		}
-		if herr != nil && !sdk.IsNotFound(herr) {
-			return false, fmt.Errorf("compactor: cache_get %s:%s refused: %s", intentCacheKey, msg.ToolCallId, herr.Message)
-		}
-		if herr != nil || intent == "" {
-			// Eligible but no usable intent — the money left on the table.
-			sdk.EmitMetric("torana_intent_missing_total", sdk.MetricCounter, 1, map[string]string{"tool": toolName})
-			continue
-		}
-
-		// Include every semantic input in the cache identity. A harness may
-		// reuse tool_call_ids, and intents can change across rehydrated rounds.
-		modelCacheKey := sdk.ContentAddressedCacheKey(compactionCache,
-			"v3", toolName, toolArgs, msg.Content, intent, "model")
-		cached, herr, err := sdk.CacheGet(modelCacheKey)
-		if err != nil {
-			return false, fmt.Errorf("compactor: cache_get model key: %w", err)
-		}
-		if herr != nil && !sdk.IsNotFound(herr) {
-			return false, fmt.Errorf("compactor: cache_get model key refused: %s", herr.Message)
-		}
-		// A hit whose value is non-empty AND shorter than the original is
-		// reused without offload; a value >= the original leaves the message
-		// untouched; a miss or present-empty value is recomputed.
-		if (herr != nil || cached == "") || len(cached) < len(msg.Content) {
-			modelWorks = append(modelWorks, modelWork{
-				message: msg, index: i, intent: intent, cacheKey: modelCacheKey, cached: cached,
-			})
+			// Include every semantic input in the cache identity. A harness may
+			// reuse tool_call_ids, and intents can change across rehydrated rounds.
+			modelCacheKey := sdk.ContentAddressedCacheKey(compactionCache,
+				"v3", toolName, toolArgs, text, intent, "model")
+			cached, herr, err := sdk.CacheGet(modelCacheKey)
+			if err != nil {
+				return false, fmt.Errorf("compactor: cache_get model key: %w", err)
+			}
+			if herr != nil && !sdk.IsNotFound(herr) {
+				return false, fmt.Errorf("compactor: cache_get model key refused: %s", herr.Message)
+			}
+			// A hit whose value is non-empty AND shorter than the original is
+			// reused without offload; a value >= the original leaves the result
+			// untouched; a miss or present-empty value is recomputed.
+			if (herr != nil || cached == "") || len(cached) < len(text) {
+				modelWorks = append(modelWorks, modelWork{
+					message: msg, index: mi, block: view.Block, text: text, intent: intent, cacheKey: modelCacheKey, cached: cached,
+				})
+			}
 		}
 	}
 	applied, err := prepareAndApplyModelBatch(req, modelWorks)
@@ -237,7 +248,9 @@ type tokenUsage struct {
 
 type modelWork struct {
 	message  *pbv2.Message
-	index    int
+	index    int    // message index (candidate identity + report tail)
+	block    int    // tool-result block index inside message
+	text     string // the scalar-compatible text
 	intent   string
 	cacheKey string
 	cached   string
@@ -246,6 +259,7 @@ type modelWork struct {
 type modelCandidate struct {
 	message       *pbv2.Message
 	index         int
+	block         int
 	originalBytes int
 	replacement   string
 	source        string
@@ -296,16 +310,16 @@ func prepareAndApplyModelBatch(req *pbv2.ChatRequest, works []modelWork) (bool, 
 	for _, work := range works {
 		if work.cached != "" {
 			candidates = append(candidates, modelCandidate{
-				message: work.message, index: work.index, originalBytes: len(work.message.Content), replacement: work.cached,
+				message: work.message, index: work.index, block: work.block, originalBytes: len(work.text), replacement: work.cached,
 				source: "cache_reuse", cacheKey: work.cacheKey,
 			})
 			continue
 		}
-		ctxStr := extractConversationContext(req.Messages, work.message.ToolCallId)
+		ctxStr := extractConversationContext(req.Messages)
 		payload, _ := json.Marshal(map[string]any{
 			"system_prompt": "You are a tool output summarizer. Given a tool output and an extraction intent, return ONLY the relevant parts. Be concise. Do not add commentary.",
 			"user_prompt": fmt.Sprintf("Intent: %s\n\nConversation context:\n%s\n\nTool output:\n%s\n\nExtract only the parts relevant to the intent.",
-				work.intent, ctxStr, truncateForPrompt(work.message.Content, maxOffloadInputBytes)),
+				work.intent, ctxStr, truncateForPrompt(work.text, maxOffloadInputBytes)),
 		})
 		result, herr, err := sdk.HostCallExtension("torana_offload_completion", payload)
 		if err != nil {
@@ -322,13 +336,13 @@ func prepareAndApplyModelBatch(req *pbv2.ChatRequest, works []modelWork) (bool, 
 			}
 		}
 		var response offloadResponse
-		if json.Unmarshal(result, &response) != nil || response.Completion == "" || len(response.Completion) >= len(work.message.Content) {
+		if json.Unmarshal(result, &response) != nil || response.Completion == "" || len(response.Completion) >= len(work.text) {
 			// Malformed or unusable domain body: skip, like a transient
 			// failure — the host framed every refusal already.
 			continue
 		}
 		candidates = append(candidates, modelCandidate{
-			message: work.message, index: work.index, originalBytes: len(work.message.Content), replacement: response.Completion,
+			message: work.message, index: work.index, block: work.block, originalBytes: len(work.text), replacement: response.Completion,
 			source: "transformation", provider: response.Provider, model: response.Model, usage: response.Usage, cacheKey: work.cacheKey,
 		})
 	}
@@ -347,7 +361,12 @@ func prepareAndApplyModelBatch(req *pbv2.ChatRequest, works []modelWork) (bool, 
 		return false, nil
 	}
 	for _, candidate := range candidates {
-		candidate.message.Content = candidate.replacement
+		// Exact in-place replacement of the designated tool-result block's
+		// single text arm (the scalar seam); a failure here is a contract
+		// defect — surface it.
+		if _, err := sdk.ReplaceToolResultText(candidate.message, candidate.block, candidate.replacement); err != nil {
+			return false, fmt.Errorf("compactor: apply replacement: %w", err)
+		}
 		if candidate.source == "transformation" {
 			// Best-effort: the replacement is already applied in memory; a
 			// refused write cannot corrupt it, and the host logs the refusal.
@@ -376,7 +395,7 @@ func optimisticModelCandidates(works []modelWork) ([]modelCandidate, bool) {
 			source = "transformation"
 		}
 		candidates = append(candidates, modelCandidate{
-			message: work.message, index: work.index, originalBytes: len(work.message.Content), replacement: replacement,
+			message: work.message, index: work.index, block: work.block, originalBytes: len(work.text), replacement: replacement,
 			source: source, cacheKey: work.cacheKey,
 		})
 	}
@@ -485,9 +504,9 @@ func assistantMessageCountsAfter(messages []*pbv2.Message) []int {
 	return counts
 }
 
-func applyDeterministicPolicy(msg *pbv2.Message, toolName, toolArgs string, rule sdk.ToolPolicyRule) (bool, error) {
+func applyDeterministicPolicy(msg *pbv2.Message, block int, text, toolName, toolArgs string, rule sdk.ToolPolicyRule) (bool, error) {
 	cacheKey := sdk.ContentAddressedCacheKey(policyCompactionCache,
-		"v2", toolName, toolArgs, msg.Content, rule.Mode, rule.Rerun)
+		"v2", toolName, toolArgs, text, rule.Mode, rule.Rerun)
 	cached, herr, err := sdk.CacheGet(cacheKey)
 	if err != nil {
 		return false, fmt.Errorf("compactor: policy cache_get: %w", err)
@@ -500,17 +519,21 @@ func applyDeterministicPolicy(msg *pbv2.Message, toolName, toolArgs string, rule
 	// and recomputed locally — the replacement is a pure function of the
 	// inputs, so a corrupt or stale entry must never be applied (applying a
 	// non-shorter value would expand the request) or cached forever.
-	if herr == nil && cached != "" && len(cached) < len(msg.Content) {
-		recordSavings(len(msg.Content), len(cached), "cache_reuse")
-		msg.Content = cached
+	if herr == nil && cached != "" && len(cached) < len(text) {
+		recordSavings(len(text), len(cached), "cache_reuse")
+		if _, err := sdk.ReplaceToolResultText(msg, block, cached); err != nil {
+			return false, fmt.Errorf("compactor: apply policy replacement: %w", err)
+		}
 		return true, nil
 	}
-	replacement := sdk.DeterministicToolReplacement(toolName, toolArgs, msg.Content, rule.Mode, rule.Rerun, false)
-	if len(replacement) >= len(msg.Content) {
+	replacement := sdk.DeterministicToolReplacement(toolName, toolArgs, text, rule.Mode, rule.Rerun, false)
+	if len(replacement) >= len(text) {
 		return false, nil
 	}
-	recordSavings(len(msg.Content), len(replacement), "transformation")
-	msg.Content = replacement
+	recordSavings(len(text), len(replacement), "transformation")
+	if _, err := sdk.ReplaceToolResultText(msg, block, replacement); err != nil {
+		return false, fmt.Errorf("compactor: apply policy replacement: %w", err)
+	}
 	// Best-effort: the replacement is already applied; a refused write cannot
 	// corrupt it, and the host logs the refusal.
 	_, _ = sdk.CacheSet(cacheKey, replacement)
@@ -529,24 +552,24 @@ func recordSavings(originalBytes, finalBytes int, source string) {
 	_, _, _ = sdk.HostCallExtension("torana_record_savings", payload)
 }
 
-func extractConversationContext(msgs []*pbv2.Message, excludeToolCallID string) string {
+func extractConversationContext(msgs []*pbv2.Message) string {
+	// Ordered port: the context is the last FIVE NON-EMPTY qualifying
+	// user/assistant messages, each capped at 500 SOURCE BYTES with the
+	// existing rune-safe boundary (truncHead). Text comes from the SDK's
+	// plain concatenation of the top-level text arms (sdk.Text); nested
+	// tool-result content is excluded by construction, so surrounding
+	// top-level text and sibling results in a mixed message survive — no
+	// block-level exclusion is needed.
 	var parts []string
 	collected := 0
 	for i := len(msgs) - 1; i >= 0 && collected < 5; i-- {
 		msg := msgs[i]
-		if msg.ToolCallId == excludeToolCallID {
-			continue
-		}
 		content := ""
 		switch msg.Role {
 		case "user":
-			content = msg.Content
+			content = sdk.Text(msg)
 		case "assistant":
-			if msg.Content != "" {
-				content = msg.Content
-			}
-		case "tool":
-			continue
+			content = sdk.Text(msg)
 		default:
 			continue
 		}

@@ -117,7 +117,7 @@ func TestTruncateHeadTailHonestForEveryBudget(t *testing.T) {
 func TestTruncatedContentSurvivesProtoMarshal(t *testing.T) {
 	for n := 100; n <= 120; n++ {
 		got := truncateHeadTail(multibyte(6000), n)
-		msg := &pbv2.Message{Role: "tool", Content: got}
+		msg := toolMsg("c", "read", got)
 		if _, err := proto.Marshal(msg); err != nil {
 			t.Fatalf("n=%d: proto.Marshal rejected the truncated content: %v", n, err)
 		}
@@ -202,15 +202,42 @@ func keywordContent() string {
 	return b.String()
 }
 
+// toolMsg builds an ordered tool-role message with ONE tool-result block
+// carrying a single text arm.
+func toolMsg(id, name, content string) *pbv2.Message {
+	return &pbv2.Message{Role: "tool", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: &pbv2.RequestToolResultBlock{
+		ToolCallId: id,
+		ToolName:   name,
+		Content:    []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: content}}}},
+	}}}}}
+}
+
+// toolText returns the first text arm of the first tool-result block in
+// message mi.
+func toolText(t *testing.T, req *pbv2.ChatRequest, mi int) string {
+	t.Helper()
+	for _, b := range req.Messages[mi].Blocks {
+		if tr := b.GetToolResult(); tr != nil {
+			for _, c := range tr.Content {
+				if c.GetText() != nil {
+					return c.GetText().Text
+				}
+			}
+		}
+	}
+	t.Fatalf("no tool-result text in message %d", mi)
+	return ""
+}
+
 func bigToolRequest(content string) *pbv2.ChatRequest {
 	return &pbv2.ChatRequest{
 		Messages: []*pbv2.Message{
-			{Role: "system", Content: "You are a coding agent."},
-			{Role: "user", Content: "find the bug"},
-			{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "call_1", Name: "read", ArgumentsJson: []byte(`{"path":"server.go"}`)}}},
-			{Role: "tool", ToolCallId: "call_1", ToolName: "read", Content: content},
-			{Role: "user", Content: "now fix it"},
-			{Role: "assistant", Content: "the fix is in server.go"},
+			{Role: "system", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "You are a coding agent."}}}}},
+			{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "find the bug"}}}}},
+			{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "call_1", Name: "read", ArgumentsJson: []byte(`{"path":"server.go"}`)}}}}},
+			toolMsg("call_1", "read", content),
+			{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "now fix it"}}}}},
+			{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "the fix is in server.go"}}}}},
 		},
 	}
 }
@@ -309,7 +336,7 @@ func TestExactAndUnsafeNeverEmit(t *testing.T) {
 	h2 := newHarness(t)
 	h2.SetConfig(`{"tool_policies":[{"match":"*","mode":"keyword"}]}`)
 	req := bigToolRequest(keywordContent())
-	req.Messages[3].ToolName = "edit_file"
+	req.Messages[3].Blocks[0].GetToolResult().ToolName = "edit_file"
 	res2 := h2.BeforeRequest(req)
 	if res2.Err != nil || !res2.PassedThrough {
 		t.Fatalf("unsafe tool must pass through, err=%v", res2.Err)
@@ -330,7 +357,7 @@ func TestDeterministicFirstPassAppliesAndCachesThenReuses(t *testing.T) {
 	if first.Err != nil || first.Request == nil {
 		t.Fatalf("expected a replacement on turn 1, err=%v", first.Err)
 	}
-	if first.Request.Messages[3].Content == original.Messages[3].Content {
+	if toolText(t, first.Request, 3) == toolText(t, original, 3) {
 		t.Fatal("turn 1 did not replace the tool result")
 	}
 	if countCommand(h, "env.cache_set") != 1 {
@@ -342,7 +369,7 @@ func TestDeterministicFirstPassAppliesAndCachesThenReuses(t *testing.T) {
 	if second.Err != nil || second.Request == nil {
 		t.Fatalf("expected a replacement on turn 2, err=%v", second.Err)
 	}
-	if string(first.Request.Messages[3].Content) != string(second.Request.Messages[3].Content) {
+	if toolText(t, first.Request, 3) != toolText(t, second.Request, 3) {
 		t.Fatal("turn 2 output differs from turn 1")
 	}
 	if countCommand(h, "env.cache_set") != before {
@@ -369,7 +396,7 @@ func TestDeterministicConsumptionGate(t *testing.T) {
 	if res2.Err != nil || res2.Request == nil {
 		t.Fatalf("expected replacement after a consumption, err=%v", res2.Err)
 	}
-	if res2.Request.Messages[3].Content == keywordContent() {
+	if toolText(t, res2.Request, 3) == keywordContent() {
 		t.Fatal("deterministic policy did not replace the consumed result")
 	}
 }
@@ -393,10 +420,10 @@ func TestDeterministicUnusableCachesRecompute(t *testing.T) {
 			if res.Err != nil || res.Request == nil {
 				t.Fatalf("expected a recomputed replacement, err=%v", res.Err)
 			}
-			if res.Request.Messages[3].Content == seed {
+			if toolText(t, res.Request, 3) == seed {
 				t.Fatal("an unusable cached value must never be applied")
 			}
-			if res.Request.Messages[3].Content == content {
+			if toolText(t, res.Request, 3) == content {
 				t.Fatal("an unusable cached value must be recomputed, not left untouched")
 			}
 		})
@@ -413,7 +440,7 @@ func TestKeywordHappyPath(t *testing.T) {
 	if res.Err != nil || res.Request == nil {
 		t.Fatalf("expected a replacement, err=%v", res.Err)
 	}
-	got := res.Request.Messages[3].Content
+	got := toolText(t, res.Request, 3)
 	if got == keywordContent() {
 		t.Fatal("keyword compaction did not apply")
 	}
@@ -447,8 +474,8 @@ func TestKeywordCacheReuse(t *testing.T) {
 	if res.Err != nil || res.Request == nil {
 		t.Fatalf("expected cache reuse, err=%v", res.Err)
 	}
-	if res.Request.Messages[3].Content != "MATCH bug server.go: the failure is in the retry loop" {
-		t.Fatalf("cached value not reused: %q", res.Request.Messages[3].Content)
+	if toolText(t, res.Request, 3) != "MATCH bug server.go: the failure is in the retry loop" {
+		t.Fatalf("cached value not reused: %q", toolText(t, res.Request, 3))
 	}
 	if countCommand(h, "env.cache_set") != 0 {
 		t.Fatal("a reuse turn must not rewrite the cache")
@@ -473,10 +500,10 @@ func TestKeywordUnusableCachesRecompute(t *testing.T) {
 			if res.Err != nil || res.Request == nil {
 				t.Fatalf("expected a recomputed replacement, err=%v", res.Err)
 			}
-			if res.Request.Messages[3].Content == seed {
+			if toolText(t, res.Request, 3) == seed {
 				t.Fatal("an unusable cached value must never be applied")
 			}
-			if !strings.Contains(res.Request.Messages[3].Content, "MATCH bug server.go") {
+			if !strings.Contains(toolText(t, res.Request, 3), "MATCH bug server.go") {
 				t.Fatal("an unusable cached value must be recomputed from the selection")
 			}
 		})
@@ -617,7 +644,7 @@ func TestBestEffortWritesAndSavings(t *testing.T) {
 	if res.Request == nil {
 		t.Fatal("expected the replacement to be applied")
 	}
-	if !strings.Contains(res.Request.Messages[3].Content, "MATCH bug server.go") {
+	if !strings.Contains(toolText(t, res.Request, 3), "MATCH bug server.go") {
 		t.Fatal("the applied replacement must stand despite refused writes/reports")
 	}
 }
@@ -672,7 +699,7 @@ func TestOversizedSelectionTruncatesSelected(t *testing.T) {
 	if res.Err != nil {
 		t.Fatal(res.Err)
 	}
-	got := res.Request.Messages[3].Content
+	got := toolText(t, res.Request, 3)
 	if len(got) > maxResultBytes {
 		t.Fatalf("oversized selection exceeded the %d-byte cap: %d", maxResultBytes, len(got))
 	}

@@ -119,114 +119,129 @@ func compactToolResults(req *pbv2.ChatRequest) (bool, error) {
 	toolNames := sdk.ToolNamesByCallID(req.Messages)
 	toolCalls := sdk.ToolCallsByID(req.Messages)
 
-	for i, msg := range req.Messages {
-		if msg.Role != "tool" || msg.ToolCallId == "" || len(msg.Content) < minContentLength || sdk.IsDeterministicToolReplacement(msg.Content) {
-			continue
-		}
-
-		toolName := msg.ToolName
-		if toolName == "" {
-			toolName = toolNames[msg.ToolCallId]
-		}
-		toolArgs := ""
-		if call := toolCalls[msg.ToolCallId]; call != nil {
-			toolArgs = string(call.ArgumentsJson)
-		}
-		if toolName == "" || sdk.ToolResultMustStayExact(toolName, msg.Content) {
-			continue
-		}
-		rule, matched := sdk.MatchToolPolicy(toolPolicies, toolName)
-		if !matched || rule.Mode == "" || rule.Mode == "exact" {
-			continue
-		}
-
-		// Eligibility observability: fired ONCE, after the general size and
-		// safety filters and a matched non-empty non-exact policy, BEFORE the
-		// mode-specific consumption gates — the same definition as compactor,
-		// so the metric means the same regardless of which compactor is
-		// installed. Deterministic, source, and keyword candidates all emit.
-		sdk.EmitMetric("torana_compact_eligible_total", sdk.MetricCounter, 1, map[string]string{"tool": toolName})
-
-		switch rule.Mode {
-		case "deterministic":
-			if assistantAfter[i] == 0 && !rule.FirstPass {
+	// Ordered seam: EVERY message's tool-result blocks are candidates (no
+	// role gate); each block is identified by (message index, block index).
+	for mi, msg := range req.Messages {
+		for _, view := range sdk.ToolResults(msg) {
+			// Scalar seam: exactly one text arm, zero unknown arms, any
+			// cache-marker arms. An unsupported shape declines the result
+			// UNCHANGED before any cache/offload/metric/savings call.
+			text, ok := sdk.ToolResultScalarText(view)
+			if !ok {
 				continue
 			}
-			applied, err := applyDeterministicPolicy(msg, toolName, toolArgs, rule)
+			if len(text) < minContentLength || sdk.IsDeterministicToolReplacement(text) {
+				continue
+			}
+
+			toolName := view.ToolName
+			if toolName == "" {
+				toolName = toolNames[view.ToolCallId]
+			}
+			toolArgs := ""
+			if call, ok := toolCalls[view.ToolCallId]; ok {
+				toolArgs = string(call.Arguments)
+			}
+			if toolName == "" || sdk.ToolResultMustStayExact(toolName, text) {
+				continue
+			}
+			rule, matched := sdk.MatchToolPolicy(toolPolicies, toolName)
+			if !matched || rule.Mode == "" || rule.Mode == "exact" {
+				continue
+			}
+
+			// Eligibility observability: fired ONCE, after the general size and
+			// safety filters and a matched non-empty non-exact policy, BEFORE the
+			// mode-specific consumption gates — the same definition as compactor,
+			// so the metric means the same regardless of which compactor is
+			// installed. Deterministic, source, and keyword candidates all emit.
+			sdk.EmitMetric("torana_compact_eligible_total", sdk.MetricCounter, 1, map[string]string{"tool": toolName})
+
+			switch rule.Mode {
+			case "deterministic":
+				if assistantAfter[mi] == 0 && !rule.FirstPass {
+					continue
+				}
+				applied, err := applyDeterministicPolicy(msg, view.Block, text, toolName, toolArgs, rule)
+				if err != nil {
+					return false, err
+				}
+				if applied {
+					modified = true
+				}
+				continue
+			case "source":
+				// Fail closed to exact. Live OMP dogfood showed that replacing
+				// aged source reads makes autonomous agents reread different
+				// ranges of the same file until they hit their request limit.
+				// Source mode stays disabled until the economically gated
+				// experiment in #178 ships.
+				continue
+			case "keyword":
+				if assistantAfter[mi] == 0 {
+					continue
+				}
+			default:
+				continue
+			}
+
+			// Retrieve cached intent for this tool call (written by the intent
+			// plugin). NOT_FOUND and present-empty are both unusable (skip +
+			// metric); any other refusal or malformed reply is a contract defect
+			// — error the hook.
+			intent, herr, err := sdk.CacheGet(intentCacheKey + ":" + view.ToolCallId)
 			if err != nil {
-				return false, err
+				return false, fmt.Errorf("keyword_compactor: cache_get %s:%s: %w", intentCacheKey, view.ToolCallId, err)
 			}
-			if applied {
-				modified = true
+			if herr != nil && !sdk.IsNotFound(herr) {
+				return false, fmt.Errorf("keyword_compactor: cache_get %s:%s refused: %s", intentCacheKey, view.ToolCallId, herr.Message)
 			}
-			continue
-		case "source":
-			// Fail closed to exact. Live OMP dogfood showed that replacing
-			// aged source reads makes autonomous agents reread different
-			// ranges of the same file until they hit their request limit.
-			// Source mode stays disabled until the economically gated
-			// experiment in #178 ships.
-			continue
-		case "keyword":
-			if assistantAfter[i] == 0 {
+			if herr != nil || intent == "" {
+				sdk.EmitMetric("torana_intent_missing_total", sdk.MetricCounter, 1, map[string]string{"tool": toolName})
 				continue
 			}
-		default:
-			continue
-		}
 
-		// Retrieve cached intent for this tool call (written by the intent
-		// plugin). NOT_FOUND and present-empty are both unusable (skip +
-		// metric); any other refusal or malformed reply is a contract defect
-		// — error the hook.
-		intent, herr, err := sdk.CacheGet(intentCacheKey + ":" + msg.ToolCallId)
-		if err != nil {
-			return false, fmt.Errorf("keyword_compactor: cache_get %s:%s: %w", intentCacheKey, msg.ToolCallId, err)
-		}
-		if herr != nil && !sdk.IsNotFound(herr) {
-			return false, fmt.Errorf("keyword_compactor: cache_get %s:%s refused: %s", intentCacheKey, msg.ToolCallId, herr.Message)
-		}
-		if herr != nil || intent == "" {
-			sdk.EmitMetric("torana_intent_missing_total", sdk.MetricCounter, 1, map[string]string{"tool": toolName})
-			continue
-		}
+			keywordKey := sdk.ContentAddressedCacheKey(keywordCompactionCache,
+				"v2", toolName, toolArgs, text, intent, "keyword")
+			cached, herr, err := sdk.CacheGet(keywordKey)
+			if err != nil {
+				return false, fmt.Errorf("keyword_compactor: cache_get keyword key: %w", err)
+			}
+			if herr != nil && !sdk.IsNotFound(herr) {
+				return false, fmt.Errorf("keyword_compactor: cache_get keyword key refused: %s", herr.Message)
+			}
+			// Reuse only a non-empty value that is SHORTER than the original.
+			// Missing, present-empty, and non-shorter values are unusable and
+			// recomputed locally — the value is a pure function of the inputs, so
+			// a stale or corrupt entry must never be applied or cached forever.
+			if herr == nil && cached != "" && len(cached) < len(text) {
+				recordSavings(len(text), len(cached), "cache_reuse")
+				if _, err := sdk.ReplaceToolResultText(msg, view.Block, cached); err != nil {
+					return false, fmt.Errorf("keyword_compactor: apply cached replacement: %w", err)
+				}
+				modified = true
+				continue
+			}
 
-		keywordKey := sdk.ContentAddressedCacheKey(keywordCompactionCache,
-			"v2", toolName, toolArgs, msg.Content, intent, "keyword")
-		cached, herr, err := sdk.CacheGet(keywordKey)
-		if err != nil {
-			return false, fmt.Errorf("keyword_compactor: cache_get keyword key: %w", err)
-		}
-		if herr != nil && !sdk.IsNotFound(herr) {
-			return false, fmt.Errorf("keyword_compactor: cache_get keyword key refused: %s", herr.Message)
-		}
-		// Reuse only a non-empty value that is SHORTER than the original.
-		// Missing, present-empty, and non-shorter values are unusable and
-		// recomputed locally — the value is a pure function of the inputs, so
-		// a stale or corrupt entry must never be applied or cached forever.
-		if herr == nil && cached != "" && len(cached) < len(msg.Content) {
-			recordSavings(len(msg.Content), len(cached), "cache_reuse")
-			msg.Content = cached
+			compacted := compactDeterministic(text, intent)
+			if compacted == text {
+				continue
+			}
+			// Apply only a genuine >50% reduction, without rounding ambiguity:
+			// final bytes must be strictly fewer than the removed bytes.
+			if !worthwhileReduction(len(text), len(compacted)) {
+				continue
+			}
+
+			recordSavings(len(text), len(compacted), "transformation")
+			if _, err := sdk.ReplaceToolResultText(msg, view.Block, compacted); err != nil {
+				return false, fmt.Errorf("keyword_compactor: apply replacement: %w", err)
+			}
 			modified = true
-			continue
+			// Best-effort: the replacement is already applied in memory; a
+			// refused write cannot corrupt it, and the host logs the refusal.
+			_, _ = sdk.CacheSet(keywordKey, compacted)
 		}
-
-		compacted := compactDeterministic(msg.Content, intent)
-		if compacted == msg.Content {
-			continue
-		}
-		// Apply only a genuine >50% reduction, without rounding ambiguity:
-		// final bytes must be strictly fewer than the removed bytes.
-		if !worthwhileReduction(len(msg.Content), len(compacted)) {
-			continue
-		}
-
-		recordSavings(len(msg.Content), len(compacted), "transformation")
-		msg.Content = compacted
-		modified = true
-		// Best-effort: the replacement is already applied in memory; a
-		// refused write cannot corrupt it, and the host logs the refusal.
-		_, _ = sdk.CacheSet(keywordKey, compacted)
 	}
 	return modified, nil
 }
@@ -254,9 +269,9 @@ func assistantMessageCountsAfter(messages []*pbv2.Message) []int {
 // contract. The cached value is trusted only when it is non-empty AND shorter
 // than the original; missing, present-empty, or non-shorter values are
 // recomputed locally (the replacement is a pure function of the inputs).
-func applyDeterministicPolicy(msg *pbv2.Message, toolName, toolArgs string, rule sdk.ToolPolicyRule) (bool, error) {
+func applyDeterministicPolicy(msg *pbv2.Message, block int, text, toolName, toolArgs string, rule sdk.ToolPolicyRule) (bool, error) {
 	cacheKey := sdk.ContentAddressedCacheKey(policyCompactionCache,
-		"v2", toolName, toolArgs, msg.Content, rule.Mode, rule.Rerun)
+		"v2", toolName, toolArgs, text, rule.Mode, rule.Rerun)
 	cached, herr, err := sdk.CacheGet(cacheKey)
 	if err != nil {
 		return false, fmt.Errorf("keyword_compactor: policy cache_get: %w", err)
@@ -264,17 +279,21 @@ func applyDeterministicPolicy(msg *pbv2.Message, toolName, toolArgs string, rule
 	if herr != nil && !sdk.IsNotFound(herr) {
 		return false, fmt.Errorf("keyword_compactor: policy cache_get refused: %s", herr.Message)
 	}
-	if herr == nil && cached != "" && len(cached) < len(msg.Content) {
-		recordSavings(len(msg.Content), len(cached), "cache_reuse")
-		msg.Content = cached
+	if herr == nil && cached != "" && len(cached) < len(text) {
+		recordSavings(len(text), len(cached), "cache_reuse")
+		if _, err := sdk.ReplaceToolResultText(msg, block, cached); err != nil {
+			return false, fmt.Errorf("keyword_compactor: apply policy replacement: %w", err)
+		}
 		return true, nil
 	}
-	replacement := sdk.DeterministicToolReplacement(toolName, toolArgs, msg.Content, rule.Mode, rule.Rerun, false)
-	if len(replacement) >= len(msg.Content) {
+	replacement := sdk.DeterministicToolReplacement(toolName, toolArgs, text, rule.Mode, rule.Rerun, false)
+	if len(replacement) >= len(text) {
 		return false, nil
 	}
-	recordSavings(len(msg.Content), len(replacement), "transformation")
-	msg.Content = replacement
+	recordSavings(len(text), len(replacement), "transformation")
+	if _, err := sdk.ReplaceToolResultText(msg, block, replacement); err != nil {
+		return false, fmt.Errorf("keyword_compactor: apply policy replacement: %w", err)
+	}
 	_, _ = sdk.CacheSet(cacheKey, replacement)
 	return true, nil
 }

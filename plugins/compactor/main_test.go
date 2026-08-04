@@ -26,21 +26,55 @@ func newHarness(t *testing.T) *sdktest.Harness {
 	return sdktest.New(t)
 }
 
+// toolMsg builds an ordered tool-role message carrying ONE tool-result block
+// with a single text arm (the scalar-compatible shape the plugins act on).
+func toolMsg(id, name, content string) *pbv2.Message {
+	return &pbv2.Message{Role: "tool", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: &pbv2.RequestToolResultBlock{
+		ToolCallId: id,
+		ToolName:   name,
+		Content:    []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: content}}}},
+	}}}}}
+}
+
+// toolText returns the text of the FIRST text arm of the FIRST tool-result
+// block in message mi (the fixtures carry exactly one result per message).
+func resultBlock(id string, content string) *pbv2.RequestBlock {
+	return &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: &pbv2.RequestToolResultBlock{
+		ToolCallId: id, ToolName: "read",
+		Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: content}}}},
+	}}}
+}
+
+func toolText(t *testing.T, req *pbv2.ChatRequest, mi int) string {
+	t.Helper()
+	for _, b := range req.Messages[mi].Blocks {
+		if tr := b.GetToolResult(); tr != nil {
+			for _, c := range tr.Content {
+				if c.GetText() != nil {
+					return c.GetText().Text
+				}
+			}
+		}
+	}
+	t.Fatalf("no tool-result text in message %d", mi)
+	return ""
+}
+
 // bigToolRequest builds the cache-compliance shape the real host exercises:
 // a large tool result with a prior assistant turn (satisfying the model-mode
 // consumption gate) and a replayed tool call for name/args lookup.
 func bigToolRequest(content string) *pbv2.ChatRequest {
 	return &pbv2.ChatRequest{
 		Messages: []*pbv2.Message{
-			{Role: "system", Content: "You are a coding agent."},
-			{Role: "user", Content: "find the bug"},
-			{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "call_1", Name: "read", ArgumentsJson: []byte(`{"path":"server.go"}`)}}},
-			{Role: "tool", ToolCallId: "call_1", ToolName: "read", Content: content},
-			{Role: "user", Content: "now fix it"},
+			{Role: "system", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "You are a coding agent."}}}}},
+			{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "find the bug"}}}}},
+			{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "call_1", Name: "read", ArgumentsJson: []byte(`{"path":"server.go"}`)}}}}},
+			toolMsg("call_1", "read", content),
+			{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "now fix it"}}}}},
 			// One exact consumption after the result: the model-mode gate
 			// requires it (a model summary is never allowed before the result
 			// has been consumed once).
-			{Role: "assistant", Content: "the fix is in server.go"},
+			{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "the fix is in server.go"}}}}},
 		},
 	}
 }
@@ -144,17 +178,17 @@ func TestTruncateForPromptMultibyteRuneSafety(t *testing.T) {
 }
 
 // TestModelBatchReportUsesAdjustedTailOnce re-pins the economics math against
-// the v2 wire: proto.Size over a pbv2 ChatRequest. Measured 2026-08-02:
-// tail size 100054 bytes, rewrite span 5054 bytes -> 1264 estimated tokens.
-// The v1 numbers (v1 tags) were 1250-1400; the v2 wire is now pinned exactly.
+// the v2 wire: proto.Size over a pbv2 ChatRequest. Measured 2026-08-04 on the
+// ORDERED fixture (tool-role message with a tool-result block):
+// rewrite span 5060 bytes -> 1270 estimated tokens.
 func TestModelBatchReportUsesAdjustedTailOnce(t *testing.T) {
 	original := strings.Repeat("x", 100_000)
 	replacement := strings.Repeat("y", 5_000)
-	result := &pbv2.Message{Role: "tool", ToolCallId: "large", Content: original}
+	result := toolMsg("large", "read", original)
 	req := &pbv2.ChatRequest{Messages: []*pbv2.Message{
-		{Role: "user", Content: "prefix outside the rewrite span"},
+		{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "prefix outside the rewrite span"}}}}},
 		result,
-		{Role: "assistant", Content: "near-tail response"},
+		{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "near-tail response"}}}}},
 	}}
 	oldExpected := expectedApplications
 	expectedApplications = 5
@@ -173,14 +207,14 @@ func TestModelBatchReportUsesAdjustedTailOnce(t *testing.T) {
 	// and the final assistant message. Double-subtracting the original 100k
 	// would collapse this to zero.
 	rewrite := report["estimated_rewrite_span_tokens"].(int)
-	if rewrite != 1_264 {
-		t.Fatalf("rewrite span estimate=%d, want 1264 (measured from the v2 wire)", rewrite)
+	if rewrite != 1_270 {
+		t.Fatalf("rewrite span estimate=%d, want 1270 (measured from the ordered v2 wire)", rewrite)
 	}
 }
 
 func TestOptimisticPreflightChargesUncachedRewrite(t *testing.T) {
-	uncached := &pbv2.Message{Role: "tool", ToolCallId: "new", Content: strings.Repeat("x", 10_000)}
-	cached := &pbv2.Message{Role: "tool", ToolCallId: "cached", Content: strings.Repeat("y", 10_000)}
+	uncached := toolMsg("new", "read", strings.Repeat("x", 10_000))
+	cached := toolMsg("cached", "read", strings.Repeat("y", 10_000))
 	candidates, hasUncached := optimisticModelCandidates([]modelWork{
 		{message: uncached, index: 0},
 		{message: cached, index: 1, cached: "summary"},
@@ -252,7 +286,7 @@ func TestDeterministicFirstPassAppliesAndCachesThenReuses(t *testing.T) {
 	if first.Err != nil || first.Request == nil {
 		t.Fatalf("expected a replacement on turn 1, err=%v", first.Err)
 	}
-	if first.Request.Messages[3].Content == original.Messages[3].Content {
+	if toolText(t, first.Request, 3) == toolText(t, original, 3) {
 		t.Fatal("turn 1 did not replace the tool result")
 	}
 	if countCommand(h, "env.cache_set") != 1 {
@@ -268,7 +302,7 @@ func TestDeterministicFirstPassAppliesAndCachesThenReuses(t *testing.T) {
 	if second.Err != nil || second.Request == nil {
 		t.Fatalf("expected a replacement on turn 2, err=%v", second.Err)
 	}
-	if string(first.Request.Messages[3].Content) != string(second.Request.Messages[3].Content) {
+	if toolText(t, first.Request, 3) != toolText(t, second.Request, 3) {
 		t.Fatal("turn 2 output differs from turn 1 — not a pure function of the input")
 	}
 	if countCommand(h, "env.cache_set") != before {
@@ -300,7 +334,7 @@ func TestDeterministicConsumptionGate(t *testing.T) {
 	if res2.Err != nil || res2.Request == nil {
 		t.Fatalf("expected replacement after a consumption, err=%v", res2.Err)
 	}
-	if res2.Request.Messages[3].Content == original.Messages[3].Content {
+	if toolText(t, res2.Request, 3) == toolText(t, original, 3) {
 		t.Fatal("deterministic policy did not replace the consumed result")
 	}
 }
@@ -320,7 +354,7 @@ func TestModelPathAppliesWithV2OffloadShape(t *testing.T) {
 	if res.Err != nil || res.Request == nil {
 		t.Fatalf("expected a replacement, err=%v", res.Err)
 	}
-	got := res.Request.Messages[3].Content
+	got := toolText(t, res.Request, 3)
 	if got != "summary" {
 		t.Fatalf("tool result not replaced: %q", got[:min(40, len(got))])
 	}
@@ -450,7 +484,7 @@ func TestOffloadAdditiveFieldsAreTolerated(t *testing.T) {
 	if res.Err != nil || res.Request == nil {
 		t.Fatalf("expected the additive-tolerant decode to apply, err=%v", res.Err)
 	}
-	if res.Request.Messages[3].Content != "summary" {
+	if toolText(t, res.Request, 3) != "summary" {
 		t.Fatal("completion with an additive status field must apply")
 	}
 }
@@ -496,10 +530,8 @@ func TestUncachedBatchEvaluatesTwice(t *testing.T) {
 	})
 
 	req := bigToolRequest(bigContent())
-	req.Messages = append(req.Messages, &pbv2.Message{
-		Role: "tool", ToolCallId: "call_2", ToolName: "read", Content: strings.Repeat("second big output\n", 200),
-	})
-	req.Messages = append(req.Messages, &pbv2.Message{Role: "assistant", Content: "x"})
+	req.Messages = append(req.Messages, toolMsg("call_2", "read", strings.Repeat("second big output\n", 200)))
+	req.Messages = append(req.Messages, &pbv2.Message{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "x"}}}}})
 	res := h.BeforeRequest(req)
 	if res.Err != nil || res.Request == nil {
 		t.Fatalf("expected the batch to apply, err=%v", res.Err)
@@ -528,8 +560,8 @@ func TestAllCachedBatchEvaluatesOnce(t *testing.T) {
 	if res.Err != nil || res.Request == nil {
 		t.Fatalf("expected cache reuse, err=%v", res.Err)
 	}
-	if res.Request.Messages[3].Content != "cached-summary" {
-		t.Fatalf("cached replacement not reused: %q", res.Request.Messages[3].Content)
+	if toolText(t, res.Request, 3) != "cached-summary" {
+		t.Fatalf("cached replacement not reused: %q", toolText(t, res.Request, 3))
 	}
 	if n := countCommand(h, "torana_offload_completion"); n != 0 {
 		t.Fatalf("cached-shorter value must be reused WITHOUT offload: %d calls", n)
@@ -587,10 +619,8 @@ func TestProviderModelInconsistencyRejectsBatch(t *testing.T) {
 	})
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	req := bigToolRequest(bigContent())
-	req.Messages = append(req.Messages, &pbv2.Message{
-		Role: "tool", ToolCallId: "call_2", ToolName: "read", Content: strings.Repeat("second big output\n", 200),
-	})
-	req.Messages = append(req.Messages, &pbv2.Message{Role: "assistant", Content: "x"})
+	req.Messages = append(req.Messages, toolMsg("call_2", "read", strings.Repeat("second big output\n", 200)))
+	req.Messages = append(req.Messages, &pbv2.Message{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "x"}}}}})
 	res := h.BeforeRequest(req)
 	if res.Err != nil {
 		t.Fatal(res.Err)
@@ -665,9 +695,9 @@ func TestToolResultMustStayExact(t *testing.T) {
 			h2 := newHarness(t)
 			h2.SetConfig(`{"tool_policies":[{"match":"*","mode":"deterministic","first_pass":true}]}`)
 			req := bigToolRequest(content)
-			req.Messages[3].ToolName = "edit_file"
+			req.Messages[3].Blocks[0].GetToolResult().ToolName = "edit_file"
 			if name == "error content" {
-				req.Messages[3].ToolName = "read"
+				req.Messages[3].Blocks[0].GetToolResult().ToolName = "read"
 			}
 			res := h2.BeforeRequest(req)
 			if res.Err != nil {
@@ -728,7 +758,7 @@ func TestTruncationMarkerInOffloadPayload(t *testing.T) {
 	if !strings.Contains(offloadArgs, "... [truncated] ...") {
 		t.Fatal("configured cap must truncate the offload payload head+tail")
 	}
-	if len(res.Request.Messages[3].Content) >= len(bigContent()) {
+	if len(toolText(t, res.Request, 3)) >= len(bigContent()) {
 		t.Fatal("the tool result itself must not be truncated by the input cap")
 	}
 }
@@ -766,8 +796,8 @@ func TestCacheSetRefusalIsBestEffort(t *testing.T) {
 	if res.Request == nil {
 		t.Fatal("expected a replacement despite the refused cache write")
 	}
-	if res.Request.Messages[3].Content != "summary" {
-		t.Fatalf("the replacement must still be applied despite the refusal: %q", res.Request.Messages[3].Content)
+	if toolText(t, res.Request, 3) != "summary" {
+		t.Fatalf("the replacement must still be applied despite the refusal: %q", toolText(t, res.Request, 3))
 	}
 }
 
@@ -786,7 +816,7 @@ func TestSavingsReportRefusalDoesNotChangeReplacement(t *testing.T) {
 	if res.Err != nil {
 		t.Fatalf("a refused savings report must not fail the hook: %v", res.Err)
 	}
-	if res.Request == nil || res.Request.Messages[3].Content != "summary" {
+	if res.Request == nil || toolText(t, res.Request, 3) != "summary" {
 		t.Fatal("the applied replacement must stand after a refused savings report")
 	}
 }
@@ -935,8 +965,8 @@ func TestModelPresentEmptyReplacementRecomputes(t *testing.T) {
 	if res.Err != nil || res.Request == nil {
 		t.Fatalf("expected a recomputed replacement, err=%v", res.Err)
 	}
-	if res.Request.Messages[3].Content != "summary" {
-		t.Fatalf("present-empty cache value must recompute, got %q", res.Request.Messages[3].Content)
+	if toolText(t, res.Request, 3) != "summary" {
+		t.Fatalf("present-empty cache value must recompute, got %q", toolText(t, res.Request, 3))
 	}
 	if n := countCommand(h, "torana_offload_completion"); n != 1 {
 		t.Fatalf("offload must run for a present-empty cache value, got %d", n)
@@ -957,10 +987,10 @@ func TestDeterministicPresentEmptyReplacementRecomputes(t *testing.T) {
 	if res.Err != nil || res.Request == nil {
 		t.Fatalf("expected a recomputed replacement, err=%v", res.Err)
 	}
-	if res.Request.Messages[3].Content == content {
+	if toolText(t, res.Request, 3) == content {
 		t.Fatal("present-empty policy cache value must recompute, not pass through")
 	}
-	if res.Request.Messages[3].Content == "" {
+	if toolText(t, res.Request, 3) == "" {
 		t.Fatal("present-empty cache value must never be applied (would erase the result)")
 	}
 }
@@ -1166,10 +1196,167 @@ func TestDeterministicNonShorterCacheRecomputes(t *testing.T) {
 	if res.Err != nil || res.Request == nil {
 		t.Fatalf("expected a recomputed replacement, err=%v", res.Err)
 	}
-	if res.Request.Messages[3].Content == content+"extra bytes making the cached value non-shorter" {
+	if toolText(t, res.Request, 3) == content+"extra bytes making the cached value non-shorter" {
 		t.Fatal("a non-shorter cached value must never be applied")
 	}
-	if res.Request.Messages[3].Content == content {
+	if toolText(t, res.Request, 3) == content {
 		t.Fatal("a non-shorter cached value must be recomputed, not left untouched")
+	}
+}
+
+// ==========================================================================
+// Ordered-seam rows (checkpoint REV 2)
+// ==========================================================================
+
+// TestOrderedSeamCarrierRows — the ordered-ABI behavior through the REAL
+// hook:
+//   - a USER-ROLE tool result is a candidate (no role gate);
+//   - TWO results in ONE message are independent candidates, both applied;
+//   - a mixed [text, tool_result, text] message: the surrounding text
+//     survives byte-exact while the result is compacted.
+func TestOrderedSeamCarrierRows(t *testing.T) {
+	text := func(s string) *pbv2.RequestBlock {
+		return &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: s}}}
+	}
+	result := func(id string, content string) *pbv2.RequestBlock {
+		return &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: &pbv2.RequestToolResultBlock{
+			ToolCallId: id, ToolName: "read",
+			Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: content}}}},
+		}}}
+	}
+	content := strings.Repeat("line of tool output that is long enough to be compaction-eligible\n", 200)
+	summary := "short summary"
+	assistant := func() *pbv2.Message {
+		return &pbv2.Message{Role: "assistant", Blocks: []*pbv2.RequestBlock{text("consumed")}}
+	}
+
+	// User-role result: the gate must not require role "tool".
+	t.Run("user-role result is a candidate", func(t *testing.T) {
+		h := newHarness(t)
+		h.SetConfig(modelConfig)
+		h.StubHostCall("torana_cache_pricing", func(string) (string, error) { return sdktest.HostResultValue([]byte(`{"status":"ok"}`)), nil })
+		h.StubHostCall("torana_offload_completion", offloadStub(summary))
+		h.StubHostCall("torana_evaluate_compaction", applyStub(true))
+		h.SeedCache("intent:c1", "find the bug")
+		req := &pbv2.ChatRequest{Messages: []*pbv2.Message{
+			{Role: "user", Blocks: []*pbv2.RequestBlock{text("u"), result("c1", content)}},
+			assistant(),
+		}}
+		req.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
+		res := h.BeforeRequest(req)
+		if res.Err != nil || res.Request == nil {
+			t.Fatalf("err=%v", res.Err)
+		}
+		if got := res.Request.Messages[0].Blocks[1].GetToolResult().Content[0].GetText().Text; got != summary {
+			t.Fatalf("user-role result not compacted: %q", got)
+		}
+		if got := res.Request.Messages[0].Blocks[0].GetText().Text; got != "u" {
+			t.Fatalf("surrounding text disturbed: %q", got)
+		}
+	})
+
+	// Two results in one message: independent candidates, both applied.
+	t.Run("two results in one message", func(t *testing.T) {
+		h := newHarness(t)
+		h.SetConfig(modelConfig)
+		h.StubHostCall("torana_cache_pricing", func(string) (string, error) { return sdktest.HostResultValue([]byte(`{"status":"ok"}`)), nil })
+		h.StubHostCall("torana_offload_completion", offloadStub(summary))
+		h.StubHostCall("torana_evaluate_compaction", applyStub(true))
+		h.SeedCache("intent:c1", "find the bug")
+		h.SeedCache("intent:c2", "find the bug")
+		req := &pbv2.ChatRequest{Messages: []*pbv2.Message{
+			{Role: "user", Blocks: []*pbv2.RequestBlock{result("c1", content), result("c2", content)}},
+			assistant(),
+		}}
+		req.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
+		res := h.BeforeRequest(req)
+		if res.Err != nil || res.Request == nil {
+			t.Fatalf("err=%v", res.Err)
+		}
+		for _, id := range []string{"c1", "c2"} {
+			got := ""
+			for _, b := range res.Request.Messages[0].Blocks {
+				if tr := b.GetToolResult(); tr != nil && tr.ToolCallId == id {
+					got = tr.Content[0].GetText().Text
+				}
+			}
+			if got != summary {
+				t.Fatalf("result %s not compacted: %q", id, got)
+			}
+		}
+	})
+
+	// Unsupported shapes decline unchanged with ZERO cache/offload/metrics/
+	// savings calls: zero text arms, multiple text arms, unknown arm.
+	t.Run("unsupported shapes exact multiset", func(t *testing.T) {
+		unknown := &pbv2.ToolResultContentBlock{Kind: &pbv2.ToolResultContentBlock_Unknown{Unknown: &pbv2.ToolResultUnknownBlock{Kind: "provider_blob", PayloadJson: []byte(`{"x":1}`)}}}
+		rows := map[string]*pbv2.RequestToolResultBlock{
+			"zero text arms": {ToolCallId: "c1", ToolName: "read", Content: []*pbv2.ToolResultContentBlock{}},
+			"multiple text":  {ToolCallId: "c1", ToolName: "read", Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: "a"}}}, {Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: "b"}}}}},
+			"unknown arm":    {ToolCallId: "c1", ToolName: "read", Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: content}}}, unknown}},
+		}
+		for name, tr := range rows {
+			t.Run(name, func(t *testing.T) {
+				h := newHarness(t)
+				h.SetConfig(modelConfig)
+				h.StubHostCall("torana_cache_pricing", func(string) (string, error) { return sdktest.HostResultValue([]byte(`{"status":"ok"}`)), nil })
+				h.StubHostCall("torana_offload_completion", offloadStub(summary))
+				req := &pbv2.ChatRequest{Messages: []*pbv2.Message{
+					{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: tr}}}},
+					assistant(),
+				}}
+				req.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
+				before := proto.Clone(req).(*pbv2.ChatRequest)
+				res := h.BeforeRequest(req)
+				if res.Err != nil || !res.PassedThrough {
+					t.Fatalf("must pass unchanged, err=%v", res.Err)
+				}
+				if !proto.Equal(req, before) {
+					t.Fatal("an unsupported shape was mutated")
+				}
+				for _, c := range h.Calls() {
+					if c.Command == "torana_cache_get" || c.Command == "torana_offload_completion" ||
+						c.Command == "torana_evaluate_compaction" || c.Command == "torana_record_savings" ||
+						c.Command == "torana_plugin_counter" {
+						t.Fatalf("an unsupported shape made a spend call: %s", c.Command)
+					}
+				}
+			})
+		}
+	})
+}
+
+// TestOrderedSeamContextExtraction — the ported context algorithm: the last
+// FIVE NON-EMPTY qualifying user/assistant messages via sdk.Text, 500-byte
+// rune-safe cap; a mixed [text, tool_result, text] message keeps its
+// surrounding text (the candidate result's content never enters the
+// context); sibling results survive.
+func TestOrderedSeamContextExtraction(t *testing.T) {
+	text := func(s string) *pbv2.RequestBlock {
+		return &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: s}}}
+	}
+	msgs := []*pbv2.Message{
+		{Role: "system", Blocks: []*pbv2.RequestBlock{text("sys")}},
+		{Role: "user", Blocks: []*pbv2.RequestBlock{text("first user"), resultBlock("c1", "RESULT-CONTENT-NOT-IN-CONTEXT"), text("second user")}},
+		{Role: "assistant", Blocks: []*pbv2.RequestBlock{text("assistant reply")}},
+		{Role: "user", Blocks: []*pbv2.RequestBlock{text("third user")}},
+	}
+	got := extractConversationContext(msgs)
+	if strings.Contains(got, "RESULT-CONTENT-NOT-IN-CONTEXT") {
+		t.Fatalf("the tool-result content leaked into the context: %q", got)
+	}
+	if !strings.Contains(got, "first user") || !strings.Contains(got, "second user") ||
+		!strings.Contains(got, "assistant reply") || !strings.Contains(got, "third user") {
+		t.Fatalf("the surrounding text did not survive: %q", got)
+	}
+	if strings.Contains(got, "sys") {
+		t.Fatalf("a system message leaked into the context: %q", got)
+	}
+	// The 5-message cap + 500-byte rune-safe cap are unchanged (the helper
+	// truncHead is the same function the flat era used).
+	long := strings.Repeat("é", 300) // 600 source bytes
+	capped := extractConversationContext([]*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{text(long)}}})
+	if len(capped) > 510 {
+		t.Fatalf("the 500-byte cap with rune-safe boundary failed: len=%d", len(capped))
 	}
 }
