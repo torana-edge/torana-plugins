@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 	"github.com/torana-edge/torana-plugin-sdk/sdktest"
 	"google.golang.org/protobuf/proto"
@@ -39,16 +38,14 @@ func lastMarkerJSON(t *testing.T, req *pbv2.ChatRequest) []byte {
 	return nil
 }
 
-// decisionKey mirrors the PRODUCTION decision-domain framing (parity
-// invariant I1): the SDK-owned observable projection under this plugin's
-// "tier" domain. The SDK owns the projection and its inventory; the plugin
-// pins that its decision key moves exactly when the observable prefix does.
-func decisionKey(req *pbv2.ChatRequest) string {
-	prefix, err := pbv2.RequestObservablePrefix(req)
+// keyFor is a thin test wrapper over the PRODUCTION decisionKey helper.
+func keyFor(t *testing.T, req *pbv2.ChatRequest) string {
+	t.Helper()
+	k, _, err := decisionKey(req)
 	if err != nil {
-		return ""
+		t.Fatalf("decisionKey: %v", err)
 	}
-	return sdk.ContentAddressedCacheKey("tier", string(prefix))
+	return k
 }
 
 func baseRequest() *pbv2.ChatRequest {
@@ -109,12 +106,12 @@ func TestDecisionKeySensitivity(t *testing.T) {
 	for name, mutate := range included {
 		t.Run("included/"+name, func(t *testing.T) {
 			base := baseRequest()
-			before := decisionKey(base)
+			before := keyFor(t, base)
 			if before == "" {
 				t.Fatal("fixture decision key empty; vacuous")
 			}
 			mutate(base)
-			if got := decisionKey(base); got == before {
+			if got := keyFor(t, base); got == before {
 				t.Errorf("observable field %s did not move the decision key", name)
 			}
 		})
@@ -122,9 +119,9 @@ func TestDecisionKeySensitivity(t *testing.T) {
 	for name, mutate := range excluded {
 		t.Run("excluded/"+name, func(t *testing.T) {
 			base := baseRequest()
-			before := decisionKey(base)
+			before := keyFor(t, base)
 			mutate(base)
-			if got := decisionKey(base); got != before {
+			if got := keyFor(t, base); got != before {
 				t.Errorf("excluded field %s moved the decision key", name)
 			}
 		})
@@ -132,27 +129,32 @@ func TestDecisionKeySensitivity(t *testing.T) {
 
 	// Suffix messages after the boundary are not part of the cached prefix.
 	t.Run("suffix messages excluded", func(t *testing.T) {
-		before := decisionKey(baseRequest())
+		before := keyFor(t, baseRequest())
 		extended := baseRequest()
 		extended.Messages = append(extended.Messages, &pbv2.Message{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "thinking out loud"}}}}})
-		if got := decisionKey(extended); got != before {
+		if got := keyFor(t, extended); got != before {
 			t.Errorf("an unmarked message after the breakpoint changed the decision key")
 		}
 	})
 
 	// Identical prefixes fingerprint identically.
 	t.Run("stable for identical prefixes", func(t *testing.T) {
-		if a, b := decisionKey(baseRequest()), decisionKey(baseRequest()); a != b {
+		if a, b := keyFor(t, baseRequest()), keyFor(t, baseRequest()); a != b {
 			t.Fatal("identical prefixes must share a decision key")
 		}
 	})
 
-	// Fail-closed parity (I3): an out-of-domain request has NO decision key.
+	// Fail-closed parity (I3): an out-of-domain request has NO decision key
+	// and NO marker presence — the error path declines before state.
 	t.Run("out-of-domain empty key", func(t *testing.T) {
 		bad := baseRequest()
 		bad.Messages[0].Blocks = bad.Messages[0].Blocks[:0]
-		if got := decisionKey(bad); got != "" {
-			t.Fatalf("out-of-domain request got decision key %q; want empty", got)
+		k, has, err := decisionKey(bad)
+		if err == nil {
+			t.Fatalf("out-of-domain request produced a decision key %q (has=%v)", k, has)
+		}
+		if k != "" || has {
+			t.Fatalf("out-of-domain request: key=%q has=%v, want empty/false", k, has)
 		}
 	})
 }
@@ -268,7 +270,7 @@ func TestStoredDecisionReappliedByteIdentically(t *testing.T) {
 	h.StubHostCall("torana_cache_pricing", pricingStub())
 	h.SetNow(1_000_000)
 	req := reqWith(t, h)
-	key := "decision/" + decisionKey(req)
+	key := "decision/" + keyFor(t, req)
 	h.SeedState(key, mustJSON(t, decision{
 		Marker:          map[string]any{"type": "ephemeral", "ttl": "1h"},
 		TierTTL:         3600,
@@ -311,7 +313,7 @@ func TestExpiredDecisionDeletedAndRedecided(t *testing.T) {
 	h.StubHostCall("torana_cache_pricing", pricingStub())
 	h.SetNow(5_000_000)
 	req := reqWith(t, h)
-	key := "decision/" + decisionKey(req)
+	key := "decision/" + keyFor(t, req)
 	h.SeedState(key, mustJSON(t, decision{
 		Marker:          map[string]any{"type": "ephemeral", "ttl": "1h"},
 		TierTTL:         3600,
@@ -515,7 +517,7 @@ func TestCorruptDecisionIsKeyLocal(t *testing.T) {
 	h.StubHostCall("torana_cache_pricing", pricingStub())
 	h.SetNow(1_000_000)
 	req := reqWith(t, h)
-	h.SeedState("decision/"+decisionKey(req), "not json")
+	h.SeedState("decision/"+keyFor(t, req), "not json")
 	res := h.BeforeRequest(req)
 	if res.Err != nil || !res.PassedThrough {
 		t.Fatalf("corrupt decision JSON must decline for this key, err=%v", res.Err)
@@ -636,7 +638,7 @@ func TestDeterminismOverIdenticalRequests(t *testing.T) {
 	h1.StubHostCall("torana_cache_pricing", pricingStub())
 	h1.SetNow(1_000_000)
 	req := reqWith(t, h1)
-	h1.SeedState("decision/"+decisionKey(req), mustJSON(t, decision{
+	h1.SeedState("decision/"+keyFor(t, req), mustJSON(t, decision{
 		Marker: map[string]any{"type": "ephemeral", "ttl": "1h"}, TierTTL: 3600, DecidedAtMillis: 900_000,
 	}))
 	r1 := h1.BeforeRequest(req)
@@ -644,7 +646,7 @@ func TestDeterminismOverIdenticalRequests(t *testing.T) {
 	h2.StubHostCall("torana_cache_pricing", pricingStub())
 	h2.SetNow(1_000_000)
 	req2 := reqWith(t, h2)
-	h2.SeedState("decision/"+decisionKey(req2), mustJSON(t, decision{
+	h2.SeedState("decision/"+keyFor(t, req2), mustJSON(t, decision{
 		Marker: map[string]any{"type": "ephemeral", "ttl": "1h"}, TierTTL: 3600, DecidedAtMillis: 900_000,
 	}))
 	r2 := h2.BeforeRequest(req2)
@@ -678,7 +680,7 @@ func TestStoredDecisionClockClassification(t *testing.T) {
 		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no clock"), nil
 	})
 	req := reqWith(t, h)
-	h.SeedState("decision/"+decisionKey(req), mustJSON(t, decision{
+	h.SeedState("decision/"+keyFor(t, req), mustJSON(t, decision{
 		Marker: map[string]any{"type": "ephemeral", "ttl": "1h"}, TierTTL: 3600, DecidedAtMillis: 900_000,
 	}))
 	res := h.BeforeRequest(req)
@@ -693,7 +695,7 @@ func TestStoredDecisionClockClassification(t *testing.T) {
 		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub"), nil
 	})
 	req2 := reqWith(t, h2)
-	h2.SeedState("decision/"+decisionKey(req2), mustJSON(t, decision{
+	h2.SeedState("decision/"+keyFor(t, req2), mustJSON(t, decision{
 		Marker: map[string]any{"type": "ephemeral", "ttl": "1h"}, TierTTL: 3600, DecidedAtMillis: 900_000,
 	}))
 	if res2 := h2.BeforeRequest(req2); res2.Err == nil {
@@ -741,5 +743,156 @@ func TestActivityPersistenceFailureClasses(t *testing.T) {
 	})
 	if res3 := h3.BeforeRequest(reqWith(t, h3)); res3.Err == nil {
 		t.Fatal("a malformed activity write frame must error the hook")
+	}
+}
+
+// ==========================================================================
+// Ordered-carrier hook rows + decline proofs
+// ==========================================================================
+
+// TestCarrierHookRows drives the REAL hook with requests whose marker sits on
+// each of the three SDK carriers (and a mixed tool+outer request), and
+// asserts the sticky re-application lands EXACTLY on the last existing
+// carrier. The decision key comes from the production decisionKey helper, so
+// the seeded state matches what the hook computes.
+func TestCarrierHookRows(t *testing.T) {
+	nestedReq := func() *pbv2.ChatRequest {
+		return &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{
+			{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "a"}}},
+			{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: &pbv2.RequestToolResultBlock{
+				ToolCallId: "c1",
+				Content: []*pbv2.ToolResultContentBlock{
+					{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: "r"}}},
+					{Kind: &pbv2.ToolResultContentBlock_CacheBreakpoint{CacheBreakpoint: &pbv2.ToolResultCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}},
+				},
+			}}},
+		}}}}
+	}
+	rows := []struct {
+		name string
+		req  *pbv2.ChatRequest
+		// check asserts the applied marker landed on the exact carrier.
+		check func(t *testing.T, out *pbv2.ChatRequest)
+	}{
+		{
+			"tool carrier",
+			func() *pbv2.ChatRequest {
+				return &pbv2.ChatRequest{Model: "m",
+					Tools:    []*pbv2.ToolDef{{Name: "read", Description: "d", ParametersJson: []byte(`{}`), CacheControlJson: []byte(`{"type":"ephemeral"}`)}},
+					Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}}},
+				}
+			}(),
+			func(t *testing.T, out *pbv2.ChatRequest) {
+				if !strings.Contains(string(out.Tools[0].CacheControlJson), `"ttl":"1h"`) {
+					t.Fatalf("tool carrier not replaced: %s", out.Tools[0].CacheControlJson)
+				}
+				for _, m := range out.Messages {
+					for _, b := range m.Blocks {
+						if b.GetCacheBreakpoint() != nil {
+							t.Fatal("a message carrier appeared on a tools-only prefix")
+						}
+					}
+				}
+			},
+		},
+		{
+			"outer carrier",
+			func() *pbv2.ChatRequest { return baseRequest() }(),
+			func(t *testing.T, out *pbv2.ChatRequest) {
+				got := out.Messages[len(out.Messages)-1].Blocks
+				cb := got[len(got)-1].GetCacheBreakpoint()
+				if cb == nil || !strings.Contains(string(cb.MarkerJson), `"ttl":"1h"`) {
+					t.Fatalf("outer carrier not replaced: %+v", got)
+				}
+			},
+		},
+		{
+			"nested carrier",
+			nestedReq(),
+			func(t *testing.T, out *pbv2.ChatRequest) {
+				tr := out.Messages[0].Blocks[1].GetToolResult()
+				cb := tr.Content[len(tr.Content)-1].GetCacheBreakpoint()
+				if cb == nil || !strings.Contains(string(cb.MarkerJson), `"ttl":"1h"`) {
+					t.Fatalf("nested carrier not replaced: %+v", tr.Content)
+				}
+			},
+		},
+		{
+			"mixed tool + outer (last = outer)",
+			func() *pbv2.ChatRequest {
+				r := baseRequest()
+				r.Tools = []*pbv2.ToolDef{{Name: "read", Description: "d", ParametersJson: []byte(`{}`), CacheControlJson: []byte(`{"type":"ephemeral"}`)}}
+				return r
+			}(),
+			func(t *testing.T, out *pbv2.ChatRequest) {
+				// The later outer carrier wins: it carries the new marker...
+				msgs := out.Messages[len(out.Messages)-1].Blocks
+				cb := msgs[len(msgs)-1].GetCacheBreakpoint()
+				if cb == nil || !strings.Contains(string(cb.MarkerJson), `"ttl":"1h"`) {
+					t.Fatalf("outer carrier (last) not replaced: %+v", msgs)
+				}
+				// ...and the earlier tool carrier is byte-identical (untouched).
+				if !strings.Contains(string(out.Tools[0].CacheControlJson), `"ephemeral"`) || strings.Contains(string(out.Tools[0].CacheControlJson), `"ttl":"1h"`) {
+					t.Fatalf("earlier tool carrier was disturbed: %s", out.Tools[0].CacheControlJson)
+				}
+			},
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.StubHostCall("torana_cache_pricing", pricingStub())
+			h.SetNow(1_000_000)
+			row.req.ToranaMetaJson = []byte(`{"_provider":"anthropic","_conversation_id":"conv-1"}`)
+			key, has, err := decisionKey(row.req)
+			if err != nil || !has {
+				t.Fatalf("decisionKey: err=%v has=%v, want a marker-present key", err, has)
+			}
+			h.SeedState("decision/"+key, mustJSON(t, decision{
+				Marker:          map[string]any{"type": "ephemeral", "ttl": "1h"},
+				TierTTL:         3600,
+				DecidedAtMillis: 900_000,
+			}))
+			res := h.BeforeRequest(row.req)
+			if res.Err != nil || res.Request == nil {
+				t.Fatalf("sticky reapplication failed: err=%v", res.Err)
+			}
+			row.check(t, res.Request)
+		})
+	}
+}
+
+// TestDeclineProofsZeroCallsNoMutation — the FULL decline proofs: an
+// invalid (out-of-domain) request and a no-marker request both pass with
+// NO host calls beyond the mode read (env.plugin_config), and the request
+// is byte/structurally unchanged.
+func TestDeclineProofsZeroCallsNoMutation(t *testing.T) {
+	invalid := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{{Role: "user", Blocks: nil}}}
+	noMarker := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}}}}
+	rows := []struct {
+		name string
+		req  *pbv2.ChatRequest
+	}{
+		{"invalid out-of-domain", invalid},
+		{"no marker", noMarker},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.StubHostCall("torana_cache_pricing", pricingStub())
+			before := proto.Clone(row.req).(*pbv2.ChatRequest)
+			res := h.BeforeRequest(row.req)
+			if res.Err != nil || !res.PassedThrough {
+				t.Fatalf("must pass unchanged, err=%v", res.Err)
+			}
+			if !proto.Equal(row.req, before) {
+				t.Fatal("the decline mutated the request")
+			}
+			for _, c := range h.Calls() {
+				if c.Command != "env.plugin_config" {
+					t.Fatalf("decline made an unexpected host call: %s", c.Command)
+				}
+			}
+		})
 	}
 }

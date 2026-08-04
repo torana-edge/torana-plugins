@@ -69,7 +69,6 @@ import (
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
-	"google.golang.org/protobuf/proto"
 )
 
 func main() {}
@@ -147,23 +146,18 @@ func init() {
 		// Fail-closed parity (I3): the SDK-owned observable projection is the
 		// single gate. An out-of-domain request declines BEFORE any state
 		// lookup/write or mutation.
-		prefix, err := pbv2.RequestObservablePrefix(req)
+		//
+		// The request must already carry a breakpoint. This plugin chooses
+		// which lifetime to buy; it never decides that something should be
+		// cached. The projection's marker-presence oracle (a PURE read — the
+		// same traversal, no mutation) declines a no-marker request here,
+		// before pricing and before any state access.
+		prefixKey, hasBreakpoint, err := decisionKey(req)
 		if err != nil {
 			return sdk.PassRequest(), nil
 		}
-
-		// The request must already carry a breakpoint. This plugin chooses
-		// which lifetime to buy; it never decides that something should be
-		// cached. The no-marker sentinel is the SDK's only oracle that does
-		// not re-implement the carrier traversal: probe a DISCARDED clone —
-		// atomic, no mutation of the live request, no state — and decline on
-		// ErrNoCacheBreakpoint.
-		probe := proto.Clone(req).(*pbv2.ChatRequest)
-		if _, err := pbv2.ReplaceLastCacheBreakpoint(probe, noMarkerProbeBytes); err != nil {
-			if errors.Is(err, pbv2.ErrNoCacheBreakpoint) {
-				return sdk.PassRequest(), nil
-			}
-			return sdk.RequestResult{}, err
+		if !hasBreakpoint {
+			return sdk.PassRequest(), nil
 		}
 
 		meta := readHostMeta(req)
@@ -181,10 +175,9 @@ func init() {
 			return sdk.PassRequest(), nil
 		}
 
-		// The decision domain framing over the shared projection (parity
+		// prefixKey came from the production decisionKey helper (parity
 		// invariant I1): identical observable prefixes key the same sticky
-		// decision; the projection error already declined above.
-		prefixKey := sdk.ContentAddressedCacheKey("tier", string(prefix))
+		// decision.
 
 		now, clockErr := sdk.Now()
 
@@ -460,11 +453,20 @@ func logStateError(operation string, err error) {
 	sdk.Log(fmt.Sprintf("cache_tier_selector: %s: %v", operation, err), sdk.LogLevelInfo)
 }
 
-// noMarkerProbeBytes is the strict-object marker used ONLY for the
-// no-marker sentinel probe on a discarded clone. Its content is irrelevant
-// (the probe result is discarded); the sentinel distinguishes "no carrier"
-// from "carrier exists" without re-implementing the traversal.
-var noMarkerProbeBytes = []byte(`{"type":"ephemeral"}`)
+// decisionKey is the SINGLE production decision-domain framing (parity
+// invariant I1): the SDK-owned observable projection under this plugin's
+// "tier" domain. It also reports marker presence — a PURE oracle from the
+// projection itself (no mutation, no re-implemented traversal) so a
+// no-marker request can be declined before pricing and before any state
+// access. The SDK owns the projection and its descriptor inventory; the
+// plugin pins the decision-key consequence in its tests.
+func decisionKey(req *pbv2.ChatRequest) (key string, hasBreakpoint bool, err error) {
+	prefix, has, err := pbv2.RequestObservablePrefix(req)
+	if err != nil {
+		return "", false, err
+	}
+	return sdk.ContentAddressedCacheKey("tier", string(prefix)), has, nil
+}
 
 // replaceMarker applies the tier marker with the SDK's exact-carrier
 // operation: the LAST EXISTING carrier (tools-first section, outer block, or
