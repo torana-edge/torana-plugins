@@ -21,6 +21,10 @@
     {
       "name": "env.request_headers",
       "description": "read allowlisted auth headers (Authorization, X-Api-Key, X-Torana-*)"
+    },
+    {
+      "name": "env.set_identity",
+      "description": "Identity injection for virtual keys"
     }
   ]
 }

@@ -104,7 +104,11 @@ func init() {
 		if err != nil {
 			return sdk.RequestResult{}, err
 		}
-		modified = injectSystemPrompt(req) || modified
+		promptChanged, err := injectSystemPrompt(req)
+		if err != nil {
+			return sdk.RequestResult{}, err
+		}
+		modified = promptChanged || modified
 		// Re-hydrate "i" onto the model's PRIOR tool calls in history. We
 		// strip "i" before returning to the harness, so the harness replays
 		// the model's own tool calls without it — and the model imitates that
@@ -311,9 +315,17 @@ func rehydrateHistoryIntents(req *pbv2.ChatRequest) (bool, error) {
 			}
 			args[intentField] = intent
 			if b, err := json.Marshal(args); err == nil {
-				// The view is a COPY: the mutation must land on the actual
-				// tool-use block (position-addressed by the view).
-				msg.Blocks[tc.Block].GetToolUse().ArgumentsJson = b
+				// The view is a COPY and the mutation must be
+				// PROVENANCE-AWARE: ReplaceToolCall targets the real block
+				// (position-addressed by the view), clears the call-bound
+				// signature token on a REAL change, and preserves it on a
+				// byte-identical no-op. The intent field was absent before,
+				// so the re-marshal always differs — a real change.
+				if err := sdk.ReplaceToolCall(msg, tc.Block, sdk.ToolCallInput{
+					Id: tc.Id, Name: tc.Name, Arguments: b,
+				}); err != nil {
+					return false, fmt.Errorf("intent: replace history tool call: %w", err)
+				}
 				modified = true
 			}
 		}
@@ -495,26 +507,38 @@ func injectIntentSchema(req *pbv2.ChatRequest) (bool, error) {
 // TRANSCRIPT embedded in the system prompt — the winning strategy from the
 // Jul 16 experiments: it matches few-shot messages on intent quality with
 // zero conversation contamination and no per-request message overhead.
-func injectSystemPrompt(req *pbv2.ChatRequest) bool {
-	const addendum = "\n\nEvery tool call has an \"i\" field: the underlying question the call " +
-		"helps answer, never the action taken. Example of a good call:\n" +
-		"  read_file(path=\"src/pricing.ts\", i=\"Which table maps locale to currency, to find why EU shows USD\")\n" +
-		"Example of a BAD value: i=\"reading pricing.ts\" (action description — discarded)."
+// addendum is the "i" convention text appended to the system prompt (see
+// injectSystemPrompt for the strategy notes). Package-level so the tests pin
+// the exact production bytes.
+const addendum = "\n\nEvery tool call has an \"i\" field: the underlying question the call " +
+	"helps answer, never the action taken. Example of a good call:\n" +
+	"  read_file(path=\"src/pricing.ts\", i=\"Which table maps locale to currency, to find why EU shows USD\")\n" +
+	"Example of a BAD value: i=\"reading pricing.ts\" (action description — discarded)."
+
+func injectSystemPrompt(req *pbv2.ChatRequest) (bool, error) {
 	for _, msg := range req.Messages {
 		if msg.Role != "system" {
 			continue
 		}
-		// Append to the LAST text block of the system prompt (the ordered
-		// body keeps the prompt text in text blocks; the flat Content is
-		// gone).
+		// Append to the LAST text block of the system prompt via the
+		// PROVENANCE-AWARE helper: a real change clears the text block's
+		// signature AND any trailing-signature carrier whose covered content
+		// changed; a byte-identical no-op preserves every token.
 		for i := len(msg.Blocks) - 1; i >= 0; i-- {
 			if t := msg.Blocks[i].GetText(); t != nil {
-				t.Text += addendum
-				return true
+				if err := sdk.SetTextAt(msg, i, t.Text+addendum); err != nil {
+					return false, fmt.Errorf("intent: system prompt append: %w", err)
+				}
+				return true, nil
 			}
 		}
-		msg.Blocks = append(msg.Blocks, &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: addendum}}})
-		return true
+		// A system message with NO text block: the SDK's valid no-text path
+		// appends one at the end (removing a final trailing carrier first —
+		// content appended after the token's covered scope is stale).
+		if err := sdk.ReplaceAllText(msg, addendum); err != nil {
+			return false, fmt.Errorf("intent: system prompt no-text append: %w", err)
+		}
+		return true, nil
 	}
 	req.Messages = append([]*pbv2.Message{{
 		Role: "system",
@@ -522,5 +546,5 @@ func injectSystemPrompt(req *pbv2.ChatRequest) bool {
 			Text: &pbv2.RequestTextBlock{Text: "[SYSTEM]" + addendum},
 		}}},
 	}}, req.Messages...)
-	return true
+	return true, nil
 }

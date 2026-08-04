@@ -791,3 +791,155 @@ func TestSchemaDefaultsMatchRuntimeDefaults(t *testing.T) {
 		t.Fatalf("runtime fill default=%q does not match the schema", got)
 	}
 }
+
+// TestRehydrationProvenanceAwareWrites — the rehydration write is
+// provenance-aware: with MULTIPLE tool-use blocks (designated + siblings),
+// ONLY the designated block changes, a REAL change clears the designated
+// call's signature token while the siblings keep theirs, and a
+// byte-identical rewrite is a no-op that preserves every token.
+func TestRehydrationProvenanceAwareWrites(t *testing.T) {
+	use := func(id, name, args, sig string) *pbv2.RequestBlock {
+		return &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{
+			Id: id, Name: name, ArgumentsJson: []byte(args), Signature: sig,
+		}}}
+	}
+	h := newHarness(t)
+	req := &pbv2.ChatRequest{Tools: []*pbv2.ToolDef{{
+		Name:           "read",
+		ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"}}}`),
+	}}}
+	req.Messages = []*pbv2.Message{
+		{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}},
+		{Role: "assistant", Blocks: []*pbv2.RequestBlock{
+			use("c1", "read", `{"path":"server.go"}`, "call-sig-1"),
+			use("c2", "read", `{"path":"other.go","i":"existing"}`, "call-sig-2"),
+			use("c3", "grep", `{"pattern":"x"}`, "call-sig-3"),
+		}},
+	}
+	h.SeedCache("intent:c1", "find the bug in server")
+	var modified bool
+	var err error
+	h.Run(func() { modified, err = rehydrateHistoryIntents(req) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !modified {
+		t.Fatal("the eligible calls must be filled")
+	}
+	// The CHANGED blocks (c1, c3) were rewritten and their call-bound tokens
+	// cleared; the SKIPPED sibling (c2 — already carrying "i") is
+	// byte-identical INCLUDING its signature token.
+	got := sdk.ToolCalls(req.Messages[1])
+	if string(got[0].Arguments) == `{"path":"server.go"}` {
+		t.Fatalf("c1 was not filled: %s", got[0].Arguments)
+	}
+	if got[0].Signature != "" {
+		t.Fatalf("a REAL change must clear the designated call's token: %q", got[0].Signature)
+	}
+	if string(got[1].Arguments) != `{"path":"other.go","i":"existing"}` || got[1].Signature != "call-sig-2" {
+		t.Fatalf("the skipped sibling c2 was disturbed: %s sig=%q", got[1].Arguments, got[1].Signature)
+	}
+	if string(got[2].Arguments) == `{"pattern":"x"}` {
+		t.Fatalf("c3 was not filled: %s", got[2].Arguments)
+	}
+	if got[2].Signature != "" {
+		t.Fatalf("a REAL change must clear c3's token: %q", got[2].Signature)
+	}
+
+	// A request where EVERY call already carries "i" is a no-op preserving
+	// every token.
+	req2 := &pbv2.ChatRequest{Tools: req.Tools}
+	req2.Messages = []*pbv2.Message{
+		{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}},
+		{Role: "assistant", Blocks: []*pbv2.RequestBlock{
+			use("c1", "read", `{"path":"server.go","i":"find the bug in server"}`, "call-sig-1"),
+			use("c2", "read", `{"path":"other.go","i":"existing"}`, "call-sig-2"),
+		}},
+	}
+	before := proto.Clone(req2).(*pbv2.ChatRequest)
+	h.Run(func() { modified, err = rehydrateHistoryIntents(req2) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if modified {
+		t.Fatal("an already-filled request must not be rewritten")
+	}
+	if !proto.Equal(req2, before) {
+		t.Fatal("the no-op disturbed the message")
+	}
+}
+
+// TestSystemPromptProvenanceAwareInjection — the injection is
+// provenance-aware over the ordered body: with a system
+// [text, sibling, text, trailing] topology, the LAST text block receives the
+// addendum, the sibling text is untouched, a real change clears the touched
+// text block's token AND the trailing carrier (its covered content changed),
+// and a no-text system message gets a valid appended text block (the
+// trailing carrier removed first).
+func TestSystemPromptProvenanceAwareInjection(t *testing.T) {
+	text := func(s, sig string) *pbv2.RequestBlock {
+		return &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: s, Signature: sig}}}
+	}
+	trailing := func() *pbv2.RequestBlock {
+		return &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_TrailingSignature{TrailingSignature: &pbv2.RequestTrailingSignatureBlock{Signature: "trail-sig"}}}
+	}
+	h := newHarness(t)
+	req := &pbv2.ChatRequest{Tools: []*pbv2.ToolDef{{
+		Name:           "read",
+		ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"}}}`),
+	}}}
+	req.Messages = []*pbv2.Message{
+		{Role: "system", Blocks: []*pbv2.RequestBlock{
+			text("first part", "text-sig-1"),
+			text("sibling", "text-sig-2"),
+			text("last part", "text-sig-3"),
+			trailing(),
+		}},
+	}
+	var changed bool
+	var err error
+	h.Run(func() { changed, err = injectSystemPrompt(req) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("the addendum must be injected")
+	}
+	blocks := req.Messages[0].Blocks
+	if !strings.Contains(blocks[2].GetText().Text, "Every tool call has an \"i\" field") {
+		t.Fatalf("the LAST text block must receive the addendum: %q", blocks[2].GetText().Text)
+	}
+	if blocks[1].GetText().Text != "sibling" || blocks[1].GetText().Signature != "text-sig-2" {
+		t.Fatalf("the sibling text was disturbed: %q sig=%q", blocks[1].GetText().Text, blocks[1].GetText().Signature)
+	}
+	if blocks[0].GetText().Text != "first part" || blocks[0].GetText().Signature != "text-sig-1" {
+		t.Fatalf("the first text block was disturbed: %q sig=%q", blocks[0].GetText().Text, blocks[0].GetText().Signature)
+	}
+	if blocks[2].GetText().Signature != "" {
+		t.Fatalf("a real change must clear the touched block's token: %q", blocks[2].GetText().Signature)
+	}
+	if len(blocks) != 3 {
+		t.Fatalf("the trailing carrier must be cleared (covered content changed): %d blocks", len(blocks))
+	}
+
+	// A no-text system message: ReplaceAllText appends a valid text block
+	// (removing a final trailing carrier first).
+	req2 := &pbv2.ChatRequest{Tools: req.Tools}
+	req2.Messages = []*pbv2.Message{
+		{Role: "system", Blocks: []*pbv2.RequestBlock{trailing()}},
+	}
+	h.Run(func() { changed, err = injectSystemPrompt(req2) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("the no-text system message must be injected")
+	}
+	blocks2 := req2.Messages[0].Blocks
+	if len(blocks2) != 1 || blocks2[0].GetText() == nil {
+		t.Fatalf("the no-text path must yield exactly one text block: %+v", blocks2)
+	}
+	if blocks2[0].GetText().Text != addendum {
+		t.Fatalf("the appended text is wrong: %q", blocks2[0].GetText().Text)
+	}
+}

@@ -33,7 +33,7 @@ func TestManifestPermissionSetExact(t *testing.T) {
 		got = append(got, p.Name)
 	}
 	sort.Strings(got)
-	want := []string{"env.meta_get", "env.meta_set", "ir.stream.write"}
+	want := []string{"env.meta_get", "env.meta_set", "ir.stream.write", "ir.tools.write"}
 	if len(got) != len(want) {
 		t.Fatalf("permissions = %v, want %v", got, want)
 	}

@@ -7,7 +7,7 @@
   "minimum_torana_version": "0.1.0",
   "failure_mode": "pass",
   "repository": "https://github.com/torana-edge/torana-plugins",
-  "description": "OpenTelemetry per-request metrics: request shape on the way in; latency, status class, and token usage (from the host's _response signal) on the way out",
+  "description": "OpenTelemetry per-request metrics: request shape on the way in; latency, status class, and token usage on the way out",
   "hooks": [
     {
       "name": "run_before_request"
