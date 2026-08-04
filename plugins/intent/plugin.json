@@ -3,7 +3,7 @@
   "id": "torana/intent",
   "name": "intent",
   "version": "0.1.0",
-  "abi_version": "v1",
+  "abi_version": "v2",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "pass",
   "repository": "https://github.com/torana-edge/torana-plugins",
@@ -54,8 +54,20 @@
       "description": "System prompt convention injection"
     },
     {
+      "name": "ir.messages.write.tool",
+      "description": "System-prompt prepend shifts the tool-role section"
+    },
+    {
+      "name": "ir.messages.write.user",
+      "description": "System-prompt prepend shifts the user-role section"
+    },
+    {
       "name": "ir.stream.write",
       "description": "Assembled tool-call stream events"
+    },
+    {
+      "name": "ir.tool_results.write",
+      "description": "System-prompt prepend shifts the position-keyed tool-results section"
     },
     {
       "name": "ir.tools.write",

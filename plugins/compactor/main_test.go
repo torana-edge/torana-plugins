@@ -373,7 +373,7 @@ func TestModelPathAppliesWithV2OffloadShape(t *testing.T) {
 		t.Fatal("offload payload missing the intent")
 	}
 	if strings.Contains(offloadArgs, "[truncated]") {
-		t.Fatal("default max_offload_input_chars=0 must send the FULL output, not a truncated one")
+		t.Fatal("default max_offload_input_bytes=0 must send the FULL output, not a truncated one")
 	}
 	// The transformation cache entry exists (best-effort write).
 	cached := false
@@ -738,7 +738,7 @@ func TestMinOffloadCharsBoundary(t *testing.T) {
 	}
 }
 
-// TestTruncationMarkerInOffloadPayload — a positive max_offload_input_chars
+// TestTruncationMarkerInOffloadPayload — a positive max_offload_input_bytes
 // truncates head+tail in the offload payload; the tool result itself is never
 // truncated.
 func TestTruncationMarkerInOffloadPayload(t *testing.T) {

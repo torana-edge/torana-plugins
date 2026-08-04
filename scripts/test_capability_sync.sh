@@ -38,6 +38,19 @@ if [[ -z "$pin" ]]; then
   exit 1
 fi
 
+# The checked-in SDK_REF must name the SAME revision every module pins (the
+# atomic Migration-C contract): a drift between the reference and the pins
+# fails here, never silently.
+expected_ref=$(cat "$root/SDK_REF" 2>/dev/null || true)
+if [[ -z "$expected_ref" ]]; then
+  echo "capability sync: SDK_REF is empty or missing" >&2
+  exit 1
+fi
+if [[ "$pin" != *"$expected_ref"* ]]; then
+  echo "capability sync: SDK_REF $expected_ref does not match the pinned revision $pin" >&2
+  exit 1
+fi
+
 # Resolve the agreed pin through Go module resolution (GOWORK=off) from a
 # plugin module: a CLEAN checkout must work without a pre-warmed cache — the
 # resolver downloads the declared dependency and returns its module directory.

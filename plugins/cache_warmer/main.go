@@ -350,7 +350,10 @@ func persistStop(key string, entry *warmEntry) {
 
 // refreshOne decides and, if warranted, sends — under the write-ahead
 // reservation. It mutates entry in place and reports whether a refresh was
-// sent, a human-readable outcome, and any error that must surface on the tick.
+// CONFIRMED COMPLETED (a cache hit or a rebuilt cache — the host's Actions
+// field counts completed refreshes; refused or unknown-outcome sends are
+// attempts, not actions, and still carry their explanatory note), a
+// human-readable outcome, and any error that must surface on the tick.
 //
 // State machine (per entry): fresh -> due -> pending -> done.
 //
@@ -404,7 +407,7 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 	if endsWithUnansweredToolCall(req) {
 		entry.Stopped = "prefix ends on an unanswered tool call"
 		persistStop(key, entry)
-		return false, "", nil
+		return false, fmt.Sprintf("%s: stopped, prefix ends on an unanswered tool call", short(entry.ConversationID)), nil
 	}
 
 	// No-spend gates next: nothing durable happens until every one passes.
@@ -501,20 +504,21 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 			if isAdvisory(err) {
 				entry.Stopped = "refresh failed"
 				persistStop(key, entry)
-				return true, fmt.Sprintf("%s: stopped, refresh failed", short(entry.ConversationID)), nil
+				return false, fmt.Sprintf("%s: stopped, refresh failed", short(entry.ConversationID)), nil
 			}
 			// Contract/protocol refusal: surface on the tick. The durable
 			// pending reservation still prevents replay.
 			return true, "", err
 		case res.HTTPStatus != 0:
 			// Upstream non-2xx: the provider refused the refresh. The result
-			// carries the status; no string branching.
+			// carries the status; no string branching. Not a completed
+			// action.
 			entry.Stopped = "refresh failed"
 			persistStop(key, entry)
-			return true, fmt.Sprintf("%s: stopped, refresh failed (HTTP %d)", short(entry.ConversationID), res.HTTPStatus), nil
+			return false, fmt.Sprintf("%s: stopped, refresh failed (HTTP %d)", short(entry.ConversationID), res.HTTPStatus), nil
 		default:
 			// Local/protocol decode defect.
-			return true, "", err
+			return false, "", err
 		}
 	}
 
@@ -541,10 +545,11 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 		return true, "", nil
 	default:
 		// Missing usage or both counters zero: unknown outcome. Never clear
-		// the stopped/pending state and never retry automatically.
+		// the stopped/pending state and never retry automatically. Not a
+		// completed action.
 		entry.Stopped = "refresh outcome unknown"
 		persistStop(key, entry)
-		return true, fmt.Sprintf("%s: stopped, refresh outcome unknown", short(entry.ConversationID)), nil
+		return false, fmt.Sprintf("%s: stopped, refresh outcome unknown", short(entry.ConversationID)), nil
 	}
 }
 
