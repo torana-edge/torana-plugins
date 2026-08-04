@@ -31,17 +31,28 @@
 // save it, and would fail Torana's determinism test — which is the test that
 // exists to catch precisely this class of bug.
 //
-// # v2 semantics
+// # v2 semantics (ordered ABI, cache-tier reconciliation)
 //
 //   - The only request mutation is the cache breakpoint marker, governed by
 //     the dedicated ir.cache_control.write grant — never content, role, tool
-//     schema, or any other field.
-//   - The prefix fingerprint is LOSSLESS: the canonical prefix projection
-//     (model + complete tool definitions + complete messages through the
-//     breakpoint) is protobuf-marshaled deterministically and hashed with
-//     sdk.ContentAddressedCacheKey. A reflection-backed inventory forces a
-//     deliberate test update when a proto field is added, so no field can
-//     silently escape the fingerprint.
+//     schema, or any other field. The marker is applied with the SDK's
+//     exact-carrier operation (ReplaceLastCacheBreakpoint): it replaces the
+//     LAST EXISTING carrier in the tools-first/outer/nested order, never
+//     inserts or guesses a position, and is atomic — every error leaves the
+//     request unchanged.
+//   - The decision key is the SDK-owned observable request prefix
+//     (RequestObservablePrefix) under this plugin's decision domain — the
+//     SAME projection the Edge host frames its cache key from (parity
+//     invariant I1): the projection owns the full-domain validation gate and
+//     the marker/truncation model, so no second request-prefix algorithm
+//     exists to drift. The projection excludes only stream and host
+//     metadata; provider extensions, safety settings, and the generation
+//     params fold (they are model-visible prefix state).
+//   - Fail-closed parity (I3): a projection error declines the request
+//     BEFORE any state lookup/write or mutation; the no-marker sentinel
+//     (ErrNoCacheBreakpoint) also declines without state or mutation — this
+//     plugin never decides that something should be cached, it only chooses
+//     which lifetime to buy for an existing carrier.
 //   - State refusals split by class: advisory declines safely (the request
 //     passes unchanged); contract/protocol failures error the hook. Corrupt
 //     stored JSON is key-local. The decision persistence must succeed before
@@ -133,12 +144,26 @@ func init() {
 			return sdk.PassRequest(), nil
 		}
 
+		// Fail-closed parity (I3): the SDK-owned observable projection is the
+		// single gate. An out-of-domain request declines BEFORE any state
+		// lookup/write or mutation.
+		prefix, err := pbv2.RequestObservablePrefix(req)
+		if err != nil {
+			return sdk.PassRequest(), nil
+		}
+
 		// The request must already carry a breakpoint. This plugin chooses
 		// which lifetime to buy; it never decides that something should be
-		// cached.
-		idx := lastCacheBreakpoint(req)
-		if idx < 0 {
-			return sdk.PassRequest(), nil
+		// cached. The no-marker sentinel is the SDK's only oracle that does
+		// not re-implement the carrier traversal: probe a DISCARDED clone —
+		// atomic, no mutation of the live request, no state — and decline on
+		// ErrNoCacheBreakpoint.
+		probe := proto.Clone(req).(*pbv2.ChatRequest)
+		if _, err := pbv2.ReplaceLastCacheBreakpoint(probe, noMarkerProbeBytes); err != nil {
+			if errors.Is(err, pbv2.ErrNoCacheBreakpoint) {
+				return sdk.PassRequest(), nil
+			}
+			return sdk.RequestResult{}, err
 		}
 
 		meta := readHostMeta(req)
@@ -156,10 +181,10 @@ func init() {
 			return sdk.PassRequest(), nil
 		}
 
-		prefixKey := cachePrefixKey(req)
-		if prefixKey == "" {
-			return sdk.PassRequest(), nil
-		}
+		// The decision domain framing over the shared projection (parity
+		// invariant I1): identical observable prefixes key the same sticky
+		// decision; the projection error already declined above.
+		prefixKey := sdk.ContentAddressedCacheKey("tier", string(prefix))
 
 		now, clockErr := sdk.Now()
 
@@ -203,12 +228,16 @@ func init() {
 			case clockErr != nil:
 				// Advisory clock failure: the decision is already sticky and
 				// byte-identical, so reapplying it is safe.
-				if applyMarker(req, idx, prior.Marker) {
+				if changed, err := replaceMarker(req, prior.Marker); err != nil {
+					return sdk.RequestResult{}, err
+				} else if changed {
 					return sdk.ReplaceRequest(req), nil
 				}
 				return sdk.PassRequest(), nil
 			case !decisionExpired(prior, now):
-				if applyMarker(req, idx, prior.Marker) {
+				if changed, err := replaceMarker(req, prior.Marker); err != nil {
+					return sdk.RequestResult{}, err
+				} else if changed {
 					return sdk.ReplaceRequest(req), nil
 				}
 				return sdk.PassRequest(), nil
@@ -275,7 +304,9 @@ func init() {
 		payload, _ := json.Marshal(map[string]any{"counter": "tier_decisions", "delta": 1})
 		_, _, _ = sdk.HostCallExtension("torana_plugin_counter", payload)
 
-		if applyMarker(req, idx, marker) {
+		if changed, err := replaceMarker(req, marker); err != nil {
+			return sdk.RequestResult{}, err
+		} else if changed {
 			return sdk.ReplaceRequest(req), nil
 		}
 		return sdk.PassRequest(), nil
@@ -429,76 +460,38 @@ func logStateError(operation string, err error) {
 	sdk.Log(fmt.Sprintf("cache_tier_selector: %s: %v", operation, err), sdk.LogLevelInfo)
 }
 
-// applyMarker sets the breakpoint marker on the message at idx and reports
-// whether the request changed. An already-matching marker returns false,
-// avoiding a pointless re-serialisation. The ONLY request mutation this
+// noMarkerProbeBytes is the strict-object marker used ONLY for the
+// no-marker sentinel probe on a discarded clone. Its content is irrelevant
+// (the probe result is discarded); the sentinel distinguishes "no carrier"
+// from "carrier exists" without re-implementing the traversal.
+var noMarkerProbeBytes = []byte(`{"type":"ephemeral"}`)
+
+// replaceMarker applies the tier marker with the SDK's exact-carrier
+// operation: the LAST EXISTING carrier (tools-first section, outer block, or
+// nested tool-result content) is replaced; the operation never inserts and
+// is atomic (every error leaves the request unchanged). changed=false when
+// the existing marker bytes are byte-identical — an already-matching marker
+// avoids a pointless re-serialisation. The ONLY request mutation this
 // plugin performs is the cache-control marker — governed by
 // ir.cache_control.write.
-func applyMarker(req *pbv2.ChatRequest, idx int, marker map[string]any) bool {
-	if marker == nil || idx < 0 || idx >= len(req.Messages) {
-		return false
+func replaceMarker(req *pbv2.ChatRequest, marker map[string]any) (bool, error) {
+	if marker == nil {
+		return false, nil
 	}
-	current := sdk.CacheControl(req.Messages[idx])
-	if sameMarker(current, marker) {
-		return false
-	}
-	sdk.SetCacheBreakpoint(req.Messages[idx], marker)
-	return true
-}
-
-func sameMarker(a, b map[string]any) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	ab, err1 := json.Marshal(a)
-	bb, err2 := json.Marshal(b)
-	if err1 != nil || err2 != nil {
-		return false
-	}
-	return string(ab) == string(bb)
-}
-
-// lastCacheBreakpoint returns the index of the last message carrying a cache
-// breakpoint — the boundary of the cached prefix — or -1.
-func lastCacheBreakpoint(req *pbv2.ChatRequest) int {
-	last := -1
-	for i, m := range req.Messages {
-		if len(m.CacheControlJson) > 0 {
-			last = i
-		}
-	}
-	return last
-}
-
-// cachePrefixKey fingerprints the bytes the provider will cache: the model,
-// the COMPLETE tool definitions, and the COMPLETE messages up to and including
-// the breakpoint. The projection is protobuf-marshaled LOSSLESSLY
-// (Deterministic: true — key order is irrelevant in a proto) and hashed with
-// sdk.ContentAddressedCacheKey, so every current and FUTURE nested field of
-// Message/ToolDef/ToolCall flows into the bytes automatically (the
-// reflection-backed inventory in the tests forces a deliberate update when
-// one is added). Deliberately excluded top-level fields: stream, params,
-// provider extensions, safety settings, and host metadata (torana_meta_json)
-// are not part of the provider's cached prefix; suffix messages after the
-// breakpoint are not either.
-func cachePrefixKey(req *pbv2.ChatRequest) string {
-	idx := lastCacheBreakpoint(req)
-	if idx < 0 {
-		return ""
-	}
-	projection := &pbv2.ChatRequest{
-		Model:    req.Model,
-		Tools:    req.Tools,
-		Messages: req.Messages[:idx+1],
-	}
-	raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(projection)
+	raw, err := json.Marshal(marker)
 	if err != nil {
-		return ""
+		return false, err
 	}
-	return sdk.ContentAddressedCacheKey("tier", string(raw))
+	changed, err := pbv2.ReplaceLastCacheBreakpoint(req, raw)
+	if errors.Is(err, pbv2.ErrNoCacheBreakpoint) {
+		// The carrier vanished (e.g. a downstream plugin removed it): decline
+		// without mutation — the sentinel guarantees the request is
+		// unchanged — and without touching state.
+		return false, nil
+	}
+	return changed, err
 }
 
-// hostMeta is the routing context the host publishes on every request.
 type hostMeta struct {
 	Provider       string `json:"_provider"`
 	ConversationID string `json:"_conversation_id"`

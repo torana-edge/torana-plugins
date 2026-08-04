@@ -6,10 +6,10 @@ import (
 	"strings"
 	"testing"
 
+	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 	"github.com/torana-edge/torana-plugin-sdk/sdktest"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // ==========================================================================
@@ -17,7 +17,38 @@ import (
 // ==========================================================================
 
 func msg(role, content string) *pbv2.Message {
-	return &pbv2.Message{Role: role, Content: content, CacheControlJson: []byte(`{"type":"ephemeral"}`)}
+	return &pbv2.Message{Role: role, Blocks: []*pbv2.RequestBlock{
+		{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: content}}},
+		{Kind: &pbv2.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pbv2.RequestCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}},
+	}}
+}
+
+// lastMarkerJSON returns the marker bytes of the LAST cache-breakpoint
+// carrier in the result request (the serialization-order boundary the
+// decision applies to).
+func lastMarkerJSON(t *testing.T, req *pbv2.ChatRequest) []byte {
+	t.Helper()
+	for mi := len(req.Messages) - 1; mi >= 0; mi-- {
+		for bi := len(req.Messages[mi].Blocks) - 1; bi >= 0; bi-- {
+			if cb := req.Messages[mi].Blocks[bi].GetCacheBreakpoint(); cb != nil {
+				return cb.MarkerJson
+			}
+		}
+	}
+	t.Fatal("no marker carrier in the result request")
+	return nil
+}
+
+// decisionKey mirrors the PRODUCTION decision-domain framing (parity
+// invariant I1): the SDK-owned observable projection under this plugin's
+// "tier" domain. The SDK owns the projection and its inventory; the plugin
+// pins that its decision key moves exactly when the observable prefix does.
+func decisionKey(req *pbv2.ChatRequest) string {
+	prefix, err := pbv2.RequestObservablePrefix(req)
+	if err != nil {
+		return ""
+	}
+	return sdk.ContentAddressedCacheKey("tier", string(prefix))
 }
 
 func baseRequest() *pbv2.ChatRequest {
@@ -50,136 +81,80 @@ func TestDecisionWithoutUsableClockOrTTLDoesNotExpire(t *testing.T) {
 	}
 }
 
-// TestFingerprintReflectionInventory — the lossless projection must cover
-// EVERY field of Message, ToolDef, and ToolCall inside the prefix (a future
-// additive proto field cannot silently escape the fingerprint), while the
-// deliberately excluded top-level fields and suffix messages must NOT change
-// the key.
-//
-// Each table builds a PREPARED baseline that already carries its nested
-// object; every row then clones that exact baseline, mutates ONE descriptor
-// field, and compares the two keys. Without the prepared baseline the
-// ToolDef/ToolCall rows would pass merely because a whole nested object
-// appeared in the clone — the targeted field could be dropped from the
-// projection and the test would stay green.
-func TestFingerprintReflectionInventory(t *testing.T) {
-	tables := []struct {
-		name  string
-		build func() *pbv2.ChatRequest
-		pick  func(*pbv2.ChatRequest) protoreflect.Message
-	}{
-		{"Message", func() *pbv2.ChatRequest {
-			return baseRequest()
-		}, func(r *pbv2.ChatRequest) protoreflect.Message { return r.Messages[0].ProtoReflect() }},
-		{"ToolDef", func() *pbv2.ChatRequest {
-			r := baseRequest()
-			r.Tools = []*pbv2.ToolDef{{Name: "read", Description: "d", ParametersJson: []byte(`{}`), CacheControlJson: []byte(`{"type":"ephemeral"}`)}}
-			r.Messages[0].CacheControlJson = []byte(`{"type":"ephemeral"}`)
-			return r
-		}, func(r *pbv2.ChatRequest) protoreflect.Message { return r.Tools[0].ProtoReflect() }},
-		{"ToolCall", func() *pbv2.ChatRequest {
-			r := baseRequest()
-			r.Messages[0].ToolCalls = []*pbv2.ToolCall{{Id: "c1", Name: "read", ArgumentsJson: []byte(`{}`), Signature: "sig"}}
-			return r
-		}, func(r *pbv2.ChatRequest) protoreflect.Message { return r.Messages[0].ToolCalls[0].ProtoReflect() }},
+// TestDecisionKeySensitivity — the parity contract (I1) at the decision-key
+// level. The observable descriptor inventory is OWNED by the SDK
+// (RequestObservablePrefix's bidirectional inventory fails closed on
+// additive fields); this plugin pins the consequence for ITS decision key:
+// every observable field (model, tools, messages, provider extensions,
+// safety settings, generation params) folds into the decision key, while
+// stream and torana_meta_json (the projection's only exclusions) do not.
+func TestDecisionKeySensitivity(t *testing.T) {
+	included := map[string]func(*pbv2.ChatRequest){
+		"model": func(r *pbv2.ChatRequest) { r.Model = "m2" },
+		"tools": func(r *pbv2.ChatRequest) {
+			r.Tools = []*pbv2.ToolDef{{Name: "read", Description: "d", ParametersJson: []byte(`{}`)}}
+		},
+		"messages":                 func(r *pbv2.ChatRequest) { r.Messages[0].Blocks[0].GetText().Text = "changed" },
+		"provider_extensions_json": func(r *pbv2.ChatRequest) { r.ProviderExtensionsJson = []byte(`{"x":1}`) },
+		"safety_settings_json":     func(r *pbv2.ChatRequest) { r.SafetySettingsJson = []byte(`[]`) },
+		"max_tokens":               func(r *pbv2.ChatRequest) { r.MaxTokens = proto.Int32(64) },
+		"temperature":              func(r *pbv2.ChatRequest) { r.Temperature = proto.Float64(0.5) },
+		"top_p":                    func(r *pbv2.ChatRequest) { r.TopP = proto.Float64(0.9) },
+		"stop_sequences":           func(r *pbv2.ChatRequest) { r.StopSequences = []string{"END"} },
 	}
-	for _, tbl := range tables {
-		t.Run(tbl.name, func(t *testing.T) {
-			base := tbl.build()
-			before := cachePrefixKey(base)
+	excluded := map[string]func(*pbv2.ChatRequest){
+		"stream":           func(r *pbv2.ChatRequest) { r.Stream = true },
+		"torana_meta_json": func(r *pbv2.ChatRequest) { r.ToranaMetaJson = []byte(`{"_provider":"x"}`) },
+	}
+	for name, mutate := range included {
+		t.Run("included/"+name, func(t *testing.T) {
+			base := baseRequest()
+			before := decisionKey(base)
 			if before == "" {
-				t.Fatal("fixture has no breakpoint; vacuous")
+				t.Fatal("fixture decision key empty; vacuous")
 			}
-			fields := tbl.pick(base).Descriptor().Fields()
-			for i := 0; i < fields.Len(); i++ {
-				fd := fields.Get(i)
-				t.Run(fd.TextName(), func(t *testing.T) {
-					changed := proto.Clone(base).(*pbv2.ChatRequest)
-					mutateField(t, tbl.pick(changed), fd)
-					if got := cachePrefixKey(changed); got == before {
-						t.Errorf("changing %s did not change the fingerprint — it is part of the cached prefix", fd.TextName())
-					}
-				})
+			mutate(base)
+			if got := decisionKey(base); got == before {
+				t.Errorf("observable field %s did not move the decision key", name)
 			}
 		})
 	}
-
-	// Excluded top-level fields: none of these change the key.
-	for name, mutate := range map[string]func(*pbv2.ChatRequest){
-		"stream":                   func(r *pbv2.ChatRequest) { r.Stream = true },
-		"max_tokens":               func(r *pbv2.ChatRequest) { v := int32(5); r.MaxTokens = &v },
-		"temperature":              func(r *pbv2.ChatRequest) { v := 0.5; r.Temperature = &v },
-		"top_p":                    func(r *pbv2.ChatRequest) { v := 0.5; r.TopP = &v },
-		"stop_sequences":           func(r *pbv2.ChatRequest) { r.StopSequences = []string{"x"} },
-		"provider_extensions_json": func(r *pbv2.ChatRequest) { r.ProviderExtensionsJson = []byte(`{}`) },
-		"safety_settings_json":     func(r *pbv2.ChatRequest) { r.SafetySettingsJson = []byte(`{}`) },
-		"torana_meta_json":         func(r *pbv2.ChatRequest) { r.ToranaMetaJson = []byte(`{"_provider":"x"}`) },
-	} {
+	for name, mutate := range excluded {
 		t.Run("excluded/"+name, func(t *testing.T) {
-			before := cachePrefixKey(baseRequest())
-			changed := baseRequest()
-			mutate(changed)
-			if got := cachePrefixKey(changed); got != before {
-				t.Errorf("excluded field %s changed the fingerprint", name)
+			base := baseRequest()
+			before := decisionKey(base)
+			mutate(base)
+			if got := decisionKey(base); got != before {
+				t.Errorf("excluded field %s moved the decision key", name)
 			}
 		})
 	}
 
-	// Suffix messages after the breakpoint are not part of the cached prefix.
+	// Suffix messages after the boundary are not part of the cached prefix.
 	t.Run("suffix messages excluded", func(t *testing.T) {
-		before := cachePrefixKey(baseRequest())
+		before := decisionKey(baseRequest())
 		extended := baseRequest()
-		extended.Messages = append(extended.Messages, &pbv2.Message{Role: "assistant", Content: "thinking out loud"})
-		if got := cachePrefixKey(extended); got != before {
-			t.Errorf("an unmarked message after the breakpoint changed the fingerprint")
+		extended.Messages = append(extended.Messages, &pbv2.Message{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "thinking out loud"}}}}})
+		if got := decisionKey(extended); got != before {
+			t.Errorf("an unmarked message after the breakpoint changed the decision key")
 		}
 	})
 
 	// Identical prefixes fingerprint identically.
 	t.Run("stable for identical prefixes", func(t *testing.T) {
-		if a, b := cachePrefixKey(baseRequest()), cachePrefixKey(baseRequest()); a != b {
-			t.Errorf("identical requests fingerprinted differently: %q vs %q", a, b)
+		if a, b := decisionKey(baseRequest()), decisionKey(baseRequest()); a != b {
+			t.Fatal("identical prefixes must share a decision key")
 		}
 	})
-}
 
-// mutateField sets a field to a sentinel value so the mutation is visible to
-// the fingerprint. Bytes fields get a non-empty marker; strings get a new
-// value; bools flip; lists get one element.
-func mutateField(t *testing.T, m protoreflect.Message, fd protoreflect.FieldDescriptor) {
-	t.Helper()
-	switch fd.Kind() {
-	case protoreflect.BytesKind:
-		if fd.IsList() {
-			l := m.Mutable(fd).List()
-			if l.Len() == 0 {
-				l.Append(protoreflect.ValueOfBytes([]byte(`{"x":1}`)))
-			}
-		} else {
-			m.Set(fd, protoreflect.ValueOfBytes([]byte(`{"mutated":true}`)))
+	// Fail-closed parity (I3): an out-of-domain request has NO decision key.
+	t.Run("out-of-domain empty key", func(t *testing.T) {
+		bad := baseRequest()
+		bad.Messages[0].Blocks = bad.Messages[0].Blocks[:0]
+		if got := decisionKey(bad); got != "" {
+			t.Fatalf("out-of-domain request got decision key %q; want empty", got)
 		}
-	case protoreflect.StringKind:
-		m.Set(fd, protoreflect.ValueOfString("mutated"))
-	case protoreflect.BoolKind:
-		m.Set(fd, protoreflect.ValueOfBool(!m.Get(fd).Bool()))
-	case protoreflect.Int32Kind:
-		m.Set(fd, protoreflect.ValueOfInt32(int32(m.Get(fd).Int()+1)))
-	case protoreflect.Int64Kind:
-		m.Set(fd, protoreflect.ValueOfInt64(m.Get(fd).Int()+1))
-	case protoreflect.MessageKind, protoreflect.GroupKind:
-		if fd.IsList() {
-			l := m.Mutable(fd).List()
-			if l.Len() == 0 {
-				l.Append(protoreflect.ValueOfMessage(l.NewElement().Message()))
-			} else {
-				l.Set(0, protoreflect.ValueOfMessage((&pbv2.ToolCall{Id: "mutated"}).ProtoReflect()))
-			}
-		} else {
-			m.Set(fd, protoreflect.ValueOfMessage((&pbv2.ToolCall{Id: "mutated"}).ProtoReflect()))
-		}
-	default:
-		t.Fatalf("unsupported field kind %v for %s", fd.Kind(), fd.TextName())
-	}
+	})
 }
 
 // ==========================================================================
@@ -247,11 +222,19 @@ func TestModeOffIsInert(t *testing.T) {
 func TestNoBreakpointPasses(t *testing.T) {
 	h := newHarness(t)
 	h.StubHostCall("torana_cache_pricing", pricingStub())
-	req := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{{Role: "user", Content: "hi"}}}
+	req := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}}}}
 	req.ToranaMetaJson = []byte(`{"_provider":"anthropic"}`)
 	res := h.BeforeRequest(req)
 	if res.Err != nil || !res.PassedThrough {
 		t.Fatalf("no breakpoint must pass, err=%v", res.Err)
+	}
+	// Decline-before-state: the no-marker sentinel declines with NO pricing
+	// call and NO state access.
+	if n := countCommand(h, "torana_cache_pricing"); n != 0 {
+		t.Fatalf("no-breakpoint request called pricing %d times", n)
+	}
+	if n := countCommand(h, "env.state_get"); n != 0 {
+		t.Fatalf("no-breakpoint request accessed state %d times", n)
 	}
 }
 
@@ -285,7 +268,7 @@ func TestStoredDecisionReappliedByteIdentically(t *testing.T) {
 	h.StubHostCall("torana_cache_pricing", pricingStub())
 	h.SetNow(1_000_000)
 	req := reqWith(t, h)
-	key := "decision/" + cachePrefixKey(req)
+	key := "decision/" + decisionKey(req)
 	h.SeedState(key, mustJSON(t, decision{
 		Marker:          map[string]any{"type": "ephemeral", "ttl": "1h"},
 		TierTTL:         3600,
@@ -296,7 +279,7 @@ func TestStoredDecisionReappliedByteIdentically(t *testing.T) {
 	if first.Err != nil || first.Request == nil {
 		t.Fatalf("expected the stored marker applied, err=%v", first.Err)
 	}
-	out := first.Request.Messages[1].CacheControlJson
+	out := lastMarkerJSON(t, first.Request)
 	var marker map[string]any
 	if err := json.Unmarshal(out, &marker); err != nil {
 		t.Fatal(err)
@@ -328,7 +311,7 @@ func TestExpiredDecisionDeletedAndRedecided(t *testing.T) {
 	h.StubHostCall("torana_cache_pricing", pricingStub())
 	h.SetNow(5_000_000)
 	req := reqWith(t, h)
-	key := "decision/" + cachePrefixKey(req)
+	key := "decision/" + decisionKey(req)
 	h.SeedState(key, mustJSON(t, decision{
 		Marker:          map[string]any{"type": "ephemeral", "ttl": "1h"},
 		TierTTL:         3600,
@@ -397,7 +380,7 @@ func TestAutoModeThreshold(t *testing.T) {
 		t.Fatalf("a long gap must buy the long tier, err=%v", res2.Err)
 	}
 	var marker map[string]any
-	if err := json.Unmarshal(res2.Request.Messages[1].CacheControlJson, &marker); err != nil {
+	if err := json.Unmarshal(lastMarkerJSON(t, res2.Request), &marker); err != nil {
 		t.Fatal(err)
 	}
 	if marker["ttl"] != "1h" {
@@ -444,8 +427,8 @@ func TestModesShortAndLong(t *testing.T) {
 	if res2.Err != nil || res2.Request == nil {
 		t.Fatalf("mode long must apply the long marker, err=%v", res2.Err)
 	}
-	if !strings.Contains(string(res2.Request.Messages[1].CacheControlJson), `"ttl":"1h"`) {
-		t.Fatalf("long marker missing: %s", res2.Request.Messages[1].CacheControlJson)
+	if !strings.Contains(string(lastMarkerJSON(t, res2.Request)), `"ttl":"1h"`) {
+		t.Fatalf("long marker missing: %s", lastMarkerJSON(t, res2.Request))
 	}
 }
 
@@ -532,7 +515,7 @@ func TestCorruptDecisionIsKeyLocal(t *testing.T) {
 	h.StubHostCall("torana_cache_pricing", pricingStub())
 	h.SetNow(1_000_000)
 	req := reqWith(t, h)
-	h.SeedState("decision/"+cachePrefixKey(req), "not json")
+	h.SeedState("decision/"+decisionKey(req), "not json")
 	res := h.BeforeRequest(req)
 	if res.Err != nil || !res.PassedThrough {
 		t.Fatalf("corrupt decision JSON must decline for this key, err=%v", res.Err)
@@ -543,15 +526,27 @@ func TestCorruptDecisionIsKeyLocal(t *testing.T) {
 // without re-serialization (no replacement).
 func TestApplyMarkerMatchingMarkerPasses(t *testing.T) {
 	req := baseRequest()
-	if applyMarker(req, 0, map[string]any{"type": "ephemeral"}) {
-		t.Fatal("a matching marker must pass through")
+	changed, err := replaceMarker(req, map[string]any{"type": "ephemeral"})
+	if err != nil || changed {
+		t.Fatalf("a matching marker must pass through (changed=%v err=%v)", changed, err)
 	}
 	req2 := baseRequest()
-	if !applyMarker(req2, 0, map[string]any{"type": "ephemeral", "ttl": "1h"}) {
-		t.Fatal("a changed marker must replace the request")
+	changed, err = replaceMarker(req2, map[string]any{"type": "ephemeral", "ttl": "1h"})
+	if err != nil || !changed {
+		t.Fatalf("a changed marker must replace the request (changed=%v err=%v)", changed, err)
 	}
-	if !strings.Contains(string(req2.Messages[0].CacheControlJson), `"ttl":"1h"`) {
-		t.Fatalf("marker not applied: %s", req2.Messages[0].CacheControlJson)
+	if !strings.Contains(string(lastMarkerJSON(t, req2)), `"ttl":"1h"`) {
+		t.Fatalf("marker not applied: %s", lastMarkerJSON(t, req2))
+	}
+	// No carrier: the sentinel declines without mutation.
+	nomark := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}}}}
+	before := proto.Clone(nomark).(*pbv2.ChatRequest)
+	changed, err = replaceMarker(nomark, map[string]any{"type": "ephemeral"})
+	if err != nil || changed {
+		t.Fatalf("no-carrier sentinel: changed=%v err=%v, want decline", changed, err)
+	}
+	if !proto.Equal(nomark, before) {
+		t.Fatal("the no-carrier sentinel mutated the request")
 	}
 }
 
@@ -641,7 +636,7 @@ func TestDeterminismOverIdenticalRequests(t *testing.T) {
 	h1.StubHostCall("torana_cache_pricing", pricingStub())
 	h1.SetNow(1_000_000)
 	req := reqWith(t, h1)
-	h1.SeedState("decision/"+cachePrefixKey(req), mustJSON(t, decision{
+	h1.SeedState("decision/"+decisionKey(req), mustJSON(t, decision{
 		Marker: map[string]any{"type": "ephemeral", "ttl": "1h"}, TierTTL: 3600, DecidedAtMillis: 900_000,
 	}))
 	r1 := h1.BeforeRequest(req)
@@ -649,7 +644,7 @@ func TestDeterminismOverIdenticalRequests(t *testing.T) {
 	h2.StubHostCall("torana_cache_pricing", pricingStub())
 	h2.SetNow(1_000_000)
 	req2 := reqWith(t, h2)
-	h2.SeedState("decision/"+cachePrefixKey(req2), mustJSON(t, decision{
+	h2.SeedState("decision/"+decisionKey(req2), mustJSON(t, decision{
 		Marker: map[string]any{"type": "ephemeral", "ttl": "1h"}, TierTTL: 3600, DecidedAtMillis: 900_000,
 	}))
 	r2 := h2.BeforeRequest(req2)
@@ -683,7 +678,7 @@ func TestStoredDecisionClockClassification(t *testing.T) {
 		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no clock"), nil
 	})
 	req := reqWith(t, h)
-	h.SeedState("decision/"+cachePrefixKey(req), mustJSON(t, decision{
+	h.SeedState("decision/"+decisionKey(req), mustJSON(t, decision{
 		Marker: map[string]any{"type": "ephemeral", "ttl": "1h"}, TierTTL: 3600, DecidedAtMillis: 900_000,
 	}))
 	res := h.BeforeRequest(req)
@@ -698,7 +693,7 @@ func TestStoredDecisionClockClassification(t *testing.T) {
 		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub"), nil
 	})
 	req2 := reqWith(t, h2)
-	h2.SeedState("decision/"+cachePrefixKey(req2), mustJSON(t, decision{
+	h2.SeedState("decision/"+decisionKey(req2), mustJSON(t, decision{
 		Marker: map[string]any{"type": "ephemeral", "ttl": "1h"}, TierTTL: 3600, DecidedAtMillis: 900_000,
 	}))
 	if res2 := h2.BeforeRequest(req2); res2.Err == nil {
