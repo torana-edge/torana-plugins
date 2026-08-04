@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"strings"
@@ -22,20 +23,37 @@ func msg(role, content string) *pbv2.Message {
 	}}
 }
 
-// lastMarkerJSON returns the marker bytes of the LAST cache-breakpoint
-// carrier in the result request (the serialization-order boundary the
-// decision applies to).
-func lastMarkerJSON(t *testing.T, req *pbv2.ChatRequest) []byte {
+// lastCarrierMarkerJSON returns the marker bytes of the LAST cache-
+// breakpoint carrier in TRUE serialization order: tools first, then
+// messages (outer blocks, then nested tool-result content). The old
+// lastMarkerJSON walked only outer message carriers — tool/nested
+// regressions could pass; the corrected walk matches the SDK model.
+func lastCarrierMarkerJSON(t *testing.T, req *pbv2.ChatRequest) []byte {
 	t.Helper()
-	for mi := len(req.Messages) - 1; mi >= 0; mi-- {
-		for bi := len(req.Messages[mi].Blocks) - 1; bi >= 0; bi-- {
-			if cb := req.Messages[mi].Blocks[bi].GetCacheBreakpoint(); cb != nil {
-				return cb.MarkerJson
+	last := []byte(nil)
+	for _, td := range req.Tools {
+		if len(td.CacheControlJson) > 0 {
+			last = td.CacheControlJson
+		}
+	}
+	for _, m := range req.Messages {
+		for _, b := range m.Blocks {
+			if cb := b.GetCacheBreakpoint(); cb != nil {
+				last = cb.MarkerJson
+			}
+			if tr := b.GetToolResult(); tr != nil {
+				for _, c := range tr.Content {
+					if cb := c.GetCacheBreakpoint(); cb != nil {
+						last = cb.MarkerJson
+					}
+				}
 			}
 		}
 	}
-	t.Fatal("no marker carrier in the result request")
-	return nil
+	if last == nil {
+		t.Fatal("no marker carrier in the result request")
+	}
+	return last
 }
 
 // keyFor is a thin test wrapper over the PRODUCTION decisionKey helper.
@@ -281,7 +299,7 @@ func TestStoredDecisionReappliedByteIdentically(t *testing.T) {
 	if first.Err != nil || first.Request == nil {
 		t.Fatalf("expected the stored marker applied, err=%v", first.Err)
 	}
-	out := lastMarkerJSON(t, first.Request)
+	out := lastCarrierMarkerJSON(t, first.Request)
 	var marker map[string]any
 	if err := json.Unmarshal(out, &marker); err != nil {
 		t.Fatal(err)
@@ -382,7 +400,7 @@ func TestAutoModeThreshold(t *testing.T) {
 		t.Fatalf("a long gap must buy the long tier, err=%v", res2.Err)
 	}
 	var marker map[string]any
-	if err := json.Unmarshal(lastMarkerJSON(t, res2.Request), &marker); err != nil {
+	if err := json.Unmarshal(lastCarrierMarkerJSON(t, res2.Request), &marker); err != nil {
 		t.Fatal(err)
 	}
 	if marker["ttl"] != "1h" {
@@ -429,8 +447,8 @@ func TestModesShortAndLong(t *testing.T) {
 	if res2.Err != nil || res2.Request == nil {
 		t.Fatalf("mode long must apply the long marker, err=%v", res2.Err)
 	}
-	if !strings.Contains(string(lastMarkerJSON(t, res2.Request)), `"ttl":"1h"`) {
-		t.Fatalf("long marker missing: %s", lastMarkerJSON(t, res2.Request))
+	if !strings.Contains(string(lastCarrierMarkerJSON(t, res2.Request)), `"ttl":"1h"`) {
+		t.Fatalf("long marker missing: %s", lastCarrierMarkerJSON(t, res2.Request))
 	}
 }
 
@@ -537,8 +555,8 @@ func TestApplyMarkerMatchingMarkerPasses(t *testing.T) {
 	if err != nil || !changed {
 		t.Fatalf("a changed marker must replace the request (changed=%v err=%v)", changed, err)
 	}
-	if !strings.Contains(string(lastMarkerJSON(t, req2)), `"ttl":"1h"`) {
-		t.Fatalf("marker not applied: %s", lastMarkerJSON(t, req2))
+	if !strings.Contains(string(lastCarrierMarkerJSON(t, req2)), `"ttl":"1h"`) {
+		t.Fatalf("marker not applied: %s", lastCarrierMarkerJSON(t, req2))
 	}
 	// No carrier: the sentinel declines without mutation.
 	nomark := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}}}}
@@ -750,12 +768,24 @@ func TestActivityPersistenceFailureClasses(t *testing.T) {
 // Ordered-carrier hook rows + decline proofs
 // ==========================================================================
 
-// TestCarrierHookRows drives the REAL hook with requests whose marker sits on
-// each of the three SDK carriers (and a mixed tool+outer request), and
-// asserts the sticky re-application lands EXACTLY on the last existing
-// carrier. The decision key comes from the production decisionKey helper, so
-// the seeded state matches what the hook computes.
+// TestCarrierHookRows drives the REAL hook with requests whose marker sits
+// on each of the three SDK carriers (and a mixed tool+outer request), and
+// proves with SINGLE structural equality that the sticky re-application
+// lands EXACTLY on the last existing carrier:
+//
+//  1. the fixture is cloned as the immutable baseline;
+//  2. the EXPECTED request is built independently — only the row-designated
+//     last carrier is changed to the exact deterministic marker bytes
+//     (never via ReplaceLastCacheBreakpoint);
+//  3. proto.Equal(result.Request, expected) — the last carrier changed and
+//     every other request fact stayed identical; the mixed row separately
+//     asserts the earlier tool carrier bytes equal the baseline;
+//  4. the decision is replayed on a fresh fixture clone: the byte-identical
+//     sticky re-application is a pass-through (no replacement);
+//  5. the harness boundary did not mutate the hook input fixture.
 func TestCarrierHookRows(t *testing.T) {
+	marker := map[string]any{"type": "ephemeral", "ttl": "1h"}
+	markerBytes := []byte(mustJSON(t, marker))
 	nestedReq := func() *pbv2.ChatRequest {
 		return &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{
 			{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "a"}}},
@@ -769,10 +799,12 @@ func TestCarrierHookRows(t *testing.T) {
 		}}}}
 	}
 	rows := []struct {
-		name string
-		req  *pbv2.ChatRequest
-		// check asserts the applied marker landed on the exact carrier.
-		check func(t *testing.T, out *pbv2.ChatRequest)
+		name  string
+		req   *pbv2.ChatRequest
+		mixed bool // earlier tool carrier must stay byte-identical
+		// expected mutates the independent expected request: ONLY the
+		// row-designated last carrier receives the exact marker bytes.
+		expected func(t *testing.T, e *pbv2.ChatRequest)
 	}{
 		{
 			"tool carrier",
@@ -781,40 +813,23 @@ func TestCarrierHookRows(t *testing.T) {
 					Tools:    []*pbv2.ToolDef{{Name: "read", Description: "d", ParametersJson: []byte(`{}`), CacheControlJson: []byte(`{"type":"ephemeral"}`)}},
 					Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}}},
 				}
-			}(),
-			func(t *testing.T, out *pbv2.ChatRequest) {
-				if !strings.Contains(string(out.Tools[0].CacheControlJson), `"ttl":"1h"`) {
-					t.Fatalf("tool carrier not replaced: %s", out.Tools[0].CacheControlJson)
-				}
-				for _, m := range out.Messages {
-					for _, b := range m.Blocks {
-						if b.GetCacheBreakpoint() != nil {
-							t.Fatal("a message carrier appeared on a tools-only prefix")
-						}
-					}
-				}
-			},
+			}(), false,
+			func(t *testing.T, e *pbv2.ChatRequest) { e.Tools[0].CacheControlJson = markerBytes },
 		},
 		{
 			"outer carrier",
-			func() *pbv2.ChatRequest { return baseRequest() }(),
-			func(t *testing.T, out *pbv2.ChatRequest) {
-				got := out.Messages[len(out.Messages)-1].Blocks
-				cb := got[len(got)-1].GetCacheBreakpoint()
-				if cb == nil || !strings.Contains(string(cb.MarkerJson), `"ttl":"1h"`) {
-					t.Fatalf("outer carrier not replaced: %+v", got)
-				}
+			func() *pbv2.ChatRequest { return baseRequest() }(), false,
+			func(t *testing.T, e *pbv2.ChatRequest) {
+				msgs := e.Messages[len(e.Messages)-1].Blocks
+				msgs[len(msgs)-1].GetCacheBreakpoint().MarkerJson = markerBytes
 			},
 		},
 		{
 			"nested carrier",
-			nestedReq(),
-			func(t *testing.T, out *pbv2.ChatRequest) {
-				tr := out.Messages[0].Blocks[1].GetToolResult()
-				cb := tr.Content[len(tr.Content)-1].GetCacheBreakpoint()
-				if cb == nil || !strings.Contains(string(cb.MarkerJson), `"ttl":"1h"`) {
-					t.Fatalf("nested carrier not replaced: %+v", tr.Content)
-				}
+			nestedReq(), false,
+			func(t *testing.T, e *pbv2.ChatRequest) {
+				tr := e.Messages[0].Blocks[1].GetToolResult()
+				tr.Content[len(tr.Content)-1].GetCacheBreakpoint().MarkerJson = markerBytes
 			},
 		},
 		{
@@ -823,41 +838,77 @@ func TestCarrierHookRows(t *testing.T) {
 				r := baseRequest()
 				r.Tools = []*pbv2.ToolDef{{Name: "read", Description: "d", ParametersJson: []byte(`{}`), CacheControlJson: []byte(`{"type":"ephemeral"}`)}}
 				return r
-			}(),
-			func(t *testing.T, out *pbv2.ChatRequest) {
-				// The later outer carrier wins: it carries the new marker...
-				msgs := out.Messages[len(out.Messages)-1].Blocks
-				cb := msgs[len(msgs)-1].GetCacheBreakpoint()
-				if cb == nil || !strings.Contains(string(cb.MarkerJson), `"ttl":"1h"`) {
-					t.Fatalf("outer carrier (last) not replaced: %+v", msgs)
-				}
-				// ...and the earlier tool carrier is byte-identical (untouched).
-				if !strings.Contains(string(out.Tools[0].CacheControlJson), `"ephemeral"`) || strings.Contains(string(out.Tools[0].CacheControlJson), `"ttl":"1h"`) {
-					t.Fatalf("earlier tool carrier was disturbed: %s", out.Tools[0].CacheControlJson)
-				}
+			}(), true,
+			func(t *testing.T, e *pbv2.ChatRequest) {
+				msgs := e.Messages[len(e.Messages)-1].Blocks
+				msgs[len(msgs)-1].GetCacheBreakpoint().MarkerJson = markerBytes
+				// The earlier tool carrier stays at the seed marker.
+				e.Tools[0].CacheControlJson = []byte(`{"type":"ephemeral"}`)
 			},
 		},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
+			baseline := proto.Clone(row.req).(*pbv2.ChatRequest)
+			row.req.ToranaMetaJson = []byte(`{"_provider":"anthropic","_conversation_id":"conv-1"}`)
+			// The baseline clone predates the meta injection; capture the
+			// post-meta fixture as the immutable input baseline instead.
+			inputBaseline := proto.Clone(row.req).(*pbv2.ChatRequest)
+
 			h := newHarness(t)
 			h.StubHostCall("torana_cache_pricing", pricingStub())
 			h.SetNow(1_000_000)
-			row.req.ToranaMetaJson = []byte(`{"_provider":"anthropic","_conversation_id":"conv-1"}`)
 			key, has, err := decisionKey(row.req)
 			if err != nil || !has {
 				t.Fatalf("decisionKey: err=%v has=%v, want a marker-present key", err, has)
 			}
 			h.SeedState("decision/"+key, mustJSON(t, decision{
-				Marker:          map[string]any{"type": "ephemeral", "ttl": "1h"},
+				Marker:          marker,
 				TierTTL:         3600,
 				DecidedAtMillis: 900_000,
 			}))
+
 			res := h.BeforeRequest(row.req)
 			if res.Err != nil || res.Request == nil {
 				t.Fatalf("sticky reapplication failed: err=%v", res.Err)
 			}
-			row.check(t, res.Request)
+			// 2+3: independent expected request; single structural equality.
+			expected := proto.Clone(inputBaseline).(*pbv2.ChatRequest)
+			row.expected(t, expected)
+			if !proto.Equal(res.Request, expected) {
+				t.Fatalf("result is not exactly the expected request\n got: %v\nwant: %v", res.Request, expected)
+			}
+			// Mixed row: the earlier tool carrier equals the baseline bytes.
+			if row.mixed {
+				if !bytes.Equal(res.Request.Tools[0].CacheControlJson, inputBaseline.Tools[0].CacheControlJson) {
+					t.Fatalf("earlier tool carrier disturbed: %s != %s", res.Request.Tools[0].CacheControlJson, inputBaseline.Tools[0].CacheControlJson)
+				}
+			}
+			// 4: seed the decision at the RESULT's key, then replay the
+			// result request — the byte-identical sticky reapplication is a
+			// pass-through (no replacement).
+			resultKey, _, err := decisionKey(res.Request)
+			if err != nil {
+				t.Fatalf("decisionKey(result): %v", err)
+			}
+			h.SeedState("decision/"+resultKey, mustJSON(t, decision{
+				Marker:          marker,
+				TierTTL:         3600,
+				DecidedAtMillis: 900_000,
+			}))
+			replay := proto.Clone(res.Request).(*pbv2.ChatRequest)
+			res2 := h.BeforeRequest(replay)
+			if res2.Err != nil || !res2.PassedThrough {
+				t.Fatalf("byte-identical replay must pass through, err=%v", res2.Err)
+			}
+			// 5: the only mutation the hook input fixture can have suffered
+			// is the plugin's own in-place marker apply — it must end EXACTLY
+			// as the expected request (any other change would be an
+			// unexpected harness-boundary mutation).
+			if !proto.Equal(row.req, expected) {
+				t.Fatal("the hook input fixture was mutated beyond the applied marker")
+			}
+			_ = baseline
 		})
 	}
 }
@@ -888,10 +939,16 @@ func TestDeclineProofsZeroCallsNoMutation(t *testing.T) {
 			if !proto.Equal(row.req, before) {
 				t.Fatal("the decline mutated the request")
 			}
-			for _, c := range h.Calls() {
-				if c.Command != "env.plugin_config" {
-					t.Fatalf("decline made an unexpected host call: %s", c.Command)
+			// EXACT call multiset: exactly one env.plugin_config (the mode
+			// read) and nothing else — zero pricing, zero state, zero of
+			// anything.
+			calls := h.Calls()
+			if len(calls) != 1 || calls[0].Command != "env.plugin_config" {
+				var got []string
+				for _, c := range calls {
+					got = append(got, c.Command)
 				}
+				t.Fatalf("decline call multiset = %v, want exactly [env.plugin_config]", got)
 			}
 		})
 	}
