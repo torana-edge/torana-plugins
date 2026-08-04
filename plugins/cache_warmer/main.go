@@ -55,14 +55,16 @@ import (
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	"google.golang.org/protobuf/proto"
 )
 
 func main() {}
 
 // schemaVersion marks the durable entry format written by this plugin. Any
-// other version — including anything a v1 plugin stored — is stopped with
-// zero sends.
-const schemaVersion = 2
+// other version — including anything a v1/v2 plugin stored — is stopped with
+// zero sends. v3 added the domain-separated PrefixFingerprint; there is NO
+// v2 fallback/decoder (pre-release policy).
+const schemaVersion = 3
 
 // warmEntry is everything needed to refresh one conversation, stored durably so
 // a restart does not lose track of what it was keeping alive.
@@ -73,11 +75,17 @@ type warmEntry struct {
 	Model          string `json:"model"`
 	Path           string `json:"path"`
 
-	// PrefixPB is the base64 protobuf of the cached prefix: the conversation
-	// truncated at its last cache breakpoint. Storing the prefix rather than
-	// the whole conversation keeps the refresh request small and means the
-	// bytes sent are exactly the bytes the provider has cached.
+	// PrefixPB is the base64 protobuf of the SANITIZED REPLAY REQUEST: a
+	// clone of the accepted request with stream=false and torana_meta_json
+	// cleared, preserving every provider-visible field and ordered block
+	// exactly. It is the artifact replayed on a warming tick (with
+	// max_tokens set to 1), not a truncated prefix.
 	PrefixPB string `json:"prefix_pb"`
+
+	// PrefixFingerprint is the fixed, domain-separated digest of the SDK
+	// observable projection at observation time — the identity the replay
+	// must match. v3 schema; required non-empty before any pricing call.
+	PrefixFingerprint string `json:"prefix_fingerprint"`
 
 	LastRefreshMillis int64 `json:"last_refresh_millis"`
 	LastSeenMillis    int64 `json:"last_seen_millis"`
@@ -181,16 +189,35 @@ func init() {
 			return sdk.PassRequest(), nil
 		}
 
-		prefix := prefixThroughBreakpoint(req)
-		if prefix == nil {
-			// No breakpoint means no explicitly cached prefix to refresh.
+		// The SDK-owned projection is the identity oracle (I1 parity with the
+		// host cache key): an out-of-domain request declines with NO entry
+		// (I3), and no marker means no explicitly cached prefix to refresh.
+		prefix, hasBreakpoint, err := pbv2.RequestObservablePrefix(req)
+		if err != nil {
 			return sdk.PassRequest(), nil
 		}
-		encoded, err := sdk.EncodeRequest(prefix)
+		if !hasBreakpoint {
+			return sdk.PassRequest(), nil
+		}
+
+		// The replay artifact is the SANITIZED full request (never the hook
+		// input): stream=false and torana_meta_json cleared, every
+		// provider-visible field and ordered block preserved exactly.
+		replay := sanitizeReplay(req)
+
+		// A replay already known to be unsendable (an assistant final turn
+		// with any tool_use block) declines BEFORE the clock and before any
+		// state write — with no entry, so an existing valid warm entry is
+		// never overwritten with an artifact the next tick must stop.
+		if endsWithUnansweredToolCall(replay) {
+			return sdk.PassRequest(), nil
+		}
+
+		encoded, err := sdk.EncodeRequest(replay)
 		if err != nil {
 			// Local encode failure: a protocol/plugin defect, not a condition
 			// to absorb.
-			return sdk.RequestResult{}, fmt.Errorf("cache_warmer: encode prefix: %w", err)
+			return sdk.RequestResult{}, fmt.Errorf("cache_warmer: encode replay: %w", err)
 		}
 
 		// A plugin without the clock cannot reason about elapsed time at all,
@@ -206,13 +233,14 @@ func init() {
 			return sdk.RequestResult{}, err
 		}
 		entry := warmEntry{
-			SchemaVersion:  schemaVersion,
-			ConversationID: meta.ConversationID,
-			Provider:       meta.Provider,
-			Model:          req.Model,
-			Path:           meta.Path,
-			PrefixPB:       encoded,
-			LastSeenMillis: now,
+			SchemaVersion:     schemaVersion,
+			ConversationID:    meta.ConversationID,
+			Provider:          meta.Provider,
+			Model:             req.Model,
+			Path:              meta.Path,
+			PrefixPB:          encoded,
+			PrefixFingerprint: prefixFingerprint(prefix),
+			LastSeenMillis:    now,
 		}
 		// A real turn resets the budget: the user is active, the cache was just
 		// refreshed for free, and whatever was spent before is spent.
@@ -336,7 +364,50 @@ func persistStop(key string, entry *warmEntry) {
 //     pending entry, so a later tick sends zero (replay/crash invariant; the
 //     sequential scheduler needs no CAS).
 func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, string, error) {
-	// No-spend gates first: nothing durable happens until every one passes.
+	// REPLAY INTEGRITY FIRST (batch-3 boundary): every validation below runs
+	// BEFORE pricing. Each failure stops the entry with ZERO pricing and ZERO
+	// sends, and the stop reason is persisted durably.
+	req, err := sdk.DecodeRequest(entry.PrefixPB)
+	if err != nil {
+		entry.Stopped = "stored prefix is unreadable"
+		persistStop(key, entry)
+		return false, "", nil
+	}
+	if req.Model != entry.Model {
+		entry.Stopped = "stored prefix model mismatch"
+		persistStop(key, entry)
+		return false, "", nil
+	}
+	// SDK replacement domain + marker presence (the projection is the same
+	// identity oracle the request path used).
+	prefix, hasBreakpoint, err := pbv2.RequestObservablePrefix(req)
+	if err != nil {
+		entry.Stopped = "stored prefix is out of domain"
+		persistStop(key, entry)
+		return false, "", nil
+	}
+	if !hasBreakpoint {
+		entry.Stopped = "stored prefix has no cache breakpoint"
+		persistStop(key, entry)
+		return false, "", nil
+	}
+	// The warmed identity must be the priced identity: the recomputed
+	// domain-separated fingerprint has to equal the stored one.
+	if prefixFingerprint(prefix) != entry.PrefixFingerprint {
+		entry.Stopped = "stored prefix drifted"
+		persistStop(key, entry)
+		return false, "", nil
+	}
+	// Defensive durable-state validation (the request path already declined
+	// terminal suffixes before storing): a prefix ending on an unanswered
+	// tool call is not sendable on its own.
+	if endsWithUnansweredToolCall(req) {
+		entry.Stopped = "prefix ends on an unanswered tool call"
+		persistStop(key, entry)
+		return false, "", nil
+	}
+
+	// No-spend gates next: nothing durable happens until every one passes.
 	pricing, err := sdk.GetCachePricing(entry.Provider, entry.Model)
 	if err != nil {
 		if isAdvisory(err) {
@@ -397,32 +468,6 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 	}
 	if now-last < interval {
 		return false, "", nil // not due yet
-	}
-
-	req, err := sdk.DecodeRequest(entry.PrefixPB)
-	if err != nil {
-		entry.Stopped = "stored prefix is unreadable"
-		persistStop(key, entry)
-		return false, "", nil
-	}
-	if req.Model != entry.Model {
-		entry.Stopped = "stored prefix model mismatch"
-		persistStop(key, entry)
-		return false, fmt.Sprintf("%s: stopped, stored prefix model mismatch", short(entry.ConversationID)), nil
-	}
-	// A prefix ending on an unanswered tool call is not a request that can be
-	// sent on its own — the provider expects a tool result next, and rejects
-	// the turn without one.
-	if endsWithUnansweredToolCall(req) {
-		entry.Stopped = "prefix ends on an unanswered tool call"
-		persistStop(key, entry)
-		return false, fmt.Sprintf("%s: stopped, cached prefix ends mid tool call",
-			short(entry.ConversationID)), nil
-	}
-	if prefixThroughBreakpoint(req) == nil {
-		entry.Stopped = "stored prefix has no cache breakpoint"
-		persistStop(key, entry)
-		return false, fmt.Sprintf("%s: stopped, stored prefix has no cache breakpoint", short(entry.ConversationID)), nil
 	}
 
 	// WRITE-AHEAD RESERVATION: persist the pending state BEFORE spending. If
@@ -505,32 +550,45 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 
 // endsWithUnansweredToolCall reports whether the last message is an assistant
 // turn holding tool calls that nothing answers.
+// endsWithUnansweredToolCall reports whether the FINAL message is an
+// assistant turn containing any tool_use block (ordered request-block
+// model) — a prefix ending on an unanswered tool call is not a request that
+// can be sent on its own, and the provider rejects the turn without a tool
+// result. The check inspects only the final message's explicit blocks; it is
+// NOT a general body traversal.
 func endsWithUnansweredToolCall(req *pbv2.ChatRequest) bool {
 	if len(req.Messages) == 0 {
 		return false
 	}
 	last := req.Messages[len(req.Messages)-1]
-	return last.Role == "assistant" && len(last.ToolCalls) > 0
-}
-
-// prefixThroughBreakpoint returns a copy of the request truncated at its last
-// cache breakpoint — the bytes the provider actually has cached.
-func prefixThroughBreakpoint(req *pbv2.ChatRequest) *pbv2.ChatRequest {
-	last := -1
-	for i, m := range req.Messages {
-		if len(m.CacheControlJson) > 0 {
-			last = i
+	if last.Role != "assistant" {
+		return false
+	}
+	for _, b := range last.Blocks {
+		if b.GetToolUse() != nil {
+			return true
 		}
 	}
-	if last < 0 {
-		return nil
-	}
-	clone := &pbv2.ChatRequest{
-		Model:    req.Model,
-		Tools:    req.Tools,
-		Messages: req.Messages[:last+1],
-	}
-	return clone
+	return false
+}
+
+// sanitizeReplay builds the replay artifact: a CLONE of the accepted request
+// with stream=false and torana_meta_json cleared, preserving every
+// provider-visible field and ordered block exactly. The hook input is never
+// mutated.
+func sanitizeReplay(req *pbv2.ChatRequest) *pbv2.ChatRequest {
+	out := proto.Clone(req).(*pbv2.ChatRequest)
+	out.Stream = false
+	out.ToranaMetaJson = nil
+	return out
+}
+
+// prefixFingerprint is the ONE production helper for the durable identity: a
+// fixed, domain-separated digest of the SDK observable projection, used on
+// BOTH write and replay validation. The projection bytes themselves are
+// unbounded and never stored in JSON state.
+func prefixFingerprint(prefix []byte) string {
+	return sdk.ContentAddressedCacheKey("cache_warmer/prefix", string(prefix))
 }
 
 type hostMeta struct {
@@ -568,6 +626,9 @@ func validateEntry(entry *warmEntry, key string) string {
 	}
 	if entry.RefreshesSpent < 0 || entry.LastSeenMillis < 0 || entry.LastRefreshMillis < 0 ||
 		entry.DeadlineMillis < 0 || entry.AttemptMillis < 0 {
+		return "invalid warm entry"
+	}
+	if entry.PrefixFingerprint == "" {
 		return "invalid warm entry"
 	}
 	if entry.Stopped == "" && entry.AttemptMillis != 0 {

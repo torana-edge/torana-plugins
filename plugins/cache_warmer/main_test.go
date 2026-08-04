@@ -10,6 +10,7 @@ import (
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 	"github.com/torana-edge/torana-plugin-sdk/sdktest"
+	"google.golang.org/protobuf/proto"
 )
 
 // ==========================================================================
@@ -25,22 +26,59 @@ func newHarness(t *testing.T) *sdktest.Harness {
 
 const warmerCfg = `{"conversations":"conv-1","warm_for_minutes":45}`
 
-// warmPrefix encodes a valid cached prefix (a request ending at a cache
-// breakpoint) exactly as the request path stores it.
-func warmPrefix(t *testing.T) string {
-	t.Helper()
-	req := &pbv2.ChatRequest{
+// warmRequest is a valid ordered-ABI request carrying a cache-breakpoint
+// carrier (the last marker on the system message), exactly as the request
+// path observes one.
+func warmRequest() *pbv2.ChatRequest {
+	return &pbv2.ChatRequest{
 		Model: "claude-sonnet-4",
 		Messages: []*pbv2.Message{
-			{Role: "system", Content: "you are a coding agent", CacheControlJson: []byte(`{"type":"ephemeral"}`)},
-			{Role: "user", Content: "find the bug"},
+			{Role: "system", Blocks: []*pbv2.RequestBlock{
+				{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "you are a coding agent"}}},
+				{Kind: &pbv2.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pbv2.RequestCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}},
+			}},
+			{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "find the bug"}}}}},
 		},
 	}
-	enc, err := sdk.EncodeRequest(req)
+}
+
+// warmPrefix encodes the sanitized replay request exactly as the request
+// path stores it.
+func warmPrefix(t *testing.T) string {
+	t.Helper()
+	enc, err := sdk.EncodeRequest(warmRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
 	return enc
+}
+
+// warmFingerprint is the domain-separated fingerprint of the SAME request,
+// via the production helper (write and replay must agree).
+func warmFingerprint(t *testing.T) string {
+	t.Helper()
+	prefix, _, err := pbv2.RequestObservablePrefix(warmRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return prefixFingerprint(prefix)
+}
+
+// textMsg builds an ordered message: text block, plus the cache-breakpoint
+// carrier when marker is true.
+func textMsg(role, text string, marker bool) *pbv2.Message {
+	blocks := []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: text}}}}
+	if marker {
+		blocks = append(blocks, &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pbv2.RequestCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}})
+	}
+	return &pbv2.Message{Role: role, Blocks: blocks}
+}
+
+// uReq is a minimal opted-in request (user message with a marker + meta).
+func uReq() *pbv2.ChatRequest {
+	req := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{textMsg("user", "u", true)}}
+	req.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
+	return req
 }
 
 // warmEntrySeed builds a due, valid entry.
@@ -53,6 +91,7 @@ func warmEntrySeed(t *testing.T) warmEntry {
 		Model:             "claude-sonnet-4",
 		Path:              "/v1/messages",
 		PrefixPB:          warmPrefix(t),
+		PrefixFingerprint: warmFingerprint(t),
 		LastSeenMillis:    1_000,
 		LastRefreshMillis: 1_000,
 		DeadlineMillis:    0,
@@ -128,11 +167,8 @@ func TestRequestPathStoresOptedInEntryAndPassesThrough(t *testing.T) {
 	h.SetConfig(warmerCfg)
 	h.SetNow(100_000)
 	req := &pbv2.ChatRequest{
-		Model: "claude-sonnet-4",
-		Messages: []*pbv2.Message{
-			{Role: "system", Content: "s", CacheControlJson: []byte(`{"type":"ephemeral"}`)},
-			{Role: "user", Content: "u"},
-		},
+		Model:          "claude-sonnet-4",
+		Messages:       []*pbv2.Message{textMsg("system", "s", true), textMsg("user", "u", false)},
 		ToranaMetaJson: []byte(`{"_provider":"anthropic","_conversation_id":"conv-1","_path":"/v1/messages"}`),
 	}
 	res := h.BeforeRequest(req)
@@ -163,15 +199,15 @@ func TestRequestPathStoresOptedInEntryAndPassesThrough(t *testing.T) {
 func TestRequestPathStoresNothingWhenIneligible(t *testing.T) {
 	for name, setup := range map[string]func(*sdktest.Harness) *pbv2.ChatRequest{
 		"non-opted-in": func(h *sdktest.Harness) *pbv2.ChatRequest {
-			req := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{{Role: "user", Content: "u", CacheControlJson: []byte(`{"type":"ephemeral"}`)}}}
+			req := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{textMsg("user", "u", true)}}
 			req.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"other","_path":"/x"}`)
 			return req
 		},
 		"no meta": func(h *sdktest.Harness) *pbv2.ChatRequest {
-			return &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{{Role: "user", Content: "u", CacheControlJson: []byte(`{"type":"ephemeral"}`)}}}
+			return &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{textMsg("user", "u", true)}}
 		},
 		"no breakpoint": func(h *sdktest.Harness) *pbv2.ChatRequest {
-			req := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{{Role: "user", Content: "u"}}}
+			req := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{textMsg("user", "u", false)}}
 			req.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
 			return req
 		},
@@ -196,7 +232,7 @@ func TestRequestPathStoresNothingWhenIneligible(t *testing.T) {
 	h.StubHostCall("env.now", func(string) (string, error) {
 		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no clock"), nil
 	})
-	req := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{{Role: "user", Content: "u", CacheControlJson: []byte(`{"type":"ephemeral"}`)}}}
+	req := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{textMsg("user", "u", true)}}
 	req.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
 	res := h.BeforeRequest(req)
 	if res.Err != nil || !res.PassedThrough {
@@ -214,7 +250,7 @@ func TestRequestPathDeterminism(t *testing.T) {
 	h.SetConfig(warmerCfg)
 	h.SetNow(100_000)
 	build := func() *pbv2.ChatRequest {
-		req := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{{Role: "user", Content: "u", CacheControlJson: []byte(`{"type":"ephemeral"}`)}}}
+		req := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{textMsg("user", "u", true)}}
 		req.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
 		return req
 	}
@@ -464,20 +500,20 @@ func TestTickNoSpendGates(t *testing.T) {
 // missing breakpoint each stop with zero sends.
 func TestTickEntryValidationStopsWithZeroSends(t *testing.T) {
 	badPrefix := func() string {
-		req := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{{Role: "user", Content: "u", CacheControlJson: []byte(`{"type":"ephemeral"}`)}}}
+		req := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{textMsg("user", "u", true)}}
 		enc, _ := sdk.EncodeRequest(req)
 		return enc
 	}
 	midToolPrefix := func() string {
 		req := &pbv2.ChatRequest{Model: "claude-sonnet-4", Messages: []*pbv2.Message{
-			{Role: "system", Content: "s", CacheControlJson: []byte(`{"type":"ephemeral"}`)},
-			{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "c1", Name: "read"}}},
+			textMsg("system", "s", true),
+			{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "c1", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
 		}}
 		enc, _ := sdk.EncodeRequest(req)
 		return enc
 	}
 	noBreakpointPrefix := func() string {
-		req := &pbv2.ChatRequest{Model: "claude-sonnet-4", Messages: []*pbv2.Message{{Role: "user", Content: "u"}}}
+		req := &pbv2.ChatRequest{Model: "claude-sonnet-4", Messages: []*pbv2.Message{textMsg("user", "u", false)}}
 		enc, _ := sdk.EncodeRequest(req)
 		return enc
 	}
@@ -489,6 +525,15 @@ func TestTickEntryValidationStopsWithZeroSends(t *testing.T) {
 		{"unreadable prefix", func(e *warmEntry) { e.PrefixPB = "not base64 protobuf" }},
 		{"mid tool call", func(e *warmEntry) { e.PrefixPB = midToolPrefix() }},
 		{"model mismatch", func(e *warmEntry) { e.PrefixPB = badPrefix() }},
+		{"fingerprint drift", func(e *warmEntry) { e.PrefixFingerprint = "deadbeef" }},
+		{"missing fingerprint", func(e *warmEntry) { e.PrefixFingerprint = "" }},
+		{"out of domain replay", func(e *warmEntry) {
+			bad := warmRequest()
+			bad.Messages[0].Blocks = bad.Messages[0].Blocks[:0]
+			enc, _ := sdk.EncodeRequest(bad)
+			e.PrefixPB = enc
+		}},
+		{"v2 schema", func(e *warmEntry) { e.SchemaVersion = 2 }},
 		{"missing provider", func(e *warmEntry) { e.Provider = "" }},
 		{"missing path", func(e *warmEntry) { e.Path = "" }},
 		{"negative accounting", func(e *warmEntry) { e.RefreshesSpent = -1 }},
@@ -822,3 +867,238 @@ func TestTickIntervalOverrideBoundary(t *testing.T) {
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }
+
+// ==========================================================================
+// Ordered-ABI port pins (checkpoint REV 3)
+// ==========================================================================
+
+// TestRequestPathSanitizedReplayAndFingerprint — the stored artifact is the
+// SANITIZED replay request (stream=false, torana_meta_json cleared, every
+// provider-visible field/block preserved), the fingerprint is the fixed
+// domain-separated production digest, and the hook input is never mutated.
+func TestRequestPathSanitizedReplayAndFingerprint(t *testing.T) {
+	h := newHarness(t)
+	h.SetConfig(warmerCfg)
+	h.SetNow(100_000)
+	req := &pbv2.ChatRequest{
+		Model:          "claude-sonnet-4",
+		Stream:         true,
+		Messages:       []*pbv2.Message{textMsg("system", "s", true), textMsg("user", "u", false)},
+		ToranaMetaJson: []byte(`{"_provider":"anthropic","_conversation_id":"conv-1","_path":"/v1/messages","_request_headers":"x"}`),
+	}
+	before := proto.Clone(req).(*pbv2.ChatRequest)
+	res := h.BeforeRequest(req)
+	if res.Err != nil || !res.PassedThrough {
+		t.Fatalf("must pass through, err=%v", res.Err)
+	}
+	if !proto.Equal(req, before) {
+		t.Fatal("the request path mutated the hook input")
+	}
+	raw, ok := h.State("warm/conv-1")
+	if !ok {
+		t.Fatal("no entry stored")
+	}
+	var entry warmEntry
+	if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+		t.Fatal(err)
+	}
+	// Decoded replay == the INDEPENDENT sanitized expected (clone with
+	// stream=false + meta cleared; nothing else changes).
+	decoded, err := sdk.DecodeRequest(entry.PrefixPB)
+	if err != nil {
+		t.Fatalf("decode replay: %v", err)
+	}
+	expected := sanitizeReplay(req)
+	if !proto.Equal(decoded, expected) {
+		t.Fatalf("replay is not the sanitized request\n got: %v\nwant: %v", decoded, expected)
+	}
+	if decoded.Stream {
+		t.Fatal("the replay must be non-streaming")
+	}
+	if len(decoded.ToranaMetaJson) != 0 {
+		t.Fatalf("the replay must clear torana_meta_json, got %s", decoded.ToranaMetaJson)
+	}
+	// Fingerprint: the production helper over the projection of the ORIGINAL
+	// request (stream/meta excluded by the projection itself).
+	prefix, _, err := pbv2.RequestObservablePrefix(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.PrefixFingerprint != prefixFingerprint(prefix) {
+		t.Fatalf("fingerprint %q, want %q", entry.PrefixFingerprint, prefixFingerprint(prefix))
+	}
+}
+
+// TestRequestPathExactCallMultisets — for an opted-in malformed/out-of-domain
+// request, an opted-in no-marker request, and an opted-in terminal-suffix
+// request: EXACTLY ONE env.plugin_config call (torana_meta_json is local),
+// nothing else, no clock/state, and exact input preservation.
+func TestRequestPathExactCallMultisets(t *testing.T) {
+	outOfDomain := uReq()
+	outOfDomain.Messages[0].Blocks = outOfDomain.Messages[0].Blocks[:0]
+	noMarker := uReq()
+	noMarker.Messages = []*pbv2.Message{textMsg("user", "u", false)}
+	terminalSuffix := &pbv2.ChatRequest{
+		Model: "m",
+		Messages: []*pbv2.Message{
+			textMsg("user", "u", true),
+			{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "c1", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
+		},
+	}
+	terminalSuffix.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
+	for _, row := range []struct {
+		name string
+		req  *pbv2.ChatRequest
+	}{
+		{"out of domain", outOfDomain},
+		{"no marker", noMarker},
+		{"terminal suffix", terminalSuffix},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.SetConfig(warmerCfg)
+			h.SetNow(100_000)
+			before := proto.Clone(row.req).(*pbv2.ChatRequest)
+			res := h.BeforeRequest(row.req)
+			if res.Err != nil || !res.PassedThrough {
+				t.Fatalf("must pass, err=%v", res.Err)
+			}
+			if !proto.Equal(row.req, before) {
+				t.Fatal("the decline mutated the request")
+			}
+			if _, ok := h.State("warm/conv-1"); ok {
+				t.Fatal("nothing may be stored")
+			}
+			calls := h.Calls()
+			if len(calls) != 1 || calls[0].Command != "env.plugin_config" {
+				var got []string
+				for _, c := range calls {
+					got = append(got, c.Command)
+				}
+				t.Fatalf("call multiset = %v, want exactly [env.plugin_config]", got)
+			}
+		})
+	}
+}
+
+// TestEndsWithUnansweredToolCallOrdered — the ordered terminal-shape pins:
+// one call, multiple calls, text+call in both block orders are terminal; a
+// later tool-result/user turn is the control (not terminal).
+func TestEndsWithUnansweredToolCallOrdered(t *testing.T) {
+	toolUse := func(id string) *pbv2.RequestBlock {
+		return &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: id, Name: "read", ArgumentsJson: []byte(`{}`)}}}
+	}
+	rows := []struct {
+		name string
+		req  *pbv2.ChatRequest
+		want bool
+	}{
+		{"one call", &pbv2.ChatRequest{Messages: []*pbv2.Message{{Role: "assistant", Blocks: []*pbv2.RequestBlock{toolUse("c1")}}}}, true},
+		{"multiple calls", &pbv2.ChatRequest{Messages: []*pbv2.Message{{Role: "assistant", Blocks: []*pbv2.RequestBlock{toolUse("c1"), toolUse("c2")}}}}, true},
+		{"text then call", &pbv2.ChatRequest{Messages: []*pbv2.Message{{Role: "assistant", Blocks: []*pbv2.RequestBlock{textMsg("assistant", "t", false).Blocks[0], toolUse("c1")}}}}, true},
+		{"call then text", &pbv2.ChatRequest{Messages: []*pbv2.Message{{Role: "assistant", Blocks: []*pbv2.RequestBlock{toolUse("c1"), textMsg("assistant", "t", false).Blocks[0]}}}}, true},
+		{"control: later tool-result turn", &pbv2.ChatRequest{Messages: []*pbv2.Message{
+			{Role: "assistant", Blocks: []*pbv2.RequestBlock{toolUse("c1")}},
+			{Role: "tool", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: &pbv2.RequestToolResultBlock{ToolCallId: "c1", Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: "ok"}}}}}}}}},
+		}}, false},
+		{"control: later user turn", &pbv2.ChatRequest{Messages: []*pbv2.Message{
+			{Role: "assistant", Blocks: []*pbv2.RequestBlock{toolUse("c1")}},
+			textMsg("user", "continue", false),
+		}}, false},
+		{"control: no messages", &pbv2.ChatRequest{}, false},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			if got := endsWithUnansweredToolCall(row.req); got != row.want {
+				t.Fatalf("endsWithUnansweredToolCall = %v, want %v", got, row.want)
+			}
+		})
+	}
+}
+
+// TestRequestPathValidNonTerminalSuffix — content after the last marker is a
+// VALID suffix: the replay includes it (bytes change vs the marker-only
+// request) while the fingerprint does NOT change (the cache identity did not
+// move).
+func TestRequestPathValidNonTerminalSuffix(t *testing.T) {
+	h := newHarness(t)
+	h.SetConfig(warmerCfg)
+	h.SetNow(100_000)
+	withSuffix := &pbv2.ChatRequest{
+		Model:          "m",
+		Messages:       []*pbv2.Message{textMsg("user", "u", true), textMsg("user", "suffix", false)},
+		ToranaMetaJson: []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`),
+	}
+	res := h.BeforeRequest(withSuffix)
+	if res.Err != nil {
+		t.Fatalf("err=%v", res.Err)
+	}
+	raw, _ := h.State("warm/conv-1")
+	var entry warmEntry
+	_ = json.Unmarshal([]byte(raw), &entry)
+	decoded, err := sdk.DecodeRequest(entry.PrefixPB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Messages) != 2 {
+		t.Fatalf("the replay must include the valid suffix, got %d messages", len(decoded.Messages))
+	}
+	// Fingerprint equals the marker-only projection (identity did not move).
+	only, _, err := pbv2.RequestObservablePrefix(&pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{textMsg("user", "u", true)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.PrefixFingerprint != prefixFingerprint(only) {
+		t.Fatalf("suffix moved the fingerprint: %q != %q", entry.PrefixFingerprint, prefixFingerprint(only))
+	}
+}
+
+// TestTickDriftStopsZeroPricingZeroSends — a seeded entry whose stored
+// fingerprint does not match the replay's recomputed projection stops with
+// zero pricing and zero sends; the entry is retained with the stop reason.
+func TestTickDriftStopsZeroPricingZeroSends(t *testing.T) {
+	h := newHarness(t)
+	h.SetConfig(warmerCfg)
+	h.StubHostCall("torana_cache_pricing", pricingStub())
+	entry := warmEntrySeed(t)
+	entry.PrefixFingerprint = "not-the-replay"
+	seedEntry(t, h, entry)
+	tickAt(h, 300_000)
+	if n := countCommand(h, "torana_cache_pricing"); n != 0 {
+		t.Fatalf("pricing called %d times on a drifted entry", n)
+	}
+	if n := countCommand(h, "torana_send_request"); n != 0 {
+		t.Fatalf("a drifted entry sent %d times", n)
+	}
+	raw, ok := h.State("warm/conv-1")
+	if !ok || !strings.Contains(raw, `"stored prefix drifted"`) {
+		t.Fatalf("the drifted entry must be retained with the drift stop: %s", raw)
+	}
+}
+
+// TestTickSeededPendingNeverRetries — the crash/pending invariant: a durable
+// pending entry (Stopped="refresh outcome unknown", AttemptMillis set) sends
+// ZERO on later ticks, forever, with zero pricing — only a new real observed
+// turn replaces it.
+func TestTickSeededPendingNeverRetries(t *testing.T) {
+	h := newHarness(t)
+	h.SetConfig(warmerCfg)
+	h.StubHostCall("torana_cache_pricing", pricingStub())
+	entry := warmEntrySeed(t)
+	entry.Stopped = "refresh outcome unknown"
+	entry.AttemptMillis = 250_000
+	seedEntry(t, h, entry)
+	for _, now := range []int64{300_000, 900_000, 9_000_000} {
+		tickAt(h, now)
+	}
+	if n := countCommand(h, "torana_cache_pricing"); n != 0 {
+		t.Fatalf("a pending entry reached pricing %d times", n)
+	}
+	if n := countCommand(h, "torana_send_request"); n != 0 {
+		t.Fatalf("a pending entry sent %d times", n)
+	}
+	raw, ok := h.State("warm/conv-1")
+	if !ok || !strings.Contains(raw, "refresh outcome unknown") {
+		t.Fatal("the pending entry must remain durable")
+	}
+}
