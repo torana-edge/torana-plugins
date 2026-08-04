@@ -4,15 +4,18 @@
 // detection. If PII is found the request is vetoed (env.block_request) with an
 // actionable, value-free error so the upstream model can adjust next turn.
 //
-// # v2 semantics
+// # v2 semantics (ordered body)
 //
-//   - Structured content is COMPLETE or explicitly unscannable: the scan
-//     composes scalar Content with every wire-order text part of
-//     ContentPartsJson (newline-separated, stable line numbers); malformed
-//     JSON, a non-array value, malformed text parts, and any provider-visible
-//     part type the text scanner cannot inspect are SCAN FAILURES driven by
-//     on_error — never clean, never cached. An empty but valid collection is
-//     distinct from unsupported content.
+//   - Every message's tool-result blocks are candidates (role-independent,
+//     position-addressed by the ordered seam). Structured content is
+//     COMPLETE or explicitly unscannable: the scan composes every wire-order
+//     TEXT ARM's value of each result (newline-separated, stable line
+//     numbers, explicit-empty arms kept as empty segments); any
+//     provider-visible UNKNOWN arm the text scanner cannot inspect is a SCAN
+//     FAILURE driven by on_error — never clean, never cached. Cache-marker
+//     arms are the plugin's own carriers (host/plugin-injected, never
+//     provider content) and are skipped without affecting completeness. An
+//     empty but valid collection is distinct from unsupported content.
 //   - Blocking is an ATTRIBUTED SIDE EFFECT: the verdict goes through
 //     sdk.BlockRequest and the hook returns PassRequest — no content
 //     replacement, no write grant. The host short-circuits downstream plugins
@@ -126,59 +129,26 @@ type extraction struct {
 	complete bool
 }
 
-// extractScannable composes the scannable text of a tool message. When both
-// Content and ContentPartsJson are populated, BOTH are included — a harmless
-// scalar must never hide PII in parts. Within a syntactically valid array,
-// bad/unsupported elements are skipped so valid text ELSEWHERE is retained;
-// malformed top-level JSON still retains the scalar Content (both are
-// incomplete, never clean).
-func extractScannable(msg *pbv2.Message) extraction {
-	if len(msg.ContentPartsJson) == 0 {
-		return extraction{text: msg.Content, complete: true}
-	}
-	var raw []json.RawMessage
-	if err := json.Unmarshal(msg.ContentPartsJson, &raw); err != nil {
-		// Malformed top-level JSON (or JSON null / a non-array): retain the
-		// scalar, incomplete.
-		return extraction{text: msg.Content, complete: false}
-	}
-	if raw == nil {
-		// json.Unmarshal("null", &raw) succeeds with a nil slice: top-level
-		// null is not a valid array.
-		return extraction{text: msg.Content, complete: false}
-	}
-	// Every wire-order text part becomes a SEGMENT, empty strings included:
-	// explicit newline separators between parts must survive even when a part
-	// is empty, or a later finding would report the wrong line. The scalar
-	// Content leads when non-empty.
+// extractScannable composes the scannable text of one tool-result block
+// (the ordered analog of the flat Content + ContentPartsJson composition).
+// Every wire-order TEXT ARM becomes a SEGMENT, explicit-empty arms included:
+// explicit newline separators between arms must survive even when an arm is
+// empty, or a later finding would report the wrong line. A provider-visible
+// UNKNOWN arm is uninspectable (incomplete, never clean, never cached);
+// cache-marker arms are the plugin's own carriers and are skipped without
+// affecting completeness.
+func extractScannable(view sdk.ToolResultView) extraction {
 	var segments []string
-	if msg.Content != "" {
-		segments = append(segments, msg.Content)
-	}
 	complete := true
-	for _, r := range raw {
-		var part struct {
-			Type string          `json:"type"`
-			Text json.RawMessage `json:"text"`
+	for _, c := range view.Content {
+		if len(c.CacheMarker) > 0 {
+			continue // the plugin's own cache carrier, never provider content
 		}
-		if err := json.Unmarshal(r, &part); err != nil {
-			complete = false // malformed part object: un-inspectable, continue
+		if c.UnknownKind != "" {
+			complete = false // provider-visible arm the text scanner cannot inspect
 			continue
 		}
-		if part.Type != textPartType {
-			complete = false // provider-visible part the text scanner cannot inspect
-			continue
-		}
-		if len(part.Text) == 0 || string(part.Text) == "null" {
-			complete = false // missing or null text: not a string, continue
-			continue
-		}
-		var textVal string
-		if err := json.Unmarshal(part.Text, &textVal); err != nil {
-			complete = false // malformed text part (non-string), continue
-			continue
-		}
-		segments = append(segments, textVal)
+		segments = append(segments, c.Text)
 	}
 	return extraction{text: strings.Join(segments, "\n"), complete: complete}
 }
@@ -187,16 +157,16 @@ func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv2.ChatRequest) (sdk.RequestResult, error) {
 		loadConfig()
 
-		// tool_call_id → tool name, so the allowlist can be applied even when
-		// the tool-result message itself doesn't carry the name. A duplicated
-		// or REUSED id is AMBIGUOUS regardless of name or order — a result
-		// whose id appears more than once resolves to UNKNOWN, and the
-		// unknown-name rule then errs toward scanning. An explicit
-		// tool-result name stays authoritative.
+		// tool_call_id → tool name (the ordered tool-use blocks), so the
+		// allowlist can be applied even when the tool-result block itself
+		// doesn't carry the name. A duplicated or REUSED id is AMBIGUOUS
+		// regardless of name or order — a result whose id appears more than
+		// once resolves to UNKNOWN, and the unknown-name rule then errs
+		// toward scanning. An explicit tool-result name stays authoritative.
 		nameByID := map[string]string{}
 		ambiguousID := map[string]bool{}
 		for _, m := range req.Messages {
-			for _, tc := range m.ToolCalls {
+			for _, tc := range sdk.ToolCalls(m) {
 				if _, seen := nameByID[tc.Id]; seen {
 					ambiguousID[tc.Id] = true
 				} else {
@@ -205,84 +175,85 @@ func init() {
 			}
 		}
 
+		// Ordered seam: EVERY message's tool-result blocks are candidates
+		// (no role gate); each block is identified by (message, block).
 		for _, msg := range req.Messages {
-			if msg.Role != "tool" {
-				continue
-			}
-			toolName := msg.ToolName
-			if toolName == "" {
-				toolName = nameByID[msg.ToolCallId]
-				if ambiguousID[msg.ToolCallId] {
-					toolName = "" // ambiguous id: err toward scanning via the unknown rule
+			for _, view := range sdk.ToolResults(msg) {
+				toolName := view.ToolName
+				if toolName == "" {
+					toolName = nameByID[view.ToolCallId]
+					if ambiguousID[view.ToolCallId] {
+						toolName = "" // ambiguous id: err toward scanning via the unknown rule
+					}
 				}
-			}
-			if !toolAllowed(toolName) {
-				continue
-			}
-			ex := extractScannable(msg)
+				if !toolAllowed(toolName) {
+					continue
+				}
+				ex := extractScannable(view)
 
-			// The deterministic scan runs FIRST over ALL retained text: a PII
-			// fact Torana already detected blocks as pii_detected even when
-			// the extraction is incomplete or the provider/model pair is
-			// misconfigured — on_error governs the UNAVAILABLE contextual
-			// scan, never a deterministic finding already made.
-			if f := regexScan(ex.text); len(f) > 0 {
-				sdk.BlockRequest(422, "pii_detected", blockMessage(toolName, f))
-				return sdk.PassRequest(), nil
-			}
-			if !ex.complete {
-				// Incomplete extraction: never model-scanned, never cached;
-				// on_error governs the uninspectable remainder.
-				if failClosed() {
+				// The deterministic scan runs FIRST over ALL retained text: a PII
+				// fact Torana already detected blocks as pii_detected even when
+				// the extraction is incomplete or the provider/model pair is
+				// misconfigured — on_error governs the UNAVAILABLE contextual
+				// scan, never a deterministic finding already made.
+				if f := regexScan(ex.text); len(f) > 0 {
+					sdk.BlockRequest(422, "pii_detected", blockMessage(toolName, f))
+					return sdk.PassRequest(), nil
+				}
+				if !ex.complete {
+					// Incomplete extraction: never model-scanned, never cached;
+					// on_error governs the uninspectable remainder.
+					if failClosed() {
+						sdk.BlockRequest(422, "pii_scan_failed",
+							fmt.Sprintf("PII scan unavailable for %s; request blocked (fail-closed). Retry, or set pii.on_error=\"allow\" to forward unscanned.",
+								toolLabel(toolName)))
+						return sdk.PassRequest(), nil
+					}
+					continue
+				}
+				if ex.text == "" {
+					continue // a valid empty tool result: nothing to scan, nothing to cache
+				}
+				// Skip results cleared on a prior turn (avoids re-scanning history).
+				cacheKey := piiCleanCacheKey(view, toolName)
+				cached, herr, err := sdk.CacheGet(cacheKey)
+				if err != nil {
+					return sdk.RequestResult{}, err
+				}
+				if herr != nil && !sdk.IsNotFound(herr) {
+					if herr.Code == pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED || herr.Code == pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE {
+						// Advisory: decline the cache, still scan.
+					} else {
+						return sdk.RequestResult{}, fmt.Errorf("pii: cache_get refused: %s", herr.Message)
+					}
+				} else if herr == nil && cached != "" {
+					continue
+				}
+
+				findings, err := scan(ex.text, toolName)
+				if err != nil {
+					var sf *scannerFailure
+					if !errors.As(err, &sf) {
+						// Contract refusal, malformed frame, or protocol defect:
+						// error the hook regardless of on_error.
+						return sdk.RequestResult{}, err
+					}
+					// Scanner failure. Fail-closed by default.
+					if cfg.OnError == "allow" {
+						continue
+					}
 					sdk.BlockRequest(422, "pii_scan_failed",
 						fmt.Sprintf("PII scan unavailable for %s; request blocked (fail-closed). Retry, or set pii.on_error=\"allow\" to forward unscanned.",
 							toolLabel(toolName)))
 					return sdk.PassRequest(), nil
 				}
-				continue
-			}
-			if ex.text == "" {
-				continue // a valid empty tool result: nothing to scan, nothing to cache
-			}
-			// Skip results cleared on a prior turn (avoids re-scanning history).
-			cacheKey := piiCleanCacheKey(msg, toolName)
-			cached, herr, err := sdk.CacheGet(cacheKey)
-			if err != nil {
-				return sdk.RequestResult{}, err
-			}
-			if herr != nil && !sdk.IsNotFound(herr) {
-				if herr.Code == pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED || herr.Code == pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE {
-					// Advisory: decline the cache, still scan.
-				} else {
-					return sdk.RequestResult{}, fmt.Errorf("pii: cache_get refused: %s", herr.Message)
+				if len(findings) > 0 {
+					sdk.BlockRequest(422, "pii_detected", blockMessage(toolName, findings))
+					return sdk.PassRequest(), nil
 				}
-			} else if herr == nil && cached != "" {
-				continue
+				// Complete extraction was scannable and clean: cache the verdict.
+				_, _ = sdk.CacheSet(cacheKey, "1")
 			}
-
-			findings, err := scan(ex.text, toolName)
-			if err != nil {
-				var sf *scannerFailure
-				if !errors.As(err, &sf) {
-					// Contract refusal, malformed frame, or protocol defect:
-					// error the hook regardless of on_error.
-					return sdk.RequestResult{}, err
-				}
-				// Scanner failure. Fail-closed by default.
-				if cfg.OnError == "allow" {
-					continue
-				}
-				sdk.BlockRequest(422, "pii_scan_failed",
-					fmt.Sprintf("PII scan unavailable for %s; request blocked (fail-closed). Retry, or set pii.on_error=\"allow\" to forward unscanned.",
-						toolLabel(toolName)))
-				return sdk.PassRequest(), nil
-			}
-			if len(findings) > 0 {
-				sdk.BlockRequest(422, "pii_detected", blockMessage(toolName, findings))
-				return sdk.PassRequest(), nil
-			}
-			// Complete extraction was scannable and clean: cache the verdict.
-			_, _ = sdk.CacheSet(cacheKey, "1")
 		}
 		return sdk.PassRequest(), nil
 	})
@@ -307,7 +278,7 @@ type scannerFailure struct{ msg string }
 
 func (e *scannerFailure) Error() string { return e.msg }
 
-func piiCleanCacheKey(msg *pbv2.Message, toolName string) string {
+func piiCleanCacheKey(view sdk.ToolResultView, toolName string) string {
 	policy, _ := json.Marshal(struct {
 		Version      int      `json:"version"`
 		Provider     string   `json:"provider"`
@@ -324,9 +295,13 @@ func piiCleanCacheKey(msg *pbv2.Message, toolName string) string {
 		MaxScanBytes: cfg.MaxScanBytes,
 	})
 	// ContentAddressedCacheKey length-prefixes every input, so arbitrary
-	// strings (ids, names, content) cannot be joined ambiguously.
+	// strings (ids, names, content) cannot be joined ambiguously. The key is
+	// a function of the COMPOSED scannable text (every text arm), which is
+	// exactly the input the clean verdict depends on — the flat model's
+	// source-sensitive Content+ContentPartsJson split is gone with the flat
+	// body.
 	return sdk.ContentAddressedCacheKey(cleanCachePrefix,
-		msg.ToolCallId, toolName, msg.Content, string(msg.ContentPartsJson), string(policy))
+		view.ToolCallId, toolName, extractScannable(view).text, string(policy))
 }
 
 func toolAllowed(name string) bool {
