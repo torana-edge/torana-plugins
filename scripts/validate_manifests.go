@@ -82,8 +82,14 @@ var knownPermissions = map[string]bool{
 	"env.log":                                  true, "env.meta_get": true, "env.meta_set": true,
 	"env.now": true, "env.original_request": true, "env.original_response": true,
 	"env.plugin_config": true, "env.request_headers": true,
-	"env.respond_request": true, "env.route_request": true, "env.serve_http": true,
+	"env.respond_request": true, "env.route_request": true, "env.serve_http": true, "env.set_identity": true,
 	"env.state_get": true, "env.state_keys": true, "env.state_set": true,
+	"ir.cache_control.write":      true,
+	"ir.messages.write.assistant": true, "ir.messages.write.developer": true,
+	"ir.messages.write.other": true, "ir.messages.write.system": true,
+	"ir.messages.write.tool": true, "ir.messages.write.user": true,
+	"ir.model.write": true, "ir.params.write": true,
+	"ir.stream.write": true, "ir.tool_results.write": true, "ir.tools.write": true,
 }
 
 func main() {

@@ -45,6 +45,36 @@ compare() { # sdk-var validator-var
 }
 
 compare Hooks knownHooks
+# The SDK's Permissions is `append([]string{...}, WritePermissions...)`: the
+# block extractor stops at the inner list's brace, so the write grants must
+# be merged in from their own var.
+compare() {
+  if [[ "$1" == "Permissions" ]]; then
+    a=$( { block "$sdk" Permissions; block "$sdk" WritePermissions; } | sort -u)
+    b=$(block "$validator" knownPermissions | sort -u)
+    if ! diff <(echo "$a") <(echo "$b") >/dev/null; then
+      echo "capability sync: knownPermissions differs from the SDK's Permissions+WritePermissions" >&2
+      diff <(echo "$a") <(echo "$b") | sed 's/^/  /' >&2
+      fail=1
+    fi
+    return 0
+  fi
+  local a b
+  a=$(block "$sdk" "$1")
+  b=$(block "$validator" "$2")
+  if [[ -z "$a" || -z "$b" ]]; then
+    echo "capability sync: could not read $1 or $2 — the declaration shape changed" >&2
+    fail=1
+    return 0
+  fi
+  if ! diff <(echo "$a") <(echo "$b") >/dev/null; then
+    echo "capability sync: $2 differs from the SDK's $1" >&2
+    diff <(echo "$a") <(echo "$b") | sed 's/^/  /' >&2
+    fail=1
+  fi
+}
+
+compare Hooks knownHooks
 compare Permissions knownPermissions
 [[ $fail -eq 0 ]] && echo "capability sync: validator matches the SDK"
 exit $fail

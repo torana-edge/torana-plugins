@@ -9,13 +9,24 @@
   "repository": "https://github.com/torana-edge/torana-plugins",
   "description": "OpenTelemetry per-request metrics: request shape on the way in; latency, status class, and token usage (from the host's _response signal) on the way out",
   "hooks": [
-    {"name": "run_before_request"},
-    {"name": "run_after_response"},
-    {"name": "run_on_http_request"}
+    {
+      "name": "run_before_request"
+    },
+    {
+      "name": "run_after_response"
+    },
+    {
+      "name": "run_on_http_request"
+    }
   ],
   "permissions": [
-    {"name": "env.emit_metric", "description": "Emit OTel-compatible metrics"},
-    {"name": "env.log", "description": "Diagnostic logging"},
-    {"name": "env.serve_http", "description": "Serve a status/info page under /_torana/plugin/otel/"}
+    {
+      "name": "env.emit_metric",
+      "description": "Emit OTel-compatible metrics"
+    },
+    {
+      "name": "env.serve_http",
+      "description": "Serve a status/info page under /_torana/plugin/otel/"
+    }
   ]
 }

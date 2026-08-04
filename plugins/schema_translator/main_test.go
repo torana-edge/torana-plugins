@@ -557,7 +557,7 @@ func publishedEnvelope(t *testing.T, h *sdktest.Harness) string {
 // envelope (a conforming response cannot contain a tool call for it).
 func TestBeforeRequestNoToolsPublishesNothing(t *testing.T) {
 	h := newHarness(t)
-	res := h.BeforeRequest(&pbv2.ChatRequest{Messages: []*pbv2.Message{{Role: "user", Content: "hi"}}})
+	res := h.BeforeRequest(&pbv2.ChatRequest{Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}}}})
 	if !res.PassedThrough || res.Err != nil {
 		t.Fatalf("expected pass-through, got err=%v", res.Err)
 	}
@@ -806,7 +806,7 @@ func TestStreamReversesRecordedTool(t *testing.T) {
 // terminate.
 func TestStreamTerminalOnMissingRegistry(t *testing.T) {
 	h := newHarness(t)
-	h.BeforeRequest(&pbv2.ChatRequest{Messages: []*pbv2.Message{{Role: "user", Content: "hi"}}})
+	h.BeforeRequest(&pbv2.ChatRequest{Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}}}})
 	res := streamBlock(t, h, 0, "call_1", "read", "", `{"path":"a.go"}`)
 	if res.Err == nil {
 		t.Fatal("a tool call without any published envelope must terminate")

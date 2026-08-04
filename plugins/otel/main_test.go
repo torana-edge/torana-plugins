@@ -190,7 +190,7 @@ func TestZeroTokenCountsAreNotEmitted(t *testing.T) {
 // and always passes through.
 func TestRequestShapeMetricsAndPassThrough(t *testing.T) {
 	h := sdktest.New(t)
-	res := h.BeforeRequest(&pbv2.ChatRequest{Model: "gpt-4", Messages: []*pbv2.Message{{Role: "user", Content: "hi"}}})
+	res := h.BeforeRequest(&pbv2.ChatRequest{Model: "gpt-4", Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}}}})
 	if res.Err != nil || !res.PassedThrough {
 		t.Fatalf("otel must pass requests through, err=%v", res.Err)
 	}
@@ -258,7 +258,7 @@ func TestHTTPRoutes(t *testing.T) {
 // pricing); metrics ride the dedicated emit path.
 func TestNoUnauthorizedCalls(t *testing.T) {
 	h := sdktest.New(t)
-	h.BeforeRequest(&pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{{Role: "user", Content: "hi"}}})
+	h.BeforeRequest(&pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}}}})
 	h.AfterResponse(resp("m", 200, 1, 2, 3), false)
 	for _, c := range h.Calls() {
 		t.Errorf("otel made a host call outside its grant set: %s", c.Command)
