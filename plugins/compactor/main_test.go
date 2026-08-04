@@ -1289,37 +1289,71 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 				t.Fatalf("result %s not compacted: %q", id, got)
 			}
 		}
-		if got := countCommand(h, "env.plugin_config"); got != 1 {
-			t.Fatalf("plugin_config calls = %d, want 1", got)
+		// The COMPLETE host-call multiset (EmitMetric is a metric, not a
+		// host call — its exact cardinality is asserted below).
+		wantMultiset := map[string]int{
+			"env.plugin_config":          1,
+			"env.cache_get":              4, // intent + model key per candidate
+			"env.cache_set":              2, // best-effort per transformation
+			"torana_offload_completion":  2, // one per uncached candidate
+			"torana_evaluate_compaction": 2, // optimistic preflight + real report
+			"torana_record_savings":      1, // the batch
 		}
-		if got := countCommand(h, "env.cache_get"); got != 4 {
-			t.Fatalf("cache_get calls = %d, want 4 (intent + model key per candidate)", got)
-		}
-		if got := countCommand(h, "torana_offload_completion"); got != 2 {
-			t.Fatalf("offload calls = %d, want 2 (one per uncached candidate)", got)
-		}
-		if got := countCommand(h, "torana_evaluate_compaction"); got != 2 {
-			t.Fatalf("evaluate calls = %d, want 2 (optimistic preflight + real report)", got)
-		}
-		if got := countCommand(h, "torana_record_savings"); got != 1 {
-			t.Fatalf("record_savings calls = %d, want 1 (the batch)", got)
-		}
-		if got := countCommand(h, "env.cache_set"); got != 2 {
-			t.Fatalf("cache_set calls = %d, want 2 (best-effort per transformation)", got)
-		}
-		// The REAL evaluate payload must account for both candidates.
-		var lastEval struct {
-			CandidateCount int `json:"candidate_count"`
-		}
+		gotMultiset := map[string]int{}
 		for _, c := range h.Calls() {
-			if c.Command == "torana_evaluate_compaction" {
-				if err := json.Unmarshal([]byte(c.Args), &lastEval); err != nil {
-					t.Fatalf("evaluate args not JSON: %v (%s)", err, c.Args)
-				}
+			gotMultiset[c.Command]++
+		}
+		if len(gotMultiset) != len(wantMultiset) {
+			t.Fatalf("call multiset = %v, want %v", gotMultiset, wantMultiset)
+		}
+		for cmd, want := range wantMultiset {
+			if gotMultiset[cmd] != want {
+				t.Fatalf("call %s count = %d, want %d (multiset %v)", cmd, gotMultiset[cmd], want, gotMultiset)
 			}
 		}
-		if lastEval.CandidateCount != 2 {
-			t.Fatalf("candidate_count = %d, want 2", lastEval.CandidateCount)
+		// The eligible metric fires exactly once per candidate.
+		eligible := 0
+		for _, m := range h.Metrics() {
+			if m.Name == "torana_compact_eligible_total" {
+				eligible += int(m.Value)
+			}
+		}
+		if eligible != 2 {
+			t.Fatalf("eligible metric = %d, want 2 (one per candidate)", eligible)
+		}
+		// The evaluate payloads IN ORDER: BOTH carry candidate_count=2, but
+		// only the REAL report (the second) carries the offload facts — the
+		// optimistic preflight is offload-free by construction.
+		type evalPayload struct {
+			CandidateCount int    `json:"candidate_count"`
+			Source         string `json:"source"`
+			Offload        *struct {
+				Provider string `json:"provider"`
+				Model    string `json:"model"`
+			} `json:"offload"`
+		}
+		var evals []evalPayload
+		for _, c := range h.Calls() {
+			if c.Command != "torana_evaluate_compaction" {
+				continue
+			}
+			var p evalPayload
+			if err := json.Unmarshal([]byte(c.Args), &p); err != nil {
+				t.Fatalf("evaluate args not JSON: %v (%s)", err, c.Args)
+			}
+			evals = append(evals, p)
+		}
+		if len(evals) != 2 {
+			t.Fatalf("evaluate payloads = %d, want 2", len(evals))
+		}
+		if evals[0].CandidateCount != 2 || evals[1].CandidateCount != 2 {
+			t.Fatalf("candidate_count = %d/%d, want 2/2", evals[0].CandidateCount, evals[1].CandidateCount)
+		}
+		if evals[0].Offload != nil {
+			t.Fatalf("the OPTIMISTIC preflight must not carry offload facts: %+v", evals[0].Offload)
+		}
+		if evals[1].Offload == nil || evals[1].Offload.Provider == "" || evals[1].Offload.Model == "" {
+			t.Fatalf("the REAL report must carry the offload facts: %+v", evals[1].Offload)
 		}
 	})
 
@@ -1357,20 +1391,13 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 				if !proto.Equal(req, before) {
 					t.Fatal("an unsupported shape was mutated")
 				}
-				pluginConfig := 0
-				for _, c := range h.Calls() {
-					if c.Command == "env.plugin_config" {
-						pluginConfig++
-						continue
+				calls := h.Calls()
+				if len(calls) != 1 || calls[0].Command != "env.plugin_config" {
+					got := make([]string, 0, len(calls))
+					for _, c := range calls {
+						got = append(got, c.Command)
 					}
-					if c.Command == "env.cache_get" || c.Command == "env.cache_set" || c.Command == "env.emit_metric" ||
-						c.Command == "torana_offload_completion" ||
-						c.Command == "torana_evaluate_compaction" || c.Command == "torana_record_savings" {
-						t.Fatalf("an unsupported shape made a spend call: %s", c.Command)
-					}
-				}
-				if pluginConfig != 1 {
-					t.Fatalf("plugin_config calls = %d, want exactly 1", pluginConfig)
+					t.Fatalf("the complete call multiset = %v, want exactly [env.plugin_config]", got)
 				}
 			})
 		}

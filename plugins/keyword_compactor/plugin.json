@@ -34,10 +34,6 @@
       "description": "Report compaction byte savings to /stats"
     },
     {
-      "name": "env.log",
-      "description": "Diagnostic logging"
-    },
-    {
       "name": "env.plugin_config",
       "description": "Read ordered plugins.config.keyword_compactor.tool_policies"
     },

@@ -949,18 +949,56 @@ func TestKeywordOrderedSeamRows(t *testing.T) {
 				t.Fatalf("result %s not compacted: %d -> %d", id, len(content), len(got))
 			}
 		}
-		if got := countCommand(h, "env.plugin_config"); got != 1 {
-			t.Fatalf("plugin_config calls = %d, want 1", got)
+		// The COMPLETE host-call multiset (EmitMetric is a metric, not a
+		// host call — its exact cardinality is asserted below).
+		wantMultiset := map[string]int{
+			"env.plugin_config":     1,
+			"env.cache_get":         4, // intent + keyword key per candidate
+			"env.cache_set":         1, // the second candidate reuses the first's stored value
+			"torana_record_savings": 2, // cache_reuse + transformation
 		}
-		if got := countCommand(h, "env.cache_get"); got != 4 {
-			t.Fatalf("cache_get calls = %d, want 4 (intent + keyword key per candidate)", got)
+		gotMultiset := map[string]int{}
+		for _, c := range h.Calls() {
+			gotMultiset[c.Command]++
 		}
-		if got := countCommand(h, "env.cache_set"); got != 1 {
-			t.Fatalf("cache_set calls = %d, want 1 (the second candidate reuses the first's stored value)", got)
+		if len(gotMultiset) != len(wantMultiset) {
+			t.Fatalf("call multiset = %v, want %v", gotMultiset, wantMultiset)
 		}
-		if got := countCommand(h, "torana_record_savings"); got != 2 {
-			t.Fatalf("record_savings calls = %d, want 2 (one per candidate)", got)
+		for cmd, want := range wantMultiset {
+			if gotMultiset[cmd] != want {
+				t.Fatalf("call %s count = %d, want %d (multiset %v)", cmd, gotMultiset[cmd], want, gotMultiset)
+			}
 		}
+		// The two savings payloads decoded: exactly one transformation and
+		// one cache_reuse — the count alone would not prove the shared-key
+		// reuse path.
+		type savingsPayload struct {
+			OriginalBytes int    `json:"original_bytes"`
+			FinalBytes    int    `json:"final_bytes"`
+			Source        string `json:"source"`
+		}
+		sources := map[string]int{}
+		var sawOriginal bool
+		for _, c := range h.Calls() {
+			if c.Command != "torana_record_savings" {
+				continue
+			}
+			var p savingsPayload
+			if err := json.Unmarshal([]byte(c.Args), &p); err != nil {
+				t.Fatalf("savings args not JSON: %v (%s)", err, c.Args)
+			}
+			if p.OriginalBytes == len(content) {
+				sawOriginal = true
+			}
+			sources[p.Source]++
+		}
+		if sources["transformation"] != 1 || sources["cache_reuse"] != 1 {
+			t.Fatalf("savings sources = %v, want exactly one transformation + one cache_reuse", sources)
+		}
+		if !sawOriginal {
+			t.Fatal("neither savings payload reported the original content size")
+		}
+		// The eligible metric fires exactly once per candidate.
 		eligible := 0
 		for _, m := range h.Metrics() {
 			if m.Name == "torana_compact_eligible_total" {
@@ -1001,19 +1039,13 @@ func TestKeywordOrderedSeamRows(t *testing.T) {
 				if !proto.Equal(req, before) {
 					t.Fatal("an unsupported shape was mutated")
 				}
-				pluginConfig := 0
-				for _, c := range h.Calls() {
-					if c.Command == "env.plugin_config" {
-						pluginConfig++
-						continue
+				calls := h.Calls()
+				if len(calls) != 1 || calls[0].Command != "env.plugin_config" {
+					got := make([]string, 0, len(calls))
+					for _, c := range calls {
+						got = append(got, c.Command)
 					}
-					if c.Command == "env.cache_get" || c.Command == "env.cache_set" ||
-						c.Command == "env.emit_metric" || c.Command == "torana_record_savings" {
-						t.Fatalf("an unsupported shape made a spend call: %s", c.Command)
-					}
-				}
-				if pluginConfig != 1 {
-					t.Fatalf("plugin_config calls = %d, want exactly 1", pluginConfig)
+					t.Fatalf("the complete call multiset = %v, want exactly [env.plugin_config]", got)
 				}
 			})
 		}
