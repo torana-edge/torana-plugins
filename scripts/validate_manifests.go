@@ -112,7 +112,7 @@ var pluginContracts = map[string]pluginContract{
 		permissions:      []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.host_call.torana_evaluate_compaction", "env.host_call.torana_offload_completion", "env.host_call.torana_record_savings", "env.plugin_config", "ir.tool_results.write"},
 		requiresUpstream: []string{"torana/intent"}},
 	"intent": {hooks: []string{"run_before_request", "run_on_stream_chunk"},
-		permissions: []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.log", "env.meta_get", "env.meta_set", "env.plugin_config", "ir.messages.write.assistant", "ir.messages.write.system", "ir.messages.write.tool", "ir.messages.write.user", "ir.stream.write", "ir.tool_results.write", "ir.tools.write"}},
+		permissions: []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.log", "env.meta_get", "env.meta_set", "env.plugin_config", "ir.cache_control.write", "ir.messages.write.assistant", "ir.messages.write.developer", "ir.messages.write.other", "ir.messages.write.system", "ir.messages.write.tool", "ir.messages.write.user", "ir.stream.write", "ir.tool_results.write", "ir.tools.write"}},
 	"keyword_compactor": {hooks: []string{"run_before_request"},
 		permissions:      []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.host_call.torana_record_savings", "env.plugin_config", "ir.tool_results.write"},
 		requiresUpstream: []string{"torana/intent"}},
@@ -175,10 +175,12 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	dirs := map[string]bool{}
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
+		dirs[entry.Name()] = true
 		dir := filepath.Join(os.Args[1], entry.Name())
 		var m manifest
 		readJSON(filepath.Join(dir, "plugin.json"), &m)
@@ -245,6 +247,22 @@ func main() {
 			validateAgentDescriptor(entry.Name(), agentPath, m)
 		} else if !os.IsNotExist(err) {
 			panic(err)
+		}
+	}
+	// BIDIRECTIONAL inventory: every contract row must have a directory
+	// (a missing plugin passes nothing), and every directory must match a
+	// row (an extra plugin is a contract drift).
+	if len(dirs) != len(pluginContracts) {
+		panic(fmt.Sprintf("plugin count %d does not match the contract table (%d)", len(dirs), len(pluginContracts)))
+	}
+	for name := range pluginContracts {
+		if !dirs[name] {
+			panic(fmt.Sprintf("plugin %s is in the contract table but has no directory", name))
+		}
+	}
+	for name := range dirs {
+		if _, ok := pluginContracts[name]; !ok {
+			panic(fmt.Sprintf("directory %s has no contract-table row", name))
 		}
 	}
 }

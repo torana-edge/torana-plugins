@@ -1602,3 +1602,56 @@ func TestRequestPathTerminalSuffixPreservesEntry(t *testing.T) {
 		t.Fatalf("call multiset = %v, want exactly [env.plugin_config]", got)
 	}
 }
+
+// TestTickActionsCountConfirmedCompletesOnly — the TickDid Actions field
+// counts CONFIRMED completed refreshes ONLY: a cache hit or a rebuilt cache
+// = 1 completed action; an advisory send refusal, an HTTP refusal, and an
+// unknown outcome = 0 (the attempt consumed the entry but is not a
+// completed refresh); a decode defect and a contract refusal ERROR the tick
+// without an emitted result.
+func TestTickActionsCountConfirmedCompletesOnly(t *testing.T) {
+	rows := []struct {
+		name        string
+		send        func(string) (string, error)
+		wantActions int32
+		wantErr     bool
+	}{
+		{"cache hit", hitStub(), 1, false},
+		{"cache rebuilt", rebuiltStub(), 1, false},
+		{"advisory send refusal", func(string) (string, error) {
+			return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, "transient"), nil
+		}, 0, false},
+		{"HTTP refusal", func(string) (string, error) {
+			return sdktest.HostResultValue([]byte(`{"http_status":401}`)), nil
+		}, 0, false},
+		{"unknown outcome", noSignalStub(), 0, false},
+		{"decode defect", func(string) (string, error) {
+			return sdktest.HostResultValue([]byte(`not a domain body`)), nil
+		}, 0, true},
+		{"contract refusal", func(string) (string, error) {
+			return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "denied"), nil
+		}, 0, true},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.SetConfig(warmerCfg)
+			h.StubHostCall("torana_cache_pricing", pricingStub())
+			h.StubHostCall("torana_send_request", row.send)
+			seedEntry(t, h, warmEntrySeed(t))
+			res := h.Tick(&pbv2.TickRequest{UnixMillis: 300_000})
+			if row.wantErr {
+				if res.Err == nil {
+					t.Fatal("must error the tick without an emitted result")
+				}
+				return
+			}
+			if res.Err != nil {
+				t.Fatalf("unexpected tick error: %v", res.Err)
+			}
+			if res.Outcome == nil || res.Outcome.Actions != row.wantActions {
+				t.Fatalf("Actions = %+v, want %d", res.Outcome, row.wantActions)
+			}
+		})
+	}
+}

@@ -41,13 +41,18 @@ fi
 # The checked-in SDK_REF must name the SAME revision every module pins (the
 # atomic Migration-C contract): a drift between the reference and the pins
 # fails here, never silently.
-expected_ref=$(cat "$root/SDK_REF" 2>/dev/null || true)
+sdk_ref_file="${SDK_REF_FILE:-$root/SDK_REF}"
+expected_ref=$(cat "$sdk_ref_file" 2>/dev/null || true)
 if [[ -z "$expected_ref" ]]; then
   echo "capability sync: SDK_REF is empty or missing" >&2
   exit 1
 fi
-if [[ "$pin" != *"$expected_ref"* ]]; then
-  echo "capability sync: SDK_REF $expected_ref does not match the pinned revision $pin" >&2
+# EXACT revision equality: the pin's revision is the last dash component of
+# the pseudo-version (v0.2.1-0.<timestamp>-<commit>). Substring matching is
+# deliberately rejected: a value like "0.2.1" or "20260804" must NOT pass.
+pin_rev="${pin##*-}"
+if [[ "$expected_ref" != "$pin_rev" ]]; then
+  echo "capability sync: SDK_REF $expected_ref does not exactly name the pinned revision $pin_rev ($pin)" >&2
   exit 1
 fi
 

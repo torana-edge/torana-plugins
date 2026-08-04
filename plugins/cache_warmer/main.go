@@ -507,8 +507,9 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 				return false, fmt.Sprintf("%s: stopped, refresh failed", short(entry.ConversationID)), nil
 			}
 			// Contract/protocol refusal: surface on the tick. The durable
-			// pending reservation still prevents replay.
-			return true, "", err
+			// pending reservation still prevents replay. Not a completed
+			// action (the bool contract: confirmed-completed only).
+			return false, "", err
 		case res.HTTPStatus != 0:
 			// Upstream non-2xx: the provider refused the refresh. The result
 			// carries the status; no string branching. Not a completed

@@ -46,8 +46,20 @@
       "description": "Read plugins.config.intent (fill: heuristic|off)"
     },
     {
+      "name": "ir.cache_control.write",
+      "description": "System-prompt prepend shifts absolute marker positions"
+    },
+    {
       "name": "ir.messages.write.assistant",
       "description": "History tool-call intent rehydration"
+    },
+    {
+      "name": "ir.messages.write.developer",
+      "description": "System-prompt prepend shifts the developer-role section"
+    },
+    {
+      "name": "ir.messages.write.other",
+      "description": "System-prompt prepend shifts the unmodelled-role section"
     },
     {
       "name": "ir.messages.write.system",
