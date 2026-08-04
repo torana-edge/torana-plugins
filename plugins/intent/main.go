@@ -254,14 +254,21 @@ func rehydrateHistoryIntents(req *pbv2.ChatRequest) (bool, error) {
 	restored, filled, present := 0, 0, 0
 	modified := false
 	for _, msg := range req.Messages {
-		if msg.Role != "assistant" || len(msg.ToolCalls) == 0 {
+		// The semantic scope is ASSISTANT HISTORY (past tool-use turns), so
+		// the role gate is preserved; the calls themselves are the ordered
+		// tool-use blocks.
+		if msg.Role != "assistant" || len(msg.Blocks) == 0 {
 			continue
 		}
-		for _, tc := range msg.ToolCalls {
+		calls := sdk.ToolCalls(msg)
+		if len(calls) == 0 {
+			continue
+		}
+		for _, tc := range calls {
 			var args map[string]any
-			if len(tc.ArgumentsJson) == 0 {
+			if len(tc.Arguments) == 0 {
 				args = map[string]any{}
-			} else if json.Unmarshal(tc.ArgumentsJson, &args) != nil || args == nil {
+			} else if json.Unmarshal(tc.Arguments, &args) != nil || args == nil {
 				// Unrepresentable history arguments: null (which decodes as a
 				// nil map), arrays, scalars, malformed JSON. Leave them
 				// unchanged — assigning into a nil map would panic.
@@ -304,7 +311,9 @@ func rehydrateHistoryIntents(req *pbv2.ChatRequest) (bool, error) {
 			}
 			args[intentField] = intent
 			if b, err := json.Marshal(args); err == nil {
-				tc.ArgumentsJson = b
+				// The view is a COPY: the mutation must land on the actual
+				// tool-use block (position-addressed by the view).
+				msg.Blocks[tc.Block].GetToolUse().ArgumentsJson = b
 				modified = true
 			}
 		}
@@ -491,17 +500,27 @@ func injectSystemPrompt(req *pbv2.ChatRequest) bool {
 		"helps answer, never the action taken. Example of a good call:\n" +
 		"  read_file(path=\"src/pricing.ts\", i=\"Which table maps locale to currency, to find why EU shows USD\")\n" +
 		"Example of a BAD value: i=\"reading pricing.ts\" (action description — discarded)."
-	modified := false
 	for _, msg := range req.Messages {
-		if msg.Role == "system" {
-			msg.Content += addendum
-			modified = true
-			return modified
+		if msg.Role != "system" {
+			continue
 		}
+		// Append to the LAST text block of the system prompt (the ordered
+		// body keeps the prompt text in text blocks; the flat Content is
+		// gone).
+		for i := len(msg.Blocks) - 1; i >= 0; i-- {
+			if t := msg.Blocks[i].GetText(); t != nil {
+				t.Text += addendum
+				return true
+			}
+		}
+		msg.Blocks = append(msg.Blocks, &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: addendum}}})
+		return true
 	}
 	req.Messages = append([]*pbv2.Message{{
-		Role:    "system",
-		Content: "[SYSTEM]" + addendum,
+		Role: "system",
+		Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{
+			Text: &pbv2.RequestTextBlock{Text: "[SYSTEM]" + addendum},
+		}}},
 	}}, req.Messages...)
 	return true
 }

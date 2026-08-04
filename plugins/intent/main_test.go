@@ -10,6 +10,7 @@ import (
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 	"github.com/torana-edge/torana-plugin-sdk/sdktest"
+	"google.golang.org/protobuf/proto"
 )
 
 // newHarness resets the process-global config once-state so every hook-level
@@ -190,9 +191,9 @@ func reqWith(toolArgs string) *pbv2.ChatRequest {
 			ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"}}}`),
 		}},
 		Messages: []*pbv2.Message{
-			{Role: "system", Content: "You are a coding agent."},
-			{Role: "user", Content: "find the bug"},
-			{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "call_1", Name: "read", ArgumentsJson: []byte(toolArgs)}}},
+			{Role: "system", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "You are a coding agent."}}}}},
+			{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "find the bug"}}}}},
+			{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "call_1", Name: "read", ArgumentsJson: []byte(toolArgs)}}}}},
 		},
 	}
 }
@@ -246,7 +247,7 @@ func emittedSig(t *testing.T, res sdktest.StreamResult) string {
 // TestBeforeRequestNoToolsPasses — no tools: nothing to teach, no host calls.
 func TestBeforeRequestNoToolsPasses(t *testing.T) {
 	h := newHarness(t)
-	res := h.BeforeRequest(&pbv2.ChatRequest{Messages: []*pbv2.Message{{Role: "user", Content: "hi"}}})
+	res := h.BeforeRequest(&pbv2.ChatRequest{Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}}}})
 	if !res.PassedThrough || res.Err != nil {
 		t.Fatalf("expected pass-through, got err=%v request=%v", res.Err, res.Request != nil)
 	}
@@ -269,8 +270,8 @@ func TestBeforeRequestInjectsSchemaAndPromptAndIsDeterministic(t *testing.T) {
 		t.Fatal("tool schema did not gain the intent field")
 	}
 	sys := first.Request.Messages[0]
-	if sys.Role != "system" || !strings.Contains(sys.Content, "Every tool call has an \"i\" field") {
-		t.Fatalf("system prompt did not gain the addendum: %q", sys.Content)
+	if sys.Role != "system" || !strings.Contains(sdk.Text(sys), "Every tool call has an \"i\" field") {
+		t.Fatalf("system prompt did not gain the addendum: %q", sdk.Text(sys))
 	}
 	// Determinism: a fresh clone of the ORIGINAL request must produce the
 	// same bytes.
@@ -283,9 +284,9 @@ func TestBeforeRequestInjectsSchemaAndPromptAndIsDeterministic(t *testing.T) {
 	}
 	// Rehydration had nothing to restore (no intent cached): the history call
 	// must still carry a heuristic "i" fill.
-	hist := second.Request.Messages[2].ToolCalls[0]
-	if !strings.Contains(string(hist.ArgumentsJson), `"i":`) {
-		t.Fatalf("history tool call was not filled: %s", hist.ArgumentsJson)
+	hist := sdk.ToolCalls(second.Request.Messages[2])[0]
+	if !strings.Contains(string(hist.Arguments), `"i":`) {
+		t.Fatalf("history tool call was not filled: %s", hist.Arguments)
 	}
 }
 
@@ -317,9 +318,9 @@ func TestRehydrationRestoresAndBridges(t *testing.T) {
 	if res.Err != nil || res.Request == nil {
 		t.Fatalf("expected replacement, err=%v", res.Err)
 	}
-	hist := res.Request.Messages[2].ToolCalls[0]
+	hist := sdk.ToolCalls(res.Request.Messages[2])[0]
 	var args map[string]any
-	if err := json.Unmarshal(hist.ArgumentsJson, &args); err != nil {
+	if err := json.Unmarshal(hist.Arguments, &args); err != nil {
 		t.Fatal(err)
 	}
 	if got := args[intentField]; got != "find the bug in server.go" {
@@ -362,9 +363,9 @@ func TestRehydrationFillOff(t *testing.T) {
 	if res.Err != nil {
 		t.Fatal(res.Err)
 	}
-	hist := res.Request.Messages[2].ToolCalls[0]
-	if strings.Contains(string(hist.ArgumentsJson), `"i"`) {
-		t.Fatalf("fill:off must leave history untouched: %s", hist.ArgumentsJson)
+	hist := sdk.ToolCalls(res.Request.Messages[2])[0]
+	if strings.Contains(string(hist.Arguments), `"i"`) {
+		t.Fatalf("fill:off must leave history untouched: %s", hist.Arguments)
 	}
 }
 
@@ -384,9 +385,9 @@ func TestConfigResetPinsIsolation(t *testing.T) {
 	if res.Err != nil {
 		t.Fatal(res.Err)
 	}
-	hist := res.Request.Messages[2].ToolCalls[0]
-	if !strings.Contains(string(hist.ArgumentsJson), `"i"`) {
-		t.Fatalf("row 2 leaked row 1's config (fill:off): %s", hist.ArgumentsJson)
+	hist := sdk.ToolCalls(res.Request.Messages[2])[0]
+	if !strings.Contains(string(hist.Arguments), `"i"`) {
+		t.Fatalf("row 2 leaked row 1's config (fill:off): %s", hist.Arguments)
 	}
 }
 
@@ -399,9 +400,9 @@ func TestRehydrationPresentEmptyIsUnusable(t *testing.T) {
 	if res.Err != nil {
 		t.Fatal(res.Err)
 	}
-	hist := res.Request.Messages[2].ToolCalls[0]
+	hist := sdk.ToolCalls(res.Request.Messages[2])[0]
 	var args map[string]any
-	if err := json.Unmarshal(hist.ArgumentsJson, &args); err != nil {
+	if err := json.Unmarshal(hist.Arguments, &args); err != nil {
 		t.Fatal(err)
 	}
 	// The fill is deterministic: "what <first-string-arg, 80 runes> shows".
@@ -704,22 +705,25 @@ func TestRehydrationUnrepresentableArgumentsNoPanic(t *testing.T) {
 	}
 	for _, raw := range cases {
 		t.Run(raw, func(t *testing.T) {
-			h := newHarness(t)
+			newHarness(t) // resets the process-global config for each row
 			req := &pbv2.ChatRequest{Tools: []*pbv2.ToolDef{{
 				Name:           "read",
 				ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"}}}`),
 			}}}
 			req.Messages = []*pbv2.Message{
-				{Role: "user", Content: "hi"},
-				{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "call_1", Name: "read", ArgumentsJson: []byte(raw)}}},
+				{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}},
+				{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "call_1", Name: "read", ArgumentsJson: []byte(raw)}}}}},
 			}
-			res := h.BeforeRequest(req)
-			if res.Err != nil {
-				t.Fatalf("hook error (must not panic): %v", res.Err)
+			before := proto.Clone(req).(*pbv2.ChatRequest)
+			modified, err := rehydrateHistoryIntents(req)
+			if err != nil {
+				t.Fatalf("hook error (must not panic): %v", err)
 			}
-			out := res.Request.Messages[2].ToolCalls[0].ArgumentsJson
-			if string(out) != raw {
-				t.Fatalf("unrepresentable arguments were changed: %q -> %q", raw, out)
+			if modified {
+				t.Fatalf("unrepresentable args must be left untouched (modified=true): %q", raw)
+			}
+			if !proto.Equal(req, before) {
+				t.Fatalf("unrepresentable arguments were changed: %q -> %q", raw, sdk.ToolCalls(req.Messages[1])[0].Arguments)
 			}
 		})
 	}
@@ -731,15 +735,15 @@ func TestRehydrationUnrepresentableArgumentsNoPanic(t *testing.T) {
 		ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"}}}`),
 	}}}
 	req.Messages = []*pbv2.Message{
-		{Role: "user", Content: "hi"},
-		{Role: "assistant", ToolCalls: []*pbv2.ToolCall{{Id: "call_1", Name: "read", ArgumentsJson: []byte(`{}`)}}},
+		{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}},
+		{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "call_1", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
 	}
 	res := h.BeforeRequest(req)
 	if res.Err != nil {
 		t.Fatal(res.Err)
 	}
-	if !strings.Contains(string(res.Request.Messages[2].ToolCalls[0].ArgumentsJson), `"i"`) {
-		t.Fatalf("an empty object must be filled: %s", res.Request.Messages[2].ToolCalls[0].ArgumentsJson)
+	if !strings.Contains(string(sdk.ToolCalls(res.Request.Messages[2])[0].Arguments), `"i"`) {
+		t.Fatalf("an empty object must be filled: %s", sdk.ToolCalls(res.Request.Messages[2])[0].Arguments)
 	}
 }
 
