@@ -54,13 +54,14 @@ expect fail "a validator-only permission added" "$tmp/v-extra.go" "$root/plugins
 # A MISLEADING SUBSTRING SDK_REF (a value contained in the pin but not the
 # exact revision) must fail: substring matching would let 0.2.1 or the date
 # pass.
-old_ref=$(cat "$root/SDK_REF")
+# The REAL SDK_REF is never written: the negative uses an overridden file
+# path, so an interrupted or concurrent ordinary gate can never expose a
+# truncated/partial tracked SDK_REF.
 echo "20260804" > "$tmp/SDK_REF"
 if SDK_REF_FILE="$tmp/SDK_REF" bash "$sync" >/dev/null 2>&1; then
   echo "capability sync negative: expected FAILURE for a misleading substring SDK_REF, but the sync passed" >&2
   exit 1
 fi
-echo "$old_ref" > "$root/SDK_REF"
 
 # One-MODULE pin drift: a plugins dir where ONLY schema_translator's go.mod
 # requires a different SDK revision must fail the sync (all-nine agreement).
