@@ -177,7 +177,7 @@ func handleToolCall(call sdk.ToolCall) (sdk.ToolCallAction, error) {
 		// CacheSet is best-effort: a refusal affects FUTURE compaction, not
 		// the validity of this response, so it is logged and the current
 		// tool call still completes. The host records the refusal itself.
-		if herr, err := sdk.CacheSet(intentCacheKey+":"+call.ID, intent); err != nil || herr != nil {
+		if herr, err := sdk.SharedCacheSet(intentCacheKey+":"+call.ID, intent); err != nil || herr != nil {
 			sdk.Log(fmt.Sprintf("intent: cache_set %s:%s refused: %v %v", intentCacheKey, call.ID, herr, err), sdk.LogLevelInfo)
 		}
 		if herr, err := sdk.CacheSet(contentKey(call.Name, args), intent); err != nil || herr != nil {
@@ -297,7 +297,7 @@ func rehydrateHistoryIntents(req *pbv2.ChatRequest) (bool, error) {
 				// Bridge the real intent to this request's own tool_call_id so
 				// the compactors' intent:<tool_call_id> lookup (keyed off the
 				// tool RESULT message) works on harnesses that reassign IDs.
-				if herr, err := sdk.CacheSet(intentCacheKey+":"+tc.Id, intent); err != nil || herr != nil {
+				if herr, err := sdk.SharedCacheSet(intentCacheKey+":"+tc.Id, intent); err != nil || herr != nil {
 					return false, fmt.Errorf("intent: cache_set %s:%s refused: %v %v", intentCacheKey, tc.Id, herr, err)
 				}
 				restored++

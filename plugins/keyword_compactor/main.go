@@ -189,7 +189,7 @@ func compactToolResults(req *pbv2.ChatRequest) (bool, error) {
 			// plugin). NOT_FOUND and present-empty are both unusable (skip +
 			// metric); any other refusal or malformed reply is a contract defect
 			// — error the hook.
-			intent, herr, err := sdk.CacheGet(intentCacheKey + ":" + view.ToolCallId)
+			intent, herr, err := sdk.SharedCacheGet(intentCacheKey + ":" + view.ToolCallId)
 			if err != nil {
 				return false, fmt.Errorf("keyword_compactor: cache_get %s:%s: %w", intentCacheKey, view.ToolCallId, err)
 			}

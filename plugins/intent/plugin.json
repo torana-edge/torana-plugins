@@ -23,7 +23,11 @@
     },
     {
       "name": "env.cache_set",
-      "description": "Store extracted intents by tool_call_id and content key; bridge rehydrated intents to request-side tool_call_ids"
+      "description": "Store private content-addressed intent rehydration entries"
+    },
+    {
+      "name": "env.shared_cache_set",
+      "description": "Publish intent:<tool_call_id> values for approved compactor consumers"
     },
     {
       "name": "env.emit_metric",
