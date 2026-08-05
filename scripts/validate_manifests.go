@@ -82,8 +82,88 @@ var knownPermissions = map[string]bool{
 	"env.log":                                  true, "env.meta_get": true, "env.meta_set": true,
 	"env.now": true, "env.original_request": true, "env.original_response": true,
 	"env.plugin_config": true, "env.request_headers": true,
-	"env.respond_request": true, "env.route_request": true, "env.serve_http": true,
+	"env.respond_request": true, "env.route_request": true, "env.serve_http": true, "env.set_identity": true,
 	"env.state_get": true, "env.state_keys": true, "env.state_set": true,
+	"ir.cache_control.write":      true,
+	"ir.messages.write.assistant": true, "ir.messages.write.developer": true,
+	"ir.messages.write.other": true, "ir.messages.write.system": true,
+	"ir.messages.write.tool": true, "ir.messages.write.user": true,
+	"ir.model.write": true, "ir.params.write": true,
+	"ir.stream.write": true, "ir.tool_results.write": true, "ir.tools.write": true,
+}
+
+// pluginContract pins one plugin's EXACT approved contract.
+type pluginContract struct {
+	hooks            []string
+	permissions      []string
+	requiresUpstream []string
+}
+
+// pluginContracts is the executable nine-plugin contract table (atomic
+// Migration-C). Every manifest must match its row exactly.
+var pluginContracts = map[string]pluginContract{
+	"auth": {hooks: []string{"run_before_request"},
+		permissions: []string{"env.host_call.verify_virtual_key", "env.request_headers", "env.set_identity"}},
+	"cache_tier_selector": {hooks: []string{"run_before_request"},
+		permissions: []string{"env.host_call.torana_cache_pricing", "env.host_call.torana_plugin_counter", "env.log", "env.now", "env.plugin_config", "env.state_get", "env.state_keys", "env.state_set", "ir.cache_control.write"}},
+	"cache_warmer": {hooks: []string{"run_before_request", "run_on_tick"},
+		permissions: []string{"env.background_tick", "env.host_call.torana_cache_pricing", "env.host_call.torana_send_request", "env.now", "env.plugin_config", "env.state_get", "env.state_keys", "env.state_set"}},
+	"compactor": {hooks: []string{"run_before_request"},
+		permissions:      []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.host_call.torana_evaluate_compaction", "env.host_call.torana_offload_completion", "env.host_call.torana_record_savings", "env.plugin_config", "ir.tool_results.write"},
+		requiresUpstream: []string{"torana/intent"}},
+	"intent": {hooks: []string{"run_before_request", "run_on_stream_chunk"},
+		permissions: []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.log", "env.meta_get", "env.meta_set", "env.plugin_config", "ir.cache_control.write", "ir.messages.write.assistant", "ir.messages.write.developer", "ir.messages.write.other", "ir.messages.write.system", "ir.messages.write.tool", "ir.messages.write.user", "ir.stream.write", "ir.tool_results.write", "ir.tools.write"}},
+	"keyword_compactor": {hooks: []string{"run_before_request"},
+		permissions:      []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.host_call.torana_record_savings", "env.plugin_config", "ir.tool_results.write"},
+		requiresUpstream: []string{"torana/intent"}},
+	"otel": {hooks: []string{"run_before_request", "run_after_response", "run_on_http_request"},
+		permissions: []string{"env.emit_metric", "env.serve_http"}},
+	"pii": {hooks: []string{"run_before_request"},
+		permissions: []string{"env.block_request", "env.cache_get", "env.cache_set", "env.host_call.torana_offload_completion", "env.plugin_config"}},
+	"schema_translator": {hooks: []string{"run_before_request", "run_on_stream_chunk"},
+		permissions: []string{"env.meta_get", "env.meta_set", "ir.messages.write.assistant", "ir.stream.write", "ir.tools.write"}},
+}
+
+func hookNames(hooks []struct {
+	Name string `json:"name"`
+}) []string {
+	out := make([]string, 0, len(hooks))
+	for _, h := range hooks {
+		out = append(out, h.Name)
+	}
+	return out
+}
+
+func permissionNames(perms []struct {
+	Name string `json:"name"`
+}) []string {
+	out := make([]string, 0, len(perms))
+	for _, p := range perms {
+		out = append(out, p.Name)
+	}
+	return out
+}
+
+// sameStringSet compares two lists as SETS: equal membership, no duplicates
+// on either side, order-independent.
+func sameStringSet(a, b []string) bool {
+	set := func(items []string) map[string]int {
+		m := map[string]int{}
+		for _, it := range items {
+			m[it]++
+		}
+		return m
+	}
+	ma, mb := set(a), set(b)
+	if len(ma) != len(mb) {
+		return false
+	}
+	for k, n := range ma {
+		if n != 1 || mb[k] != 1 {
+			return false
+		}
+	}
+	return true
 }
 
 func main() {
@@ -95,15 +175,17 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	dirs := map[string]bool{}
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
+		dirs[entry.Name()] = true
 		dir := filepath.Join(os.Args[1], entry.Name())
 		var m manifest
 		readJSON(filepath.Join(dir, "plugin.json"), &m)
-		if m.SchemaVersion != 1 || m.ID != "torana/"+entry.Name() || m.Name != entry.Name() || !semver.MatchString(m.Version) || m.ABIVersion != "v1" {
-			panic(fmt.Sprintf("%s: incomplete v1 manifest", entry.Name()))
+		if m.SchemaVersion != 1 || m.ID != "torana/"+entry.Name() || m.Name != entry.Name() || !semver.MatchString(m.Version) || m.ABIVersion != "v2" {
+			panic(fmt.Sprintf("%s: incomplete v2 manifest", entry.Name()))
 		}
 		if m.MinimumToranaVersion == "" || !semver.MatchString(m.MinimumToranaVersion) {
 			panic(fmt.Sprintf("%s: invalid or missing minimum_torana_version %q", entry.Name(), m.MinimumToranaVersion))
@@ -136,6 +218,24 @@ func main() {
 			}
 			seen["requires:"+requiredID] = true
 		}
+		// The atomic Migration-C CONTRACT TABLE: the exact approved hooks,
+		// permissions, and requires_upstream per plugin, compared
+		// order-independently with duplicate rejection on both sides. A
+		// stale grant, a missing grant, a dropped hook, or a drifted
+		// upstream dependency fails here.
+		contract, ok := pluginContracts[entry.Name()]
+		if !ok {
+			panic(fmt.Sprintf("%s: no entry in the nine-plugin contract table", entry.Name()))
+		}
+		if !sameStringSet(contract.hooks, hookNames(m.Hooks)) {
+			panic(fmt.Sprintf("%s: hooks %v do not match the contract %v", entry.Name(), hookNames(m.Hooks), contract.hooks))
+		}
+		if !sameStringSet(contract.permissions, permissionNames(m.Permissions)) {
+			panic(fmt.Sprintf("%s: permissions %v do not match the contract %v", entry.Name(), permissionNames(m.Permissions), contract.permissions))
+		}
+		if !sameStringSet(contract.requiresUpstream, m.RequiresUpstream) {
+			panic(fmt.Sprintf("%s: requires_upstream %v does not match the contract %v", entry.Name(), m.RequiresUpstream, contract.requiresUpstream))
+		}
 		var schema map[string]any
 		readJSON(filepath.Join(dir, "schema.json"), &schema)
 		schemaURL, _ := schema["$schema"].(string)
@@ -147,6 +247,22 @@ func main() {
 			validateAgentDescriptor(entry.Name(), agentPath, m)
 		} else if !os.IsNotExist(err) {
 			panic(err)
+		}
+	}
+	// BIDIRECTIONAL inventory: every contract row must have a directory
+	// (a missing plugin passes nothing), and every directory must match a
+	// row (an extra plugin is a contract drift).
+	if len(dirs) != len(pluginContracts) {
+		panic(fmt.Sprintf("plugin count %d does not match the contract table (%d)", len(dirs), len(pluginContracts)))
+	}
+	for name := range pluginContracts {
+		if !dirs[name] {
+			panic(fmt.Sprintf("plugin %s is in the contract table but has no directory", name))
+		}
+	}
+	for name := range dirs {
+		if _, ok := pluginContracts[name]; !ok {
+			panic(fmt.Sprintf("directory %s has no contract-table row", name))
 		}
 	}
 }

@@ -10,13 +10,22 @@
 // restored (rehydration), and never-captured ones get a heuristic fill —
 // without this the model imitates its "i"-stripped history and emission
 // collapses per tool (see rehydrateHistoryIntents). Response side, it
-// buffers the streamed tool-call arguments, extracts the "i" value into the
-// shared cross-request cache (keyed by tool_call_id AND by tool name+args),
-// and strips "i" back off so the agent harness never sees it.
+// extracts the "i" value from the streamed tool call into the shared
+// cross-request cache (keyed by tool_call_id AND by tool name+args), and
+// strips "i" back off so the agent harness never sees it.
 //
 // It exists as its own plugin so the compactors are independent consumers:
 // run "intent" plus EITHER keyword_compactor (deterministic, local) OR
 // compactor (cheap-model offload) — both read the same intent cache.
+//
+// The response side runs on the SDK's StreamHandler: tool-call fragments are
+// buffered host-side (meta_append, under env.meta_set) and presented to
+// OnToolCall as one complete call. This is a deliberate timing change from
+// v1, which hand-rolled its own fragment maps: start/deltas are suppressed
+// and an equivalent assembled start+delta+stop is emitted at block
+// completion. Callback errors are consumed by StreamHandler for fail-open
+// re-emission of the original block — a streamed response must never be
+// truncated by a plugin failure.
 package main
 
 import (
@@ -24,11 +33,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strings"
 	"sync"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 func main() {}
@@ -55,28 +63,52 @@ var (
 	fillMode = "heuristic"
 )
 
+// parseConfig is the pure config decoder; loadConfig installs its result into
+// the process-global state exactly once. The host validates config against
+// schema.json at write time, so an unmarshal failure here is unreachable in
+// practice and falls back to defaults, matching v1.
+func parseConfig(raw string) (fill string) {
+	if raw == "" {
+		return "heuristic"
+	}
+	var c struct {
+		Fill string `json:"fill"`
+	}
+	if err := json.Unmarshal([]byte(raw), &c); err != nil {
+		return "heuristic"
+	}
+	if c.Fill != "" {
+		return c.Fill
+	}
+	return "heuristic"
+}
+
 func loadConfig() {
-	cfgOnce.Do(func() {
-		var c struct {
-			Fill string `json:"fill"`
-		}
-		if raw := sdk.PluginConfig(); raw != "" {
-			_ = json.Unmarshal([]byte(raw), &c)
-		}
-		if c.Fill != "" {
-			fillMode = c.Fill
-		}
-	})
+	cfgOnce.Do(func() { fillMode = parseConfig(sdk.PluginConfig()) })
+}
+
+// resetConfigForTest restores every config global so a test row can install a
+// fresh config. Production never calls it; the once-only loader is unchanged.
+func resetConfigForTest() {
+	cfgOnce = sync.Once{}
+	fillMode = "heuristic"
 }
 
 func init() {
 	// ── Request side: teach the "i" convention ──────────────────────
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv2.ChatRequest) (sdk.RequestResult, error) {
 		if len(req.Tools) == 0 {
-			return nil, nil
+			return sdk.PassRequest(), nil
 		}
-		modified := injectIntentSchema(req)
-		modified = injectSystemPrompt(req) || modified
+		modified, err := injectIntentSchema(req)
+		if err != nil {
+			return sdk.RequestResult{}, err
+		}
+		promptChanged, err := injectSystemPrompt(req)
+		if err != nil {
+			return sdk.RequestResult{}, err
+		}
+		modified = promptChanged || modified
 		// Re-hydrate "i" onto the model's PRIOR tool calls in history. We
 		// strip "i" before returning to the harness, so the harness replays
 		// the model's own tool calls without it — and the model imitates that
@@ -84,121 +116,119 @@ func init() {
 		// (measured: ~96% single-turn capture collapses to ~18% multi-turn).
 		// Restoring "i" here (from the cache we populated when it was first
 		// emitted) shows the model a consistent history, so it keeps emitting.
-		modified = rehydrateHistoryIntents(req) || modified
+		rehydrated, err := rehydrateHistoryIntents(req)
+		if err != nil {
+			return sdk.RequestResult{}, err
+		}
+		modified = rehydrated || modified
 		if !modified {
-			return nil, nil
+			return sdk.PassRequest(), nil
 		}
-		return req, nil
+		return sdk.ReplaceRequest(req), nil
 	})
 
-	// ── Response side: extract intent ───────────────────────────────
+	// ── Response side: extract intent from the assembled tool call ──
 	//
-	// Argument deltas are buffered and suppressed; at ToolCallEnd the
-	// assembled arguments (intent extracted, "i" stripped when Torana
-	// injected it) are emitted as one complete ToolCallDelta followed
-	// by the ToolCallEnd.
-	sdk.OnStreamChunk(func(ctx context.Context, chunk *pb.StreamEvent) (*pb.StreamEventResult, error) {
-		// Track tool call by index.
-		if ts := chunk.GetToolCallStart(); ts != nil {
-			sdk.HostCall("env.meta_set", fmt.Sprintf(`{"key":"tool:%d","value":%q}`, ts.Index, ts.Id))
-			sdk.HostCall("env.meta_set", fmt.Sprintf(`{"key":"name:%d","value":%q}`, ts.Index, ts.Name))
-			return sdk.Pass(), nil
-		}
-
-		// Buffer and suppress tool call argument fragments.
-		if td := chunk.GetToolCallDelta(); td != nil {
-			toolID, _ := sdk.HostCall("env.meta_get", fmt.Sprintf("tool:%d", td.Index))
-			if toolID == "" {
-				return sdk.Pass(), nil
-			}
-			key := "frag:" + toolID
-			prev, _ := sdk.HostCall("env.meta_get", key)
-			sdk.HostCall("env.meta_set", fmt.Sprintf(`{"key":"%s","value":%q}`, key, prev+td.ArgumentsDelta))
-			return sdk.Suppress(), nil
-		}
-
-		// On ToolCallEnd: extract intent, optionally strip "i", emit args.
-		if te := chunk.GetToolCallEnd(); te != nil {
-			toolID, _ := sdk.HostCall("env.meta_get", fmt.Sprintf("tool:%d", te.Index))
-			toolName, _ := sdk.HostCall("env.meta_get", fmt.Sprintf("name:%d", te.Index))
-			if toolID == "" {
-				return sdk.Pass(), nil
-			}
-			key := "frag:" + toolID
-			fullArgs, _ := sdk.HostCall("env.meta_get", key)
-			// Clean up (empty value deletes the key).
-			sdk.HostCall("env.meta_set", fmt.Sprintf(`{"key":"%s","value":""}`, key))
-			sdk.HostCall("env.meta_set", fmt.Sprintf(`{"key":"tool:%d","value":""}`, te.Index))
-			sdk.HostCall("env.meta_set", fmt.Sprintf(`{"key":"name:%d","value":""}`, te.Index))
-
-			if fullArgs == "" {
-				// No fragments were buffered — nothing to re-emit.
-				return sdk.Pass(), nil
-			}
-
-			emitArgs := func(args string) *pb.StreamEventResult {
-				// The fragments were suppressed, so the complete arguments
-				// MUST be emitted here even when unchanged.
-				return sdk.Emit(
-					&pb.StreamEvent{
-						Event: &pb.StreamEvent_ToolCallDelta{
-							ToolCallDelta: &pb.ToolCallDelta{
-								Index:          te.Index,
-								ArgumentsDelta: args,
-							},
-						},
-					},
-					chunk,
-				)
-			}
-
-			var args map[string]any
-			if !strings.HasPrefix(fullArgs, "{") || json.Unmarshal([]byte(fullArgs), &args) != nil {
-				return emitArgs(fullArgs), nil
-			}
-
-			// Extract and cache intent. Phase 0 observability: count how
-			// often the model actually follows the convention, per tool.
-			labels := map[string]string{"tool": toolName}
-			if intent, ok := args[intentField].(string); ok && intent != "" {
-				// Key by tool_call_id (works when the harness echoes IDs, e.g.
-				// most OpenAI clients) AND by tool name+args content. The
-				// content key survives harnesses that reassign tool_call_ids
-				// across turns (Claude Code does), which is the only key
-				// rehydration can rely on since the response-stream ID never
-				// reappears in later request history.
-				sdk.HostCall("env.cache_set", fmt.Sprintf(`{"key":"%s:%s","value":%q}`, intentCacheKey, toolID, intent))
-				sdk.HostCall("env.cache_set", fmt.Sprintf(`{"key":%q,"value":%q}`, contentKey(toolName, args), intent))
-				sdk.EmitMetric("torana_intent_captured_total", sdk.MetricCounter, 1, labels)
-				// Debug visibility for dogfooding: intent QUALITY (goal vs
-				// action description) is only judgeable by reading the values.
-				// truncateRunes, not intent[:160]: a byte slice cuts mid-rune
-				// on non-ASCII intents. This one only reaches sdk.Log, so it
-				// corrupts a debug line rather than trapping — but the helper
-				// is right here in this file.
-				sdk.Log(fmt.Sprintf("intent[%s %s]: %s", toolName, toolID, truncateRunes(intent, 160)), sdk.LogLevelDebug)
-			} else {
-				sdk.EmitMetric("torana_intent_absent_total", sdk.MetricCounter, 1, labels)
-				sdk.Log(fmt.Sprintf("intent[%s %s]: ABSENT", toolName, toolID), sdk.LogLevelDebug)
-			}
-
-			// Strip "i" if not originally in schema.
-			if toolName != "" {
-				hadIRaw, _ := sdk.HostCall("env.meta_get", "hadI:"+toolName)
-				if hadIRaw != "true" {
-					delete(args, intentField)
-				}
-			}
-
-			modifiedJSON, err := json.Marshal(args)
-			if err != nil {
-				return emitArgs(fullArgs), nil
-			}
-			return emitArgs(string(modifiedJSON)), nil
-		}
-
-		return sdk.Pass(), nil
+	// StreamHandler buffers start/deltas host-side and presents the complete
+	// call to OnToolCall; it re-emits the assembled start+delta+stop itself
+	// (preserving the ToolCallRef, clearing a bound signature only when the
+	// arguments actually change, and re-emitting the original block if the
+	// callback errors — fail-open, because earlier fragments were already
+	// suppressed and a truncated call would be executed by the agent).
+	handler := sdk.NewStreamHandler()
+	handler.OnToolCall(func(ctx context.Context, call sdk.ToolCall) (sdk.ToolCallAction, error) {
+		return handleToolCall(call)
 	})
+	handler.Register()
+}
+
+// handleToolCall extracts and caches the intent from one assembled tool call,
+// then strips "i" (unless the tool natively declares it) so the harness never
+// sees the field Torana injected.
+//
+// Pass-through is SEMANTIC: whenever the plugin does not actually delete a
+// field, the ORIGINAL argument bytes and the bound signature must travel
+// unchanged. JSON formatting or key order in the model's output is never a
+// reason to rewrite the block.
+func handleToolCall(call sdk.ToolCall) (sdk.ToolCallAction, error) {
+	// Parse regardless of leading whitespace (json.Unmarshal accepts it);
+	// invalid, non-object, and "null" arguments (args stays nil) are not
+	// representable and pass the exact bytes.
+	var args map[string]any
+	if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil || args == nil {
+		return sdk.PassToolCall(), nil
+	}
+
+	// Extract and cache intent. Phase 0 observability: count how often the
+	// model actually follows the convention, per tool. FIELD PRESENCE and
+	// CAPTURE VALIDITY are independent facts: only a non-empty string is a
+	// usable intent, but ANY present "i" key is Torana's injected field
+	// unless the tool natively declares it (decided by the hadI marker).
+	labels := map[string]string{"tool": call.Name}
+	rawI, hasIntent := args[intentField]
+	intent, usable := rawI.(string)
+	if usable && intent != "" {
+		// Key by tool_call_id (works when the harness echoes IDs, e.g. most
+		// OpenAI clients) AND by tool name+args content. The content key
+		// survives harnesses that reassign tool_call_ids across turns (Claude
+		// Code does), which is the only key rehydration can rely on since the
+		// response-stream ID never reappears in later request history.
+		//
+		// CacheSet is best-effort: a refusal affects FUTURE compaction, not
+		// the validity of this response, so it is logged and the current
+		// tool call still completes. The host records the refusal itself.
+		if herr, err := sdk.CacheSet(intentCacheKey+":"+call.ID, intent); err != nil || herr != nil {
+			sdk.Log(fmt.Sprintf("intent: cache_set %s:%s refused: %v %v", intentCacheKey, call.ID, herr, err), sdk.LogLevelInfo)
+		}
+		if herr, err := sdk.CacheSet(contentKey(call.Name, args), intent); err != nil || herr != nil {
+			sdk.Log(fmt.Sprintf("intent: cache_set content key refused: %v %v", herr, err), sdk.LogLevelInfo)
+		}
+		sdk.EmitMetric("torana_intent_captured_total", sdk.MetricCounter, 1, labels)
+		// Debug visibility for dogfooding: intent QUALITY (goal vs action
+		// description) is only judgeable by reading the values.
+		sdk.Log(fmt.Sprintf("intent[%s %s]: %s", call.Name, call.ID, truncateRunes(intent, 160)), sdk.LogLevelDebug)
+	} else {
+		sdk.EmitMetric("torana_intent_absent_total", sdk.MetricCounter, 1, labels)
+		sdk.Log(fmt.Sprintf("intent[%s %s]: ABSENT", call.Name, call.ID), sdk.LogLevelDebug)
+	}
+
+	// No "i" key at all: absent observability already emitted, exact pass
+	// with NO marker lookup, marshal, or signature change.
+	if !hasIntent {
+		return sdk.PassToolCall(), nil
+	}
+
+	// Any present "i" value (string, empty, number, object, boolean, null)
+	// is Torana's injected field unless the tool natively declares it. A
+	// refusal to READ the hadI marker is a protocol failure (the key is only
+	// written by this plugin's request side): log and return an error so
+	// StreamHandler re-emits the original block — never a guess about
+	// whether to strip.
+	hadI := ""
+	if call.Name != "" {
+		var herr *pbv2.HostError
+		var err error
+		hadI, herr, err = sdk.MetaGet("hadI:" + call.Name)
+		if err != nil || (herr != nil && !sdk.IsNotFound(herr)) {
+			sdk.Log(fmt.Sprintf("intent: hadI meta_get refused: %v %v", herr, err), sdk.LogLevelInfo)
+			return sdk.ToolCallAction{}, fmt.Errorf("intent: hadI meta_get failed: %v %v", herr, err)
+		}
+	}
+	if hadI == "true" {
+		// Native field: the original block (with "i" of ANY value and its
+		// signature) passes byte-identical.
+		return sdk.PassToolCall(), nil
+	}
+
+	// Injected "i" of ANY type/value: delete it, marshal the changed
+	// object, and replace — the arguments changed, so StreamHandler clears
+	// the bound signature.
+	delete(args, intentField)
+	modifiedJSON, err := json.Marshal(args)
+	if err != nil {
+		return sdk.PassToolCall(), nil
+	}
+	return sdk.ReplaceToolArguments(string(modifiedJSON)), nil
 }
 
 // ==========================================================================
@@ -218,19 +248,34 @@ func init() {
 // is NOT safe: models copy the literal value into new calls. Trailing
 // reminder messages recovered only ~70% in the same experiments and add
 // contamination surface — kept as a fallback idea, not implemented.
-func rehydrateHistoryIntents(req *pb.ChatRequest) bool {
+//
+// Cache semantics are the request-side contract: NOT_FOUND and present-empty
+// are both unusable (the fill path, which is never cached); any other refusal
+// or a malformed reply is a contract/configuration defect and returns an
+// error so failure_mode applies and the host records the failure.
+func rehydrateHistoryIntents(req *pbv2.ChatRequest) (bool, error) {
 	loadConfig()
 	restored, filled, present := 0, 0, 0
 	modified := false
 	for _, msg := range req.Messages {
-		if msg.Role != "assistant" || len(msg.ToolCalls) == 0 {
+		// The semantic scope is ASSISTANT HISTORY (past tool-use turns), so
+		// the role gate is preserved; the calls themselves are the ordered
+		// tool-use blocks.
+		if msg.Role != "assistant" || len(msg.Blocks) == 0 {
 			continue
 		}
-		for _, tc := range msg.ToolCalls {
+		calls := sdk.ToolCalls(msg)
+		if len(calls) == 0 {
+			continue
+		}
+		for _, tc := range calls {
 			var args map[string]any
-			if len(tc.ArgumentsJson) == 0 {
+			if len(tc.Arguments) == 0 {
 				args = map[string]any{}
-			} else if json.Unmarshal(tc.ArgumentsJson, &args) != nil {
+			} else if json.Unmarshal(tc.Arguments, &args) != nil || args == nil {
+				// Unrepresentable history arguments: null (which decodes as a
+				// nil map), arrays, scalars, malformed JSON. Leave them
+				// unchanged — assigning into a nil map would panic.
 				continue
 			}
 			if _, ok := args[intentField]; ok {
@@ -241,12 +286,20 @@ func rehydrateHistoryIntents(req *pb.ChatRequest) bool {
 			// key that survives harnesses reassigning tool_call_ids across
 			// turns — the response-stream ID we cached under never reappears
 			// in later request history.
-			intent, _ := sdk.HostCall("env.cache_get", contentKey(tc.Name, args))
-			if intent != "" {
+			intent, herr, err := sdk.CacheGet(contentKey(tc.Name, args))
+			if err != nil {
+				return false, fmt.Errorf("intent: cache_get %q: %w", contentKey(tc.Name, args), err)
+			}
+			if herr != nil && !sdk.IsNotFound(herr) {
+				return false, fmt.Errorf("intent: cache_get %q refused: %s", contentKey(tc.Name, args), herr.Message)
+			}
+			if herr == nil && intent != "" {
 				// Bridge the real intent to this request's own tool_call_id so
 				// the compactors' intent:<tool_call_id> lookup (keyed off the
 				// tool RESULT message) works on harnesses that reassign IDs.
-				sdk.HostCall("env.cache_set", fmt.Sprintf(`{"key":"%s:%s","value":%q}`, intentCacheKey, tc.Id, intent))
+				if herr, err := sdk.CacheSet(intentCacheKey+":"+tc.Id, intent); err != nil || herr != nil {
+					return false, fmt.Errorf("intent: cache_set %s:%s refused: %v %v", intentCacheKey, tc.Id, herr, err)
+				}
 				restored++
 			} else {
 				if fillMode == "off" {
@@ -262,7 +315,17 @@ func rehydrateHistoryIntents(req *pb.ChatRequest) bool {
 			}
 			args[intentField] = intent
 			if b, err := json.Marshal(args); err == nil {
-				tc.ArgumentsJson = b
+				// The view is a COPY and the mutation must be
+				// PROVENANCE-AWARE: ReplaceToolCall targets the real block
+				// (position-addressed by the view), clears the call-bound
+				// signature token on a REAL change, and preserves it on a
+				// byte-identical no-op. The intent field was absent before,
+				// so the re-marshal always differs — a real change.
+				if err := sdk.ReplaceToolCall(msg, tc.Block, sdk.ToolCallInput{
+					Id: tc.Id, Name: tc.Name, Arguments: b,
+				}); err != nil {
+					return false, fmt.Errorf("intent: replace history tool call: %w", err)
+				}
 				modified = true
 			}
 		}
@@ -270,7 +333,7 @@ func rehydrateHistoryIntents(req *pb.ChatRequest) bool {
 	if restored+filled > 0 {
 		sdk.Log(fmt.Sprintf("rehydrate: %d restored, %d filled, %d already present", restored, filled, present), sdk.LogLevelDebug)
 	}
-	return modified
+	return modified, nil
 }
 
 // heuristicFill derives a stand-in intent for a history tool call whose real
@@ -340,7 +403,7 @@ func contentKey(name string, args map[string]any) string {
 // Schema injection
 // ==========================================================================
 
-func injectIntentSchema(req *pb.ChatRequest) bool {
+func injectIntentSchema(req *pbv2.ChatRequest) (bool, error) {
 	modified := false
 	for _, tool := range req.Tools {
 		if len(tool.ParametersJson) == 0 {
@@ -379,7 +442,13 @@ func injectIntentSchema(req *pb.ChatRequest) bool {
 		// yielded action-labels like "Map repo structure", which starve the
 		// compactors' keyword extraction).
 		if existing, exists := props[intentField]; exists {
-			sdk.HostCall("env.meta_set", fmt.Sprintf(`{"key":"hadI:%s","value":"true"}`, tool.Name))
+			// A refusal to record the marker is a request-side contract
+			// defect: fail the hook so failure_mode applies rather than
+			// stripping "i" on the response side of a tool we promised to
+			// preserve.
+			if herr, err := sdk.MetaSet("hadI:"+tool.Name, "true"); err != nil || herr != nil {
+				return false, fmt.Errorf("intent: hadI meta_set refused for %s: %v %v", tool.Name, herr, err)
+			}
 			if m, ok := existing.(map[string]any); ok {
 				m["description"] = intentDescription
 			}
@@ -431,29 +500,51 @@ func injectIntentSchema(req *pb.ChatRequest) bool {
 			modified = true
 		}
 	}
-	return modified
+	return modified, nil
 }
 
 // injectSystemPrompt appends the "i" convention with a one-line example
 // TRANSCRIPT embedded in the system prompt — the winning strategy from the
 // Jul 16 experiments: it matches few-shot messages on intent quality with
 // zero conversation contamination and no per-request message overhead.
-func injectSystemPrompt(req *pb.ChatRequest) bool {
-	const addendum = "\n\nEvery tool call has an \"i\" field: the underlying question the call " +
-		"helps answer, never the action taken. Example of a good call:\n" +
-		"  read_file(path=\"src/pricing.ts\", i=\"Which table maps locale to currency, to find why EU shows USD\")\n" +
-		"Example of a BAD value: i=\"reading pricing.ts\" (action description — discarded)."
-	modified := false
+// addendum is the "i" convention text appended to the system prompt (see
+// injectSystemPrompt for the strategy notes). Package-level so the tests pin
+// the exact production bytes.
+const addendum = "\n\nEvery tool call has an \"i\" field: the underlying question the call " +
+	"helps answer, never the action taken. Example of a good call:\n" +
+	"  read_file(path=\"src/pricing.ts\", i=\"Which table maps locale to currency, to find why EU shows USD\")\n" +
+	"Example of a BAD value: i=\"reading pricing.ts\" (action description — discarded)."
+
+func injectSystemPrompt(req *pbv2.ChatRequest) (bool, error) {
 	for _, msg := range req.Messages {
-		if msg.Role == "system" {
-			msg.Content += addendum
-			modified = true
-			return modified
+		if msg.Role != "system" {
+			continue
 		}
+		// Append to the LAST text block of the system prompt via the
+		// PROVENANCE-AWARE helper: a real change clears the text block's
+		// signature AND any trailing-signature carrier whose covered content
+		// changed; a byte-identical no-op preserves every token.
+		for i := len(msg.Blocks) - 1; i >= 0; i-- {
+			if t := msg.Blocks[i].GetText(); t != nil {
+				if err := sdk.SetTextAt(msg, i, t.Text+addendum); err != nil {
+					return false, fmt.Errorf("intent: system prompt append: %w", err)
+				}
+				return true, nil
+			}
+		}
+		// A system message with NO text block: the SDK's valid no-text path
+		// appends one at the end (removing a final trailing carrier first —
+		// content appended after the token's covered scope is stale).
+		if err := sdk.ReplaceAllText(msg, addendum); err != nil {
+			return false, fmt.Errorf("intent: system prompt no-text append: %w", err)
+		}
+		return true, nil
 	}
-	req.Messages = append([]*pb.Message{{
-		Role:    "system",
-		Content: "[SYSTEM]" + addendum,
+	req.Messages = append([]*pbv2.Message{{
+		Role: "system",
+		Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{
+			Text: &pbv2.RequestTextBlock{Text: "[SYSTEM]" + addendum},
+		}}},
 	}}, req.Messages...)
-	return true
+	return true, nil
 }

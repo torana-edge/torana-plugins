@@ -3,20 +3,36 @@
   "id": "torana/pii",
   "name": "pii",
   "version": "0.1.0",
-  "abi_version": "v1",
+  "abi_version": "v2",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "block",
   "repository": "https://github.com/torana-edge/torana-plugins",
   "description": "Scans tool results through a local model + regex pre-filter and blocks the request if PII is detected",
   "hooks": [
-    {"name": "run_before_request"}
+    {
+      "name": "run_before_request"
+    }
   ],
   "permissions": [
-    {"name": "env.cache_get", "description": "Skip re-scanning tool results already cleared this session"},
-    {"name": "env.cache_set", "description": "Cache clean verdicts by tool_call_id"},
-    {"name": "env.host_call.torana_offload_completion", "description": "Send tool output to the local PII-detection model"},
-    {"name": "env.block_request", "description": "Reject a request whose tool output contains PII"},
-    {"name": "env.plugin_config", "description": "Read plugins.config.pii (provider, model, tools, on_error)"},
-    {"name": "env.log", "description": "Diagnostic logging"}
+    {
+      "name": "env.block_request",
+      "description": "Reject a request whose tool output contains PII"
+    },
+    {
+      "name": "env.cache_get",
+      "description": "Skip re-scanning tool results already cleared this session"
+    },
+    {
+      "name": "env.cache_set",
+      "description": "Cache clean verdicts by tool_call_id"
+    },
+    {
+      "name": "env.host_call.torana_offload_completion",
+      "description": "Send tool output to the local PII-detection model"
+    },
+    {
+      "name": "env.plugin_config",
+      "description": "Read plugins.config.pii (provider, model, tools, on_error)"
+    }
   ]
 }

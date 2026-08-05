@@ -1,14 +1,19 @@
 package main
 
-import "testing"
+import (
+	"testing"
 
-// status_class used to be computed and then dropped: the duration and token
-// metrics built fresh label maps holding only the model. Latency and token
-// spend could not be split by outcome, which is the first thing anyone asks of
-// these metrics.
+	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	"github.com/torana-edge/torana-plugin-sdk/sdktest"
+)
+
+// ==========================================================================
+// Pure helpers (ported from v1; the response surface is now first-class v2
+// ChatResponse fields instead of ToranaMeta._response parsing).
+// ==========================================================================
 
 func TestStatusClass(t *testing.T) {
-	for status, want := range map[int]string{
+	for status, want := range map[int32]string{
 		200: "2xx", 201: "2xx", 299: "2xx",
 		301: "3xx",
 		400: "4xx", 429: "4xx",
@@ -23,7 +28,7 @@ func TestStatusClass(t *testing.T) {
 // A status Torana never observed is 0, and bucketing that as "2xx" would make
 // unreported outcomes indistinguishable from successes.
 func TestStatusClassDoesNotInventSuccess(t *testing.T) {
-	for _, status := range []int{0, -1, 199} {
+	for _, status := range []int32{0, -1, 199} {
 		if got := statusClass(status); got == "2xx" {
 			t.Errorf("statusClass(%d) = %q; an unobserved status must not read as success", status, got)
 		}
@@ -36,8 +41,6 @@ func TestWithLabelDoesNotMutateTheBase(t *testing.T) {
 	input := withLabel(base, "direction", "input")
 	output := withLabel(base, "direction", "output")
 
-	// The base is emitted with several series. Mutating it would leak
-	// "direction" onto every metric emitted after the first token count.
 	if _, leaked := base["direction"]; leaked {
 		t.Error("withLabel mutated the base map; direction would leak onto other series")
 	}
@@ -50,15 +53,6 @@ func TestWithLabelDoesNotMutateTheBase(t *testing.T) {
 		}
 	}
 }
-
-// The bug this file exists for: status_class was computed, attached to the
-// responses_total labels, and then dropped — the duration and token metrics
-// built fresh maps holding only the model.
-//
-// The first version of these tests could not catch it. sdk.EmitMetric is a host
-// call, so labels assembled inline in the hook closure are unobservable from a
-// test; reverting the entire fix left the suite green. responseMetrics exists so
-// the labels are a value that can be inspected.
 
 func findEmissions(t *testing.T, out []emission, name string) []emission {
 	t.Helper()
@@ -74,22 +68,26 @@ func findEmissions(t *testing.T, out []emission, name string) []emission {
 	return found
 }
 
-// TestEveryResponseSeriesCarriesStatusClass is the regression test.
+// resp builds a ChatResponse with the given facts.
+func resp(model string, status int32, durationMs int64, input, output int32) *pbv2.ChatResponse {
+	return &pbv2.ChatResponse{
+		Model:          model,
+		UpstreamStatus: status,
+		DurationMs:     durationMs,
+		Usage:          &pbv2.Usage{InputTokens: input, OutputTokens: output},
+	}
+}
+
+// TestEveryResponseSeriesCarriesStatusClass — the v1 regression: status_class
+// on EVERY series when a status is observed.
 func TestEveryResponseSeriesCarriesStatusClass(t *testing.T) {
-	meta := &responseMeta{DurationMs: 1234, UpstreamStatus: 503}
-	meta.Usage.InputTokens = 100
-	meta.Usage.OutputTokens = 20
-
-	out := responseMetrics("gpt-4", meta)
-
+	out := responseMetrics(resp("gpt-4", 503, 1234, 100, 20))
 	if len(out) != 4 {
 		t.Fatalf("expected 4 series (responses, duration, 2 token directions), got %d: %+v", len(out), out)
 	}
 	for _, m := range out {
 		if got := m.Labels["status_class"]; got != "5xx" {
-			t.Errorf("%s (direction=%q) has status_class=%q, want 5xx — "+
-				"without it, latency and token spend cannot be split by outcome",
-				m.Name, m.Labels["direction"], got)
+			t.Errorf("%s (direction=%q) has status_class=%q, want 5xx", m.Name, m.Labels["direction"], got)
 		}
 		if m.Labels["model"] != "gpt-4" {
 			t.Errorf("%s lost the model label: %v", m.Name, m.Labels)
@@ -97,19 +95,12 @@ func TestEveryResponseSeriesCarriesStatusClass(t *testing.T) {
 	}
 }
 
-// The token series must be distinguishable, and adding direction to one must
-// not leak into the other or into the shared base.
 func TestTokenDirectionsDoNotLeak(t *testing.T) {
-	meta := &responseMeta{UpstreamStatus: 200}
-	meta.Usage.InputTokens = 100
-	meta.Usage.OutputTokens = 20
-
-	out := responseMetrics("gpt-4", meta)
+	out := responseMetrics(resp("gpt-4", 200, 0, 100, 20))
 	tokens := findEmissions(t, out, "torana_plugin_tokens")
 	if len(tokens) != 2 {
 		t.Fatalf("expected 2 token series, got %d", len(tokens))
 	}
-
 	seen := map[string]float64{}
 	for _, m := range tokens {
 		seen[m.Labels["direction"]] = m.Value
@@ -117,7 +108,6 @@ func TestTokenDirectionsDoNotLeak(t *testing.T) {
 	if seen["input"] != 100 || seen["output"] != 20 {
 		t.Errorf("token values/directions wrong: %v", seen)
 	}
-
 	for _, m := range findEmissions(t, out, "torana_plugin_request_duration_ms") {
 		if _, leaked := m.Labels["direction"]; leaked {
 			t.Errorf("direction leaked onto the duration series: %v", m.Labels)
@@ -125,10 +115,55 @@ func TestTokenDirectionsDoNotLeak(t *testing.T) {
 	}
 }
 
-// A response with no metadata gets one honest series and NO status_class:
-// labelling an unobserved outcome "2xx" would invent a measurement.
-func TestResponseWithoutMetaEmitsOneUnlabelledSeries(t *testing.T) {
-	out := responseMetrics("gpt-4", nil)
+// TestObservationalStreamShape — the real host dispatches after-response for
+// streams with mutable=false and Message==nil but with completed facts. The
+// metrics must not require Message.
+func TestObservationalStreamShape(t *testing.T) {
+	stream := resp("claude-sonnet-4", 200, 987, 500, 60)
+	stream.Message = nil // stream-shaped: no assistant message
+	out := responseMetrics(stream)
+	if len(out) != 4 {
+		t.Fatalf("stream-shaped dispatch must emit the same 4 series, got %d", len(out))
+	}
+	for _, m := range out {
+		if m.Labels["status_class"] != "2xx" {
+			t.Errorf("stream series missing the observed class: %v", m.Labels)
+		}
+	}
+}
+
+// TestUpstreamErrorShape — upstream-error dispatches carry facts and a >=400
+// status; the class must be on every series.
+func TestUpstreamErrorShape(t *testing.T) {
+	out := responseMetrics(resp("claude-sonnet-4", 429, 321, 0, 0))
+	for _, m := range out {
+		if m.Labels["status_class"] != "4xx" {
+			t.Errorf("error series missing the observed class: %v", m.Labels)
+		}
+	}
+}
+
+// TestStatusZeroEmitsFactsWithoutClass — UpstreamStatus == 0 is unobserved:
+// genuinely present facts (response happened, duration, usage) are emitted,
+// but NO status_class appears on ANY series.
+func TestStatusZeroEmitsFactsWithoutClass(t *testing.T) {
+	out := responseMetrics(resp("gpt-4", 0, 55, 30, 5))
+	if len(out) != 4 {
+		t.Fatalf("facts must still be emitted for an unobserved status, got %d", len(out))
+	}
+	for _, m := range out {
+		if _, claimed := m.Labels["status_class"]; claimed {
+			t.Errorf("status 0 must not claim a class: %v", m.Labels)
+		}
+	}
+	if got := findEmissions(t, out, "torana_plugin_request_duration_ms")[0].Value; got != 55 {
+		t.Errorf("duration fact lost: %v", got)
+	}
+}
+
+// A nil response (no facts at all) gets one honest series and no status_class.
+func TestResponseWithoutFactsEmitsOneUnlabelledSeries(t *testing.T) {
+	out := responseMetrics(nil)
 	if len(out) != 1 || out[0].Name != "torana_plugin_responses_total" {
 		t.Fatalf("expected exactly the responses counter, got %+v", out)
 	}
@@ -137,10 +172,9 @@ func TestResponseWithoutMetaEmitsOneUnlabelledSeries(t *testing.T) {
 	}
 }
 
-// Zero token counts are absent rather than reported as zero — a zero-token
-// response is a measurement nobody made.
+// Zero token counts are absent rather than reported as zero.
 func TestZeroTokenCountsAreNotEmitted(t *testing.T) {
-	out := responseMetrics("gpt-4", &responseMeta{UpstreamStatus: 200})
+	out := responseMetrics(resp("gpt-4", 200, 0, 0, 0))
 	for _, m := range out {
 		if m.Name == "torana_plugin_tokens" {
 			t.Errorf("emitted a token series with no usage reported: %+v", m)
@@ -148,18 +182,88 @@ func TestZeroTokenCountsAreNotEmitted(t *testing.T) {
 	}
 }
 
-func TestParseResponseMeta(t *testing.T) {
-	if got := parseResponseMeta(nil); got != nil {
-		t.Errorf("nil meta should parse to nil, got %+v", got)
+// ==========================================================================
+// Hook-level (sdktest)
+// ==========================================================================
+
+// TestRequestShapeMetricsAndPassThrough — the request hook emits shape metrics
+// and always passes through.
+func TestRequestShapeMetricsAndPassThrough(t *testing.T) {
+	h := sdktest.New(t)
+	res := h.BeforeRequest(&pbv2.ChatRequest{Model: "gpt-4", Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}}}})
+	if res.Err != nil || !res.PassedThrough {
+		t.Fatalf("otel must pass requests through, err=%v", res.Err)
 	}
-	if got := parseResponseMeta([]byte(`{"other":"field"}`)); got != nil {
-		t.Errorf("meta without _response should be nil, got %+v", got)
+	seen := map[string]bool{}
+	for _, m := range h.Metrics() {
+		seen[m.Name] = true
+		if m.Labels["model"] != "gpt-4" {
+			t.Errorf("%s missing the model label: %v", m.Name, m.Labels)
+		}
 	}
-	if got := parseResponseMeta([]byte(`not json`)); got != nil {
-		t.Errorf("unparseable meta should be nil, got %+v", got)
+	for _, want := range []string{"torana_plugin_requests_total", "torana_plugin_request_messages", "torana_plugin_request_tools"} {
+		if !seen[want] {
+			t.Errorf("missing request metric %s", want)
+		}
 	}
-	got := parseResponseMeta([]byte(`{"_response":{"duration_ms":42,"upstream_status":429,"usage":{"input_tokens":7}}}`))
-	if got == nil || got.UpstreamStatus != 429 || got.DurationMs != 42 || got.Usage.InputTokens != 7 {
-		t.Errorf("meta misparsed: %+v", got)
+}
+
+// TestResponseHookEmitsFactsForMutableAndObservational — the after-response
+// hook emits the same factual series for mutable=true and stream/error-shaped
+// mutable=false dispatches.
+func TestResponseHookEmitsFactsForMutableAndObservational(t *testing.T) {
+	for name, mk := range map[string]func() *pbv2.ChatResponse{
+		"mutable json":  func() *pbv2.ChatResponse { return resp("gpt-4", 200, 100, 10, 5) },
+		"stream shaped": func() *pbv2.ChatResponse { r := resp("gpt-4", 200, 200, 20, 6); r.Message = nil; return r },
+		"error shaped":  func() *pbv2.ChatResponse { return resp("gpt-4", 502, 300, 0, 0) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := sdktest.New(t)
+			res := h.AfterResponse(mk(), false)
+			if res.Err != nil || !res.PassedThrough {
+				t.Fatalf("otel must pass responses through, err=%v", res.Err)
+			}
+			found := false
+			for _, m := range h.Metrics() {
+				if m.Name == "torana_plugin_request_duration_ms" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatal("response metrics not emitted")
+			}
+		})
+	}
+}
+
+// TestHTTPRoutes — / and /agent/status are served; unknown paths pass to the
+// host (404).
+func TestHTTPRoutes(t *testing.T) {
+	h := sdktest.New(t)
+	ok := h.HTTPRequest(&pbv2.HttpRequest{Method: "GET", Path: "/agent/status"})
+	if ok.Err != nil || ok.Response == nil || ok.Response.Status != 200 {
+		t.Fatalf("agent/status must be served, got %+v", ok.Response)
+	}
+	root := h.HTTPRequest(&pbv2.HttpRequest{Method: "GET", Path: "/"})
+	if root.Err != nil || root.Response == nil || root.Response.Status != 200 {
+		t.Fatalf("/ must be served, got %+v", root.Response)
+	}
+	unknown := h.HTTPRequest(&pbv2.HttpRequest{Method: "GET", Path: "/nope"})
+	if unknown.Err != nil || !unknown.PassedThrough {
+		t.Fatalf("unknown paths must pass to the host 404, err=%v", unknown.Err)
+	}
+}
+
+// TestNoUnauthorizedCalls — otel makes no host calls at all (no state, cache,
+// pricing); metrics ride the dedicated emit path.
+func TestNoUnauthorizedCalls(t *testing.T) {
+	h := sdktest.New(t)
+	h.BeforeRequest(&pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}}}})
+	h.AfterResponse(resp("m", 200, 1, 2, 3), false)
+	for _, c := range h.Calls() {
+		t.Errorf("otel made a host call outside its grant set: %s", c.Command)
+	}
+	if len(h.Metrics()) == 0 {
+		t.Fatal("otel emitted no metrics")
 	}
 }

@@ -3,21 +3,43 @@
   "id": "torana/keyword_compactor",
   "name": "keyword_compactor",
   "version": "0.6.0",
-  "abi_version": "v1",
+  "abi_version": "v2",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "pass",
   "repository": "https://github.com/torana-edge/torana-plugins",
-  "description": "Deterministic keyword-based tool result compaction using the intent plugin's cache; alternative to compactor — run ONE of the two, after 'intent'",
-  "requires_upstream": ["torana/intent"],
+  "description": "Deterministic keyword-based tool result compaction using the intent plugin's cache; alternative to compactor \u2014 run ONE of the two, after 'intent'",
+  "requires_upstream": [
+    "torana/intent"
+  ],
   "hooks": [
-    {"name": "run_before_request"}
+    {
+      "name": "run_before_request"
+    }
   ],
   "permissions": [
-    {"name": "env.cache_get", "description": "Read cached intents and canonical deterministic replacements"},
-    {"name": "env.cache_set", "description": "Store canonical deterministic replacements"},
-    {"name": "env.host_call.torana_record_savings", "description": "Report compaction byte savings to /stats"},
-    {"name": "env.emit_metric", "description": "Compaction eligibility and intent-miss metrics"},
-    {"name": "env.plugin_config", "description": "Read ordered plugins.config.keyword_compactor.tool_policies"},
-    {"name": "env.log", "description": "Diagnostic logging"}
+    {
+      "name": "env.cache_get",
+      "description": "Read cached intents and canonical deterministic replacements"
+    },
+    {
+      "name": "env.cache_set",
+      "description": "Store canonical deterministic replacements"
+    },
+    {
+      "name": "env.emit_metric",
+      "description": "Compaction eligibility and intent-miss metrics"
+    },
+    {
+      "name": "env.host_call.torana_record_savings",
+      "description": "Report compaction byte savings to /stats"
+    },
+    {
+      "name": "env.plugin_config",
+      "description": "Read ordered plugins.config.keyword_compactor.tool_policies"
+    },
+    {
+      "name": "ir.tool_results.write",
+      "description": "Position-keyed tool-result text value changes (keyword compaction)"
+    }
   ]
 }

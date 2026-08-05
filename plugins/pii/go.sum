@@ -1,12 +1,6 @@
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
-github.com/torana-edge/torana-plugin-sdk v0.1.1 h1:8H0HZxRq3GWluYkdiIeJk4Lw9qPTNrTMDYLjVFLm4DQ=
-github.com/torana-edge/torana-plugin-sdk v0.1.1/go.mod h1:cMuBzT4CusU318jmEsL78yUI0yhpVXtSdJrh9pfSuRc=
-github.com/torana-edge/torana-plugin-sdk v0.1.2 h1:MzkBFDBNo/Y4nRg5EQUORsc2/PKuVqsVyaJ0oJg8N2o=
-github.com/torana-edge/torana-plugin-sdk v0.1.2/go.mod h1:cMuBzT4CusU318jmEsL78yUI0yhpVXtSdJrh9pfSuRc=
-github.com/torana-edge/torana-plugin-sdk v0.1.3 h1:8kmL3RXrVlA9ACV0wQpXMnznNl4viUn2+mNvvk9NdE8=
-github.com/torana-edge/torana-plugin-sdk v0.1.3/go.mod h1:cMuBzT4CusU318jmEsL78yUI0yhpVXtSdJrh9pfSuRc=
-github.com/torana-edge/torana-plugin-sdk v0.2.0 h1:7G+1tvRFCFDPHHvAE1S3u7vDDNoeIK4T7JWXmEH7Fsw=
-github.com/torana-edge/torana-plugin-sdk v0.2.0/go.mod h1:cMuBzT4CusU318jmEsL78yUI0yhpVXtSdJrh9pfSuRc=
+github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260804120604-995c0bd40baa h1:FqxtY32FYVDkG+l8tQbmbYDxEvbWoWFeLTBJXWyRRYo=
+github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260804120604-995c0bd40baa/go.mod h1:AQgCa3xORFCvKFibrhN2QYWYwXjx0aLUA64I5S9UMwk=
 google.golang.org/protobuf v1.36.11 h1:fV6ZwhNocDyBLK0dj+fg8ektcVegBBuEolpbTQyBNVE=
 google.golang.org/protobuf v1.36.11/go.mod h1:HTf+CrKn2C3g5S8VImy6tdcUvCska2kB7j23XfzDpco=

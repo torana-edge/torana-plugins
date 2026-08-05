@@ -2,16 +2,71 @@ package main
 
 import (
 	"context"
-
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 func main() {}
 
+// ==========================================================================
+// v2 identity resolution (approved batch-5 contract)
+// ==========================================================================
+//
+// This plugin is the ONLY identity source in v2. The v1 writes of
+// tenant_id/team_id/user_id into ToranaMeta are GONE — those fields are
+// host-owned, and identity now flows through the attributed env.set_identity
+// verdict, which changes the ACTUAL rate-limit key. Consequences, each pinned
+// by a matrix row:
+//
+//   - Caller-controlled X-Torana-* headers are NOT identity candidates. Edge
+//     forwards them without a trusted-proxy boundary, so a caller could rotate
+//     them and evade identity-based limits. Unverified headers never produce a
+//     verdict.
+//   - JWT-shaped and provider-key bearers are secrets for the upstream, not
+//     identities this edition can verify; they never resolve either.
+//   - The ONLY resolvable credential is a torana-issued virtual key, verified
+//     through the host's verify_virtual_key feature. A verified key with a
+//     profile composes a collision-proof identity; a verified key with an
+//     EMPTY profile composes a digest of the verified token so per-key rate
+//     limiting survives without inventing profile fields.
+//
+// The request hook returns PassRequest ALWAYS: identity is a side channel
+// (the verdict), never a request mutation.
+
+// virtualKeyPrefix marks a Torana-issued key, which the host can verify.
+const virtualKeyPrefix = "sk-torana-"
+
+// maxVerifyMessageBytes bounds the optional diagnostic message on a `rejected`
+// response at 1024 decoded UTF-8 bytes. Above the bound is a protocol error;
+// the message is NEVER placed in a verdict, an error returned to the caller,
+// an identity, a metric, or a log.
+const maxVerifyMessageBytes = 1024
+
+// identity namespaces for ContentAddressedCacheKey. The key is length-framed
+// by the SDK, so delimiter, NUL, omission, and field-swapping collisions are
+// distinct by construction; the namespace keeps the two composition kinds
+// domain-separated.
+const (
+	identityNamespace    = "auth-identity-v2"
+	verifiedKeyNamespace = "auth-verified-key-v2"
+)
+
+// VerifyResponse is the strictly validated v2 response to verify_virtual_key.
+// The wire grammar (section 8A of the checkpoint):
+//
+//   - exactly two case-sensitive statuses: "ok" and "rejected";
+//   - status is REQUIRED; unknown statuses, unknown members, duplicate
+//     members, nulls, and trailing JSON are protocol errors;
+//   - `rejected` FORBIDS tenant_id/team_id/user_id and allows an optional
+//     bounded `message` as diagnostic data only (never reflected to the
+//     caller); the rejection is a value-arm result and is terminal;
+//   - `ok` uses the profile identity when ANY profile field is non-empty and
+//     the verified-token digest only when all three are empty; `message` is
+//     FORBIDDEN on `ok`.
 type VerifyResponse struct {
 	Status   string `json:"status"`
 	Message  string `json:"message,omitempty"`
@@ -20,251 +75,282 @@ type VerifyResponse struct {
 	UserID   string `json:"user_id,omitempty"`
 }
 
+// verifyOutcome says what happened to a credential. Advisory host failure is
+// distinct from a domain answer: the verifier being unwired (NOT_CONFIGURED)
+// or unavailable means NO identity is possible (this plugin is the only
+// source), while a domain `rejected` is a statement ABOUT THE REQUEST.
+type verifyOutcome int
+
+const (
+	// verifyNoIdentity: advisory (NOT_CONFIGURED/UNAVAILABLE). No verdict.
+	verifyNoIdentity verifyOutcome = iota
+	// verifyOK: the host answered `ok`; the identity is established.
+	verifyOK
+	// verifyRejected: the host answered `rejected` — terminal, nothing else
+	// may resolve (there is no lower-precedence candidate anyway).
+	verifyRejected
+)
+
 func init() {
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
-		if req.ToranaMetaJson == nil {
-			req.ToranaMetaJson = []byte(`{}`)
-		}
-
-		var meta map[string]any
-		if err := json.Unmarshal(req.ToranaMetaJson, &meta); err != nil {
-			return nil, nil // skip on err
-		}
-
-		headers, ok := meta["_request_headers"].(map[string]any)
-		if !ok {
-			return nil, nil
-		}
-
-		identity, ok := identityFromHeaders(headers, verifyVirtualKey)
-		if !ok {
-			return nil, nil
-		}
-		applyIdentity(meta, identity)
-
-		metaBytes, err := json.Marshal(meta)
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv2.ChatRequest) (sdk.RequestResult, error) {
+		headers, err := requestHeaders(req)
 		if err != nil {
-			return nil, nil
+			return sdk.RequestResult{}, err
 		}
-		req.ToranaMetaJson = metaBytes
-		return req, nil
+		token, have := virtualKeyCandidate(headers)
+		if !have {
+			// No resolvable credential: no identity. The host falls back to
+			// its own Authorization-header handling.
+			return sdk.PassRequest(), nil
+		}
+		id, outcome, err := verifyVirtualKey(token)
+		if err != nil {
+			// Transport/protocol failure or a contract-class host refusal:
+			// the identity cannot be established, and this plugin is the only
+			// source — surface it so failure_mode applies.
+			return sdk.RequestResult{}, err
+		}
+		switch outcome {
+		case verifyOK:
+			sdk.SetIdentity(id)
+			return sdk.PassRequest(), nil
+		default:
+			// verifyRejected (terminal domain refusal) and verifyNoIdentity
+			// (advisory) both pass without a verdict.
+			return sdk.PassRequest(), nil
+		}
 	})
 }
 
-// The parsing and normalization below are separated from the hook so they can
-// be tested. They were inline in the closure, which is why this plugin had no
-// tests at all: there was no seam to test through, and a plugin nobody can test
-// is a poor reference for the capability surface — which is the only thing this
-// plugin is for. See plugin.json: it is deliberately NOT an access control.
-
-type credentialKind int
-
-const (
-	credentialNone credentialKind = iota
-	credentialJWT
-	credentialVirtualKey
-	credentialTrustedUser
-)
-
-// virtualKeyPrefix marks a Torana-issued key, which the host can verify.
-const virtualKeyPrefix = "sk-torana-"
-
-type credential struct {
-	kind  credentialKind
-	token string
-	// team and tenant accompany a trusted-user assertion. The host exposes
-	// X-Torana-Team and X-Torana-Tenant through the same allowlist as
-	// X-Torana-User, and reading only the user meant a caller that scoped its
-	// request got the scope silently dropped.
-	team   string
-	tenant string
+// requestHeaders extracts the allowlisted request headers the host injects
+// into ToranaMeta under _request_headers (only when the env.request_headers
+// grant is held). Malformed host-provided metadata — including textually
+// invalid JSON — is a protocol defect, and the decode is lossless
+// (decodeJSONObject) so no header byte is normalized before the token
+// grammar sees it.
+func requestHeaders(req *pbv2.ChatRequest) (map[string]any, error) {
+	if len(req.ToranaMetaJson) == 0 {
+		return nil, nil
+	}
+	meta, err := decodeJSONObject(req.ToranaMetaJson)
+	if err != nil {
+		return nil, fmt.Errorf("auth: malformed ToranaMetaJson: %w", err)
+	}
+	if meta == nil {
+		return nil, nil
+	}
+	headers, _ := meta["_request_headers"].(map[string]any)
+	return headers, nil
 }
 
-type identity struct {
-	tenantID string
-	teamID   string
-	userID   string
-}
-
-// looksLikeJWT reports whether a bearer token is structurally a JWT: three
-// non-empty dot-separated segments.
-//
-// Authorization carries two unrelated things. An OpenAI-shaped client puts its
-// PROVIDER key there ("Bearer sk-proj-…"), which is a secret for the upstream
-// and says nothing about who the caller is. A gateway deployment puts a JWT
-// there, which is an identity claim this edition cannot verify.
-//
-// Treating every bearer token as the second kind is what made the previous fix
-// miss the commonest case: a harness sending its provider key in Authorization
-// with X-Torana-User alongside still got no identity, which is the exact
-// scenario that fix was written for.
-func looksLikeJWT(token string) bool {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
+// validVirtualKey is the ONE virtual-key validator shared by both header
+// sources. The v2 token grammar is explicitly ASCII: the prefix "sk-torana-"
+// followed by at least one printable ASCII byte (0x21..0x7e), with no
+// controls, whitespace, DEL, non-ASCII, or empty suffix. ASCII is the
+// normative token grammar for a simple, interoperable, byte-stable
+// credential contract: valid non-ASCII Unicode is preserved by JSON
+// encoding, but INVALID UTF-8 is not (encoding/json substitutes U+FFFD), and
+// the host injects headers through JSON metadata before this plugin sees
+// them. A printable-ASCII contract keeps the token byte-stable end to end
+// while staying flexible about the private verifier's punctuation/alphabet.
+func validVirtualKey(token string) bool {
+	if !strings.HasPrefix(token, virtualKeyPrefix) {
 		return false
 	}
-	for _, p := range parts {
-		if p == "" {
+	rest := token[len(virtualKeyPrefix):]
+	if rest == "" {
+		return false
+	}
+	for i := 0; i < len(rest); i++ {
+		if rest[i] < 0x21 || rest[i] > 0x7e {
 			return false
 		}
 	}
 	return true
 }
 
-// readCredential classifies the inbound credential. Headers arrive canonicalized
-// (net/http MIME form) through the env.request_headers grant allowlist, so the
-// casing here is the casing the host produces.
+// virtualKeyCandidate picks the single resolvable credential:
 //
-// Precedence, most verifiable first:
-//
-//  1. A torana-issued key, in EITHER Authorization or X-Api-Key. The host can
-//     verify it, so it wins wherever it was sent — a client that puts it in
-//     Authorization is not doing anything unusual.
-//  2. A structurally valid JWT in Authorization.
-//  3. X-Torana-User — a trusted-header assertion with no verification at all.
-//
-// Anything else, in either header, is a SECRET rather than an identity and does
-// not stop the search. Letting a provider key suppress X-Torana-User would mask
-// the identity on exactly the requests that carry both.
-//
-// Candidates are returned in order rather than one winner, because the JWT case
-// cannot be settled by looking at the header alone. "Bearer <three dotted
-// segments>" is a JWT by shape, but a Google identity token or a
-// service-account assertion to a Vertex-shaped upstream has that shape and is a
-// SECRET. This edition cannot verify a JWT either way, so treating one as
-// terminal buys nothing and costs the identity a caller did supply — the hook
-// simply tries each candidate until one resolves.
-//
-// An edition that CAN verify JWTs should stop at the first that resolves, which
-// is what trying them in order already does.
-func readCredential(headers map[string]any) []credential {
-	bearer := ""
-	if authHeader, ok := headers["Authorization"].(string); ok && strings.HasPrefix(authHeader, "Bearer ") {
-		bearer = strings.TrimPrefix(authHeader, "Bearer ")
-	}
-	apiKey, _ := headers["X-Api-Key"].(string)
-
-	var candidates []credential
-	for _, token := range []string{bearer, apiKey} {
-		if strings.HasPrefix(token, virtualKeyPrefix) {
-			candidates = append(candidates, credential{kind: credentialVirtualKey, token: token})
-			break
+//   - an Authorization bearer that parses under the exact Bearer grammar and
+//     carries a valid virtual key WINS over X-Api-Key (deterministic;
+//     verification happens exactly once, and same-token duplication still
+//     verifies once);
+//   - otherwise an X-Api-Key virtual key (same validator);
+//   - otherwise nothing. Unverified JWT-shaped bearers, provider keys, and
+//     X-Torana-* headers are NOT candidates.
+func virtualKeyCandidate(headers map[string]any) (string, bool) {
+	if auth, ok := headers["Authorization"].(string); ok {
+		if token, ok := parseBearer(auth); ok && validVirtualKey(token) {
+			return token, true
 		}
 	}
-	if looksLikeJWT(bearer) {
-		candidates = append(candidates, credential{kind: credentialJWT, token: bearer})
+	if apiKey, ok := headers["X-Api-Key"].(string); ok && validVirtualKey(apiKey) {
+		return apiKey, true
 	}
-	if toranaUser, ok := headers["X-Torana-User"].(string); ok && toranaUser != "" {
-		team, _ := headers["X-Torana-Team"].(string)
-		tenant, _ := headers["X-Torana-Tenant"].(string)
-		candidates = append(candidates, credential{
-			kind: credentialTrustedUser, token: toranaUser, team: team, tenant: tenant,
-		})
-	}
-	return candidates
+	return "", false
 }
 
-// resolveIdentity turns a credential into an identity, returning false when it
-// cannot be established. verify is injected so the host call can be substituted
-// in tests.
-// resolveOutcome says what happened to a credential, because "could not
-// resolve" and "the host said no" are different answers and only one of them
-// should end the search.
-type resolveOutcome int
+// parseBearer implements the exact Bearer grammar: a case-insensitive scheme,
+// one or more ASCII SP/HTAB separators, then one non-empty credential with no
+// internal or trailing ASCII whitespace. The credential bytes pass through
+// UNCHANGED. Malformed syntax is NOT a credential.
+func parseBearer(authHeader string) (string, bool) {
+	i := 0
+	for i < len(authHeader) && !isBearerSeparator(authHeader[i]) {
+		i++
+	}
+	if i == 0 {
+		return "", false
+	}
+	if !strings.EqualFold(authHeader[:i], "Bearer") {
+		return "", false
+	}
+	j := i
+	for j < len(authHeader) && isBearerSeparator(authHeader[j]) {
+		j++
+	}
+	if j == i {
+		return "", false // scheme without a separator is not a credential
+	}
+	cred := authHeader[j:]
+	if cred == "" {
+		return "", false
+	}
+	for k := 0; k < len(cred); k++ {
+		if isForbiddenCredentialByte(cred[k]) {
+			return "", false // internal or trailing whitespace / control
+		}
+	}
+	return cred, true
+}
 
-const (
-	// resolveNoIdentity: nothing could be established. Try the next candidate.
-	resolveNoIdentity resolveOutcome = iota
-	// resolveOK: an identity was established.
-	resolveOK
-	// resolveRejected: the host actively refused this credential — revoked,
-	// expired, unknown. That is a statement ABOUT THE REQUEST, not an absence
-	// of information, so no lower-precedence candidate may override it.
-	resolveRejected
-)
+// isBearerSeparator is the ONLY whitespace the Bearer grammar permits between
+// the scheme and the credential: ASCII SP (0x20) and HTAB (0x09). CR, LF, and
+// any other control are NOT separators — a header like "Bearer\rsk-torana-x"
+// fails the scheme match outright (review round-1 F6).
+func isBearerSeparator(b byte) bool {
+	return b == ' ' || b == '\t'
+}
 
-// resolveIdentity turns a credential into an identity.
-//
-// verify is injected so the host call can be substituted in tests.
-func resolveIdentity(cred credential, verify func(token string) (VerifyResponse, bool)) (identity, resolveOutcome) {
-	switch cred.kind {
-	case credentialTrustedUser:
-		// The caller's own tenant when it sent one; the default otherwise, so
-		// an unscoped assertion still resolves.
-		tenant := cred.tenant
-		if tenant == "" {
-			tenant = "default-tenant"
+// isForbiddenCredentialByte reports any ASCII control (C0: 0x00-0x1F, DEL:
+// 0x7F) or SP. The contract permits one non-empty credential with no internal
+// or trailing ASCII whitespace; every one of these bytes is rejected.
+func isForbiddenCredentialByte(b byte) bool {
+	return b <= 0x20 || b == 0x7f
+}
+
+// verifyVirtualKey asks the host to validate a Torana-issued key. The request
+// is the typed JSON envelope {"key":"<token>"}; the response is strictly
+// validated. Requires the env.host_call.verify_virtual_key grant.
+func verifyVirtualKey(token string) (string, verifyOutcome, error) {
+	payload, err := json.Marshal(map[string]string{"key": token})
+	if err != nil {
+		return "", verifyNoIdentity, fmt.Errorf("auth: cannot encode verify request: %w", err)
+	}
+	res, herr, err := sdk.HostCallExtension("verify_virtual_key", payload)
+	if err != nil {
+		return "", verifyNoIdentity, fmt.Errorf("auth: verify_virtual_key call failed: %w", err)
+	}
+	if herr != nil {
+		switch herr.Code {
+		case pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE:
+			// The verifier is unwired or temporarily unavailable: advisory.
+			// No identity is possible — this plugin is the only source.
+			return "", verifyNoIdentity, nil
+		default:
+			// NOT_FOUND, PERMISSION_DENIED, INVALID_ARGUMENT, INTERNAL: a
+			// contract/protocol failure, not a domain answer. Revoked or
+			// unknown credentials are expressed by the normal domain
+			// response, never by HostError. The host message is NEVER
+			// interpolated: a private verifier could embed the token or
+			// tenant data in it, and Edge captures hook errors (review
+			// round-1 F7). The error is classified by code only.
+			return "", verifyNoIdentity, fmt.Errorf("auth: verify_virtual_key refused (code=%s)", herr.Code)
 		}
-		return identity{tenantID: tenant, teamID: cred.team, userID: cred.token}, resolveOK
-	case credentialVirtualKey:
-		res, ok := verify(cred.token)
-		if !ok {
-			// The host call itself failed — unreachable, malformed reply. We
-			// learned nothing about this key, so a later candidate may still
-			// speak.
-			return identity{}, resolveNoIdentity
-		}
-		if res.Status != "ok" {
-			// The host answered, and the answer was no. Presenting a revoked
-			// key alongside a trusted-user header must not quietly succeed on
-			// the header.
-			return identity{}, resolveRejected
-		}
-		return identity{tenantID: res.TenantID, teamID: res.TeamID, userID: res.UserID}, resolveOK
+	}
+
+	resp, err := decodeVerifyResponse(res)
+	if err != nil {
+		return "", verifyNoIdentity, fmt.Errorf("auth: invalid verify_virtual_key response: %w", err)
+	}
+
+	switch resp.Status {
+	case "ok":
+		return composeIdentity(resp, token), verifyOK, nil
+	case "rejected":
+		// Value-arm terminal refusal. The diagnostic message stays in this
+		// function: never in a verdict, an error to the caller, an identity,
+		// a metric, or a log.
+		return "", verifyRejected, nil
 	default:
-		return identity{}, resolveNoIdentity
+		return "", verifyNoIdentity, fmt.Errorf("auth: unknown verify status %q", resp.Status)
 	}
 }
 
-// identityFromHeaders runs the precedence loop: the first candidate that
-// settles the question wins.
+// decodeVerifyResponse strictly validates the response envelope:
 //
-// Separated from the hook because this loop IS the precedence rule, and a loop
-// inside a closure cannot be tested. Both bugs found here lived in the ordering
-// rather than in resolveIdentity — an unverifiable JWT masking a header the
-// caller did supply, and a host REJECTION being overridden by that same header
-// — and neither was reachable from a test that called resolveIdentity alone.
-//
-// resolveRejected ends the loop as firmly as success does: the host refused
-// this credential, and a lower-precedence candidate must not turn a refusal
-// into an acceptance. resolveNoIdentity means nothing was learned, so the next
-// candidate may still speak.
-func identityFromHeaders(headers map[string]any, verify func(string) (VerifyResponse, bool)) (identity, bool) {
-	var id identity
-	outcome := resolveNoIdentity
-	for _, cred := range readCredential(headers) {
-		if id, outcome = resolveIdentity(cred, verify); outcome != resolveNoIdentity {
-			break
+//   - exactly the known members; duplicate keys, nulls, unknown members, and
+//     trailing JSON are rejected;
+//   - status required, exactly "ok" or "rejected";
+//   - `ok`: message FORBIDDEN; tenant/team/user optional;
+//   - `rejected`: tenant/team/user FORBIDDEN; message optional, bounded at
+//     maxVerifyMessageBytes decoded UTF-8 bytes.
+func decodeVerifyResponse(res []byte) (VerifyResponse, error) {
+	raw, err := decodeObjectStrict(res, map[string]bool{
+		"status": true, "message": true,
+		"tenant_id": true, "team_id": true, "user_id": true,
+	})
+	if err != nil {
+		return VerifyResponse{}, err
+	}
+	statusRaw, ok := raw["status"]
+	if !ok {
+		return VerifyResponse{}, fmt.Errorf("missing required member %q", "status")
+	}
+	var status string
+	if err := json.Unmarshal(statusRaw, &status); err != nil {
+		return VerifyResponse{}, fmt.Errorf("status must be a string")
+	}
+
+	var resp VerifyResponse
+	if rawMessage, present := raw["message"]; present {
+		if status == "ok" {
+			return VerifyResponse{}, fmt.Errorf("message is forbidden on status %q", status)
+		}
+		var msg string
+		if err := json.Unmarshal(rawMessage, &msg); err != nil {
+			return VerifyResponse{}, fmt.Errorf("message must be a string")
+		}
+		if len(msg) > maxVerifyMessageBytes {
+			return VerifyResponse{}, fmt.Errorf("message exceeds %d bytes", maxVerifyMessageBytes)
+		}
+		resp.Message = msg
+	}
+	for member, target := range map[string]*string{
+		"tenant_id": &resp.TenantID, "team_id": &resp.TeamID, "user_id": &resp.UserID,
+	} {
+		if rawMember, present := raw[member]; present {
+			if status == "rejected" {
+				return VerifyResponse{}, fmt.Errorf("%s is forbidden on status %q", member, status)
+			}
+			if err := json.Unmarshal(rawMember, target); err != nil {
+				return VerifyResponse{}, fmt.Errorf("%s must be a string", member)
+			}
 		}
 	}
-	return id, outcome == resolveOK
+	resp.Status = status
+	return resp, nil
 }
 
-// applyIdentity writes the resolved identity into ToranaMeta, omitting fields
-// the verifier did not supply rather than writing empty strings.
-func applyIdentity(meta map[string]any, id identity) {
-	if id.tenantID != "" {
-		meta["tenant_id"] = id.tenantID
+// composeIdentity builds the collision-proof identity for a verified key.
+// All three profile positions are ALWAYS represented (empty strings included)
+// and the key is length-framed, so delimiter, NUL, omission, and field-swap
+// collisions are distinct. A verified key with an empty profile composes a
+// domain-separated digest of the VERIFIED TOKEN — never the token itself, and
+// never the empty host fallback — so per-key rate limiting survives.
+func composeIdentity(resp VerifyResponse, token string) string {
+	if resp.TenantID != "" || resp.TeamID != "" || resp.UserID != "" {
+		return sdk.ContentAddressedCacheKey(identityNamespace, resp.TenantID, resp.TeamID, resp.UserID)
 	}
-	if id.teamID != "" {
-		meta["team_id"] = id.teamID
-	}
-	if id.userID != "" {
-		meta["user_id"] = id.userID
-	}
-}
-
-// verifyVirtualKey asks the host to validate a Torana-issued key. The grant is
-// named env.host_call.verify_virtual_key in plugin.json, which is what permits
-// this HostCall("verify_virtual_key", ...).
-func verifyVirtualKey(token string) (VerifyResponse, bool) {
-	resStr, err := sdk.HostCall("verify_virtual_key", token)
-	if err != nil || resStr == "" {
-		return VerifyResponse{}, false
-	}
-	var res VerifyResponse
-	if err := json.Unmarshal([]byte(resStr), &res); err != nil {
-		return VerifyResponse{}, false
-	}
-	return res, true
+	return sdk.ContentAddressedCacheKey(verifiedKeyNamespace, token)
 }

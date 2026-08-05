@@ -3,18 +3,39 @@
   "id": "torana/schema_translator",
   "name": "schema_translator",
   "version": "0.3.0",
-  "abi_version": "v1",
+  "abi_version": "v2",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "pass",
   "repository": "https://github.com/torana-edge/torana-plugins",
-  "description": "KV-array schema translation: converts additionalProperties maps to arrays and reverses on response",
+  "description": "KV-array schema translation: converts additionalProperties maps to arrays on the way in and reverses on the stream",
   "hooks": [
-    {"name": "run_before_request"},
-    {"name": "run_on_stream_chunk"}
+    {
+      "name": "run_before_request"
+    },
+    {
+      "name": "run_on_stream_chunk"
+    }
   ],
   "permissions": [
-    {"name": "env.meta_get", "description": "Read mutation registry and fragment buffers"},
-    {"name": "env.meta_set", "description": "Write mutation registry and fragment buffers"},
-    {"name": "env.log", "description": "Diagnostic logging"}
+    {
+      "name": "env.meta_get",
+      "description": "Read the mutation registry"
+    },
+    {
+      "name": "env.meta_set",
+      "description": "Write the mutation registry"
+    },
+    {
+      "name": "ir.messages.write.assistant",
+      "description": "Stream reversal emits the assistant-role arguments delta"
+    },
+    {
+      "name": "ir.stream.write",
+      "description": "Assembled tool-call stream events"
+    },
+    {
+      "name": "ir.tools.write",
+      "description": "Tool schema translation"
+    }
   ]
 }
