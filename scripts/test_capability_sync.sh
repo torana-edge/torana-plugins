@@ -48,10 +48,13 @@ if [[ -z "$expected_ref" ]]; then
   exit 1
 fi
 # EXACT revision equality: the pin's revision is the last dash component of
-# the pseudo-version (v0.2.1-0.<timestamp>-<commit>). Substring matching is
-# deliberately rejected: a value like "0.2.1" or "20260804" must NOT pass.
+# the pseudo-version (v0.2.1-0.<timestamp>-<commit>); SDK_REF carries the
+# FULL commit SHA (a short SHA is not fetchable by ref in CI checkout).
+# Substring matching is deliberately rejected: a value like "0.2.1" or
+# "20260804" must NOT pass — only the full SHA whose 12-char prefix equals
+# the pinned revision does.
 pin_rev="${pin##*-}"
-if [[ "$expected_ref" != "$pin_rev" ]]; then
+if [[ "${expected_ref:0:12}" != "$pin_rev" ]]; then
   echo "capability sync: SDK_REF $expected_ref does not exactly name the pinned revision $pin_rev ($pin)" >&2
   exit 1
 fi
