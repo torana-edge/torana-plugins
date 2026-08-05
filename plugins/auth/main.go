@@ -114,9 +114,15 @@ func init() {
 		case verifyOK:
 			sdk.SetIdentity(id)
 			return sdk.PassRequest(), nil
-		default:
-			// verifyRejected (terminal domain refusal) and verifyNoIdentity
-			// (advisory) both pass without a verdict.
+		case verifyRejected:
+			// A domain rejection is an authoritative answer about the presented
+			// credential. Falling back to the operator's provider credential would
+			// turn an explicitly revoked/invalid Torana key into authenticated
+			// access. Keep the verifier's optional diagnostic private and return a
+			// stable, value-free denial.
+			sdk.BlockRequest(401, "virtual_key_rejected", "The Torana virtual key was rejected.")
+			return sdk.PassRequest(), nil
+		default: // verifyNoIdentity: advisory unwired/unavailable verifier.
 			return sdk.PassRequest(), nil
 		}
 	})
