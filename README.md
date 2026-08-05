@@ -8,6 +8,10 @@ Each plugin requests capabilities in `plugin.json`; users approve those
 requests for the exact installed artifact. A request in a manifest is never a
 grant.
 
+All nine official plugins use ABI v2 and pin the same SDK revision. Their
+manifest ABI, hook, permission, and upstream contracts are checked as one
+executable release inventory.
+
 ## Build locally
 
 ```bash
