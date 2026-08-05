@@ -121,7 +121,7 @@ var pluginContracts = map[string]pluginContract{
 	"pii": {hooks: []string{"run_before_request"},
 		permissions: []string{"env.block_request", "env.cache_get", "env.cache_set", "env.host_call.torana_offload_completion", "env.plugin_config"}},
 	"schema_translator": {hooks: []string{"run_before_request", "run_on_stream_chunk"},
-		permissions: []string{"env.meta_get", "env.meta_set", "ir.stream.write", "ir.tools.write"}},
+		permissions: []string{"env.meta_get", "env.meta_set", "ir.messages.write.assistant", "ir.stream.write", "ir.tools.write"}},
 }
 
 func hookNames(hooks []struct {

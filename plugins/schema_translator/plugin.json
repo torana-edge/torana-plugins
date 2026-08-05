@@ -26,6 +26,10 @@
       "description": "Write the mutation registry"
     },
     {
+      "name": "ir.messages.write.assistant",
+      "description": "Stream reversal emits the assistant-role arguments delta"
+    },
+    {
       "name": "ir.stream.write",
       "description": "Assembled tool-call stream events"
     },
