@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"testing"
 
 	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
@@ -36,7 +37,7 @@ func TestStatusClassDoesNotInventSuccess(t *testing.T) {
 }
 
 func TestWithLabelDoesNotMutateTheBase(t *testing.T) {
-	base := map[string]string{"model": "gpt-4", "status_class": "5xx"}
+	base := map[string]string{"model_family": "openai", "status_class": "5xx"}
 
 	input := withLabel(base, "direction", "input")
 	output := withLabel(base, "direction", "output")
@@ -48,7 +49,7 @@ func TestWithLabelDoesNotMutateTheBase(t *testing.T) {
 		t.Errorf("labels not applied: input=%v output=%v", input, output)
 	}
 	for _, m := range []map[string]string{input, output} {
-		if m["model"] != "gpt-4" || m["status_class"] != "5xx" {
+		if m["model_family"] != "openai" || m["status_class"] != "5xx" {
 			t.Errorf("base labels not carried through: %v", m)
 		}
 	}
@@ -89,7 +90,7 @@ func TestEveryResponseSeriesCarriesStatusClass(t *testing.T) {
 		if got := m.Labels["status_class"]; got != "5xx" {
 			t.Errorf("%s (direction=%q) has status_class=%q, want 5xx", m.Name, m.Labels["direction"], got)
 		}
-		if m.Labels["model"] != "gpt-4" {
+		if m.Labels["model_family"] != "openai" {
 			t.Errorf("%s lost the model label: %v", m.Name, m.Labels)
 		}
 	}
@@ -197,7 +198,7 @@ func TestRequestShapeMetricsAndPassThrough(t *testing.T) {
 	seen := map[string]bool{}
 	for _, m := range h.Metrics() {
 		seen[m.Name] = true
-		if m.Labels["model"] != "gpt-4" {
+		if m.Labels["model_family"] != "openai" {
 			t.Errorf("%s missing the model label: %v", m.Name, m.Labels)
 		}
 	}
@@ -205,6 +206,29 @@ func TestRequestShapeMetricsAndPassThrough(t *testing.T) {
 		if !seen[want] {
 			t.Errorf("missing request metric %s", want)
 		}
+	}
+}
+
+func TestModelLabelsHaveFiniteCardinality(t *testing.T) {
+	want := map[string]string{
+		"claude-sonnet-4": "claude", "GPT-5": "openai", "o3-mini": "openai",
+		"gemini-2.5-pro": "gemini", "deepseek-r1": "deepseek",
+		"meta-llama/llama-4": "llama", "mixtral-8x7b": "mistral",
+		"qwen3-coder": "qwen", "command-r": "command", "grok-4": "grok",
+		"attacker-unique-1": "other", "": "other",
+	}
+	for input, family := range want {
+		if got := modelFamily(input); got != family {
+			t.Errorf("modelFamily(%q) = %q, want %q", input, got, family)
+		}
+	}
+
+	seen := map[string]bool{}
+	for i := range 10_000 {
+		seen[modelFamily(fmt.Sprintf("client-controlled-%d", i))] = true
+	}
+	if len(seen) != 1 || !seen["other"] {
+		t.Fatalf("10k attacker labels produced %v, want only other", seen)
 	}
 }
 

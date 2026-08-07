@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
@@ -27,7 +28,7 @@ func main() {}
 
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv2.ChatRequest) (sdk.RequestResult, error) {
-		labels := map[string]string{"model": req.Model}
+		labels := map[string]string{"model_family": modelFamily(req.Model)}
 		sdk.EmitMetric("torana_plugin_requests_total", sdk.MetricCounter, 1, labels)
 		sdk.EmitMetric("torana_plugin_request_messages", sdk.MetricHistogram, float64(len(req.Messages)), labels)
 		sdk.EmitMetric("torana_plugin_request_tools", sdk.MetricHistogram, float64(len(req.Tools)), labels)
@@ -125,7 +126,7 @@ func responseMetrics(resp *pbv2.ChatResponse) []emission {
 		return []emission{{"torana_plugin_responses_total", sdk.MetricCounter, 1, map[string]string{}}}
 	}
 
-	labels := map[string]string{"model": resp.Model}
+	labels := map[string]string{"model_family": modelFamily(resp.Model)}
 	hasStatus := resp.UpstreamStatus > 0
 	if hasStatus {
 		labels["status_class"] = statusClass(resp.UpstreamStatus)
@@ -146,4 +147,34 @@ func responseMetrics(resp *pbv2.ChatResponse) []emission {
 		}
 	}
 	return out
+}
+
+// modelFamily keeps client-controlled model names out of metric labels. The
+// returned vocabulary is finite, so sending a fresh model name per request
+// cannot create an unbounded number of OTel series.
+func modelFamily(model string) string {
+	model = strings.ToLower(strings.TrimSpace(model))
+	for _, family := range modelFamilies {
+		for _, prefix := range family.prefixes {
+			if strings.HasPrefix(model, prefix) {
+				return family.name
+			}
+		}
+	}
+	return "other"
+}
+
+var modelFamilies = []struct {
+	name     string
+	prefixes []string
+}{
+	{name: "claude", prefixes: []string{"claude"}},
+	{name: "openai", prefixes: []string{"gpt", "chatgpt", "o1", "o3", "o4"}},
+	{name: "gemini", prefixes: []string{"gemini"}},
+	{name: "deepseek", prefixes: []string{"deepseek"}},
+	{name: "llama", prefixes: []string{"llama", "meta-llama"}},
+	{name: "mistral", prefixes: []string{"mistral", "mixtral", "codestral"}},
+	{name: "qwen", prefixes: []string{"qwen"}},
+	{name: "command", prefixes: []string{"command", "cohere"}},
+	{name: "grok", prefixes: []string{"grok"}},
 }
