@@ -26,6 +26,10 @@
       "description": "Store compacted results"
     },
     {
+      "name": "env.shared_cache_get",
+      "description": "Read intent:<tool_call_id> values published by the intent plugin"
+    },
+    {
       "name": "env.emit_metric",
       "description": "Compaction eligibility and intent-miss metrics"
     },

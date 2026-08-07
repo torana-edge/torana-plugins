@@ -574,16 +574,16 @@ func TestIntentMissSkipsWithMetric(t *testing.T) {
 // TestCacheRefusalsError — PERMISSION_DENIED on any of the three reads is a
 // contract defect: the hook errors.
 func TestCacheRefusalsError(t *testing.T) {
-	for name, cfg := range map[string]string{
-		"intent read":  keywordCfg,
-		"keyword read": keywordCfg,
-		"policy read":  deterministicCfg,
+	for _, tc := range []struct{ name, cfg, command string }{
+		{"intent read", keywordCfg, "env.shared_cache_get"},
+		{"keyword read", keywordCfg, "env.cache_get"},
+		{"policy read", deterministicCfg, "env.cache_get"},
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
-			h.SetConfig(cfg)
+			h.SetConfig(tc.cfg)
 			h.SeedCache("intent:call_1", "find the bug in server")
-			h.DenyPermission("env.cache_get")
+			h.DenyPermission(tc.command)
 			res := h.BeforeRequest(bigToolRequest(keywordContent()))
 			if res.Err == nil {
 				t.Fatal("a refused cache read must error the hook")
@@ -595,14 +595,14 @@ func TestCacheRefusalsError(t *testing.T) {
 // TestMalformedRepliesError — malformed HostCallResult frames on any of the
 // three reads error the hook.
 func TestMalformedRepliesError(t *testing.T) {
-	for name, cfg := range map[string]string{
-		"intent read": keywordCfg,
-		"policy read": deterministicCfg,
+	for _, tc := range []struct{ name, cfg, command string }{
+		{"intent read", keywordCfg, "env.shared_cache_get"},
+		{"policy read", deterministicCfg, "env.cache_get"},
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
-			h.SetConfig(cfg)
-			h.StubHostCall("env.cache_get", func(string) (string, error) {
+			h.SetConfig(tc.cfg)
+			h.StubHostCall(tc.command, func(string) (string, error) {
 				return "not a host-call-result frame", nil
 			})
 			res := h.BeforeRequest(bigToolRequest(keywordContent()))
@@ -615,10 +615,7 @@ func TestMalformedRepliesError(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(keywordCfg)
 	h.SeedCache("intent:call_1", "find the bug in server")
-	h.StubHostCall("env.cache_get", func(args string) (string, error) {
-		if strings.Contains(args, "intent:call_1") {
-			return sdktest.HostResultValue([]byte("find the bug in server")), nil
-		}
+	h.StubHostCall("env.cache_get", func(string) (string, error) {
 		return "not a host-call-result frame", nil
 	})
 	res := h.BeforeRequest(bigToolRequest(keywordContent()))
@@ -735,6 +732,7 @@ func TestNoUnauthorizedCalls(t *testing.T) {
 		"env.plugin_config":     true,
 		"env.cache_get":         true,
 		"env.cache_set":         true,
+		"env.shared_cache_get":  true,
 		"env.emit_metric":       true,
 		"torana_record_savings": true,
 	}
@@ -953,7 +951,8 @@ func TestKeywordOrderedSeamRows(t *testing.T) {
 		// host call — its exact cardinality is asserted below).
 		wantMultiset := map[string]int{
 			"env.plugin_config":     1,
-			"env.cache_get":         4, // intent + keyword key per candidate
+			"env.cache_get":         2, // keyword key per candidate
+			"env.shared_cache_get":  2, // intent key per candidate
 			"env.cache_set":         1, // the second candidate reuses the first's stored value
 			"torana_record_savings": 2, // cache_reuse + transformation
 		}

@@ -612,11 +612,12 @@ func TestStreamNoUnauthorizedCalls(t *testing.T) {
 		// The harness records StreamHandler's buffer storage by its raw
 		// command; the HOST gates meta_append under the env.meta_set grant
 		// (documented StreamHandler contract), so it is in-permission.
-		"env.meta_append": true,
-		"env.cache_get":   true,
-		"env.cache_set":   true,
-		"env.emit_metric": true,
-		"env.log":         true,
+		"env.meta_append":      true,
+		"env.cache_get":        true,
+		"env.cache_set":        true,
+		"env.shared_cache_set": true,
+		"env.emit_metric":      true,
+		"env.log":              true,
 	}
 	for _, c := range h.Calls() {
 		if !allowed[c.Command] {

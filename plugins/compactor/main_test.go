@@ -664,7 +664,7 @@ func TestIntentMissSkipsWithMetric(t *testing.T) {
 func TestIntentCacheRefusalErrors(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
-	h.DenyPermission("env.cache_get")
+	h.DenyPermission("env.shared_cache_get")
 	h.StubHostCall("torana_offload_completion", offloadStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	res := h.BeforeRequest(bigToolRequest(bigContent()))
@@ -828,6 +828,7 @@ func TestNoUnauthorizedCalls(t *testing.T) {
 		"env.plugin_config":          true,
 		"env.cache_get":              true,
 		"env.cache_set":              true,
+		"env.shared_cache_get":       true,
 		"env.emit_metric":            true,
 		"torana_offload_completion":  true,
 		"torana_evaluate_compaction": true,
@@ -991,7 +992,7 @@ func TestDeterministicPresentEmptyReplacementRecomputes(t *testing.T) {
 func TestIntentCacheMalformedReplyErrors(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
-	h.StubHostCall("env.cache_get", func(string) (string, error) {
+	h.StubHostCall("env.shared_cache_get", func(string) (string, error) {
 		return "not a host-call-result frame", nil
 	})
 	res := h.BeforeRequest(bigToolRequest(bigContent()))
@@ -1006,10 +1007,7 @@ func TestModelCacheMalformedReplyErrors(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
 	h.SeedCache("intent:call_1", "find the bug")
-	h.StubHostCall("env.cache_get", func(args string) (string, error) {
-		if strings.Contains(args, "intent:call_1") {
-			return sdktest.HostResultValue([]byte("find the bug")), nil
-		}
+	h.StubHostCall("env.cache_get", func(string) (string, error) {
 		return "not a host-call-result frame", nil
 	})
 	res := h.BeforeRequest(bigToolRequest(bigContent()))
@@ -1284,7 +1282,8 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 		// host call — its exact cardinality is asserted below).
 		wantMultiset := map[string]int{
 			"env.plugin_config":          1,
-			"env.cache_get":              4, // intent + model key per candidate
+			"env.cache_get":              2, // model key per candidate
+			"env.shared_cache_get":       2, // intent key per candidate
 			"env.cache_set":              2, // best-effort per transformation
 			"torana_offload_completion":  2, // one per uncached candidate
 			"torana_evaluate_compaction": 2, // optimistic preflight + real report
