@@ -110,10 +110,6 @@ type finding struct {
 	Line int
 }
 
-// textPartType is the only ContentPartsJson part type the text scanner can
-// inspect. Anything else that is provider-visible is unscannable.
-const textPartType = "text"
-
 // extraction is the result of composing a tool message's scannable content.
 type extraction struct {
 	// text is every INSPECTABLE string: the scalar Content plus all valid
