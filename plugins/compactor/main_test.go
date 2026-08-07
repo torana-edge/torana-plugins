@@ -36,15 +36,6 @@ func toolMsg(id, name, content string) *pbv2.Message {
 	}}}}}
 }
 
-// toolText returns the text of the FIRST text arm of the FIRST tool-result
-// block in message mi (the fixtures carry exactly one result per message).
-func resultBlock(id string, content string) *pbv2.RequestBlock {
-	return &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: &pbv2.RequestToolResultBlock{
-		ToolCallId: id, ToolName: "read",
-		Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: content}}}},
-	}}}
-}
-
 func toolText(t *testing.T, req *pbv2.ChatRequest, mi int) string {
 	t.Helper()
 	for _, b := range req.Messages[mi].Blocks {

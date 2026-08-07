@@ -59,7 +59,9 @@ This repository is only the first-party set — see
 registry** at torana.sh. It is a reference for the capability surface — how a plugin
 requests `env.host_call.verify_virtual_key` and `env.request_headers` — not a
 general-purpose authentication plugin, and it should not be deployed as an access
-control.
+control. Its reference policy treats a verifier's explicit `rejected` answer as
+authoritative and emits a value-free 401 block; an unwired or temporarily
+unavailable verifier remains advisory and does not block.
 
 An earlier iteration of this plugin shipped hardcoded stubs that returned a dummy
 tenant for every request. Those were removed (torana-edge#130) precisely because a

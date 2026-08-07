@@ -378,10 +378,11 @@ func truncateRunes(s string, n int) string {
 	return string(r[:n]) + "…"
 }
 
-// contentKey derives a cache key from a tool call's name and arguments,
+// contentKey derives an opaque cache key from a tool call's name and arguments,
 // excluding "i". Go's json.Marshal sorts map keys, so the encoding is
-// canonical: the response side (which strips "i") and the request side (where
-// "i" is already absent) produce the same key for the same logical call.
+// canonical before ContentAddressedCacheKey hashes it: the response side
+// (which strips "i") and the request side (where "i" is already absent)
+// produce the same key for the same logical call.
 // Collisions (same tool + args, different intent) resolve last-write-wins,
 // which is acceptable for a hint.
 func contentKey(name string, args map[string]any) string {
@@ -392,11 +393,12 @@ func contentKey(name string, args map[string]any) string {
 		}
 		cp[k] = v
 	}
-	// Encode as a JSON array so the key stays JSON-safe (no control-char
-	// separator that would break the cache_set payload) while remaining
-	// canonical — Go sorts the inner map's keys.
+	// Encode as a JSON array to keep the name/map boundary explicit, then hash
+	// the canonical bytes. Raw arguments can contain paths, commands, source,
+	// and user data; they must not become Redis key names or defeat local-cache
+	// size accounting.
 	b, _ := json.Marshal([]any{name, cp})
-	return "intentc:" + string(b)
+	return sdk.ContentAddressedCacheKey("intent/content/v1", string(b))
 }
 
 // ==========================================================================

@@ -332,6 +332,24 @@ func TestRehydrationRestoresAndBridges(t *testing.T) {
 	}
 }
 
+func TestContentKeyIsCanonicalOpaqueAndBounded(t *testing.T) {
+	a := contentKey("read", map[string]any{"path": "/secret/customer.go", "line": 12})
+	b := contentKey("read", map[string]any{"line": 12, "path": "/secret/customer.go", intentField: "ignored"})
+	if a != b {
+		t.Fatalf("canonical equivalent calls differ: %q vs %q", a, b)
+	}
+	if strings.Contains(a, "secret") || strings.Contains(a, "customer.go") || strings.Contains(a, "read") {
+		t.Fatalf("cache key exposes tool inputs: %q", a)
+	}
+	large := contentKey("shell", map[string]any{"command": strings.Repeat("private-command ", 10000)})
+	if len(large) != len(a) {
+		t.Fatalf("key length depends on argument size: small=%d large=%d", len(a), len(large))
+	}
+	if large == a {
+		t.Fatal("different calls collided")
+	}
+}
+
 // TestRehydrationFillNeverCached — heuristic fills stay request-local: the
 // intent cache keeps real-captured-only values.
 func TestRehydrationFillNeverCached(t *testing.T) {

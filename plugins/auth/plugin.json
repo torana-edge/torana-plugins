@@ -25,6 +25,10 @@
     {
       "name": "env.set_identity",
       "description": "Identity injection for virtual keys"
+    },
+    {
+      "name": "env.block_request",
+      "description": "Reject virtual keys explicitly denied by the authoritative verifier"
     }
   ]
 }

@@ -652,33 +652,45 @@ func TestExtractJSONCases(t *testing.T) {
 }
 
 // TestMaxScanBytesTruncation — the byte budget is rune-safe and asserted by
-// BYTE length; the stubbed offload payload never exceeds it.
+// BYTE length. A clean prefix verdict remains incomplete for the full result:
+// on_error governs it and it is never cached as clean.
 func TestMaxScanBytesTruncation(t *testing.T) {
-	h := newHarness(t)
-	h.SetConfig(`{"provider":"local","model":"qwen","max_scan_bytes":100}`)
-	var payload string
-	h.StubHostCall("torana_offload_completion", func(args string) (string, error) {
-		payload = args
-		return sdktest.HostResultValue([]byte(`{"completion":"{\"pii\":false,\"findings\":[]}"}`)), nil
-	})
-	content := strings.Repeat("日本語", 500)
-	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm(content))))
-	if res.Err != nil || !res.PassedThrough {
-		t.Fatalf("err=%v", res.Err)
-	}
-	idx := strings.Index(payload, "Output to scan:\\n")
-	if idx < 0 {
-		t.Fatal("offload payload missing the scan content")
-	}
-	scanned := payload[idx+len("Output to scan:\\n"):]
-	scanned = strings.TrimSuffix(scanned, `"}`)
-	var decoded string
-	_ = json.Unmarshal([]byte(`"`+scanned+`"`), &decoded)
-	if len(decoded) > 100 {
-		t.Fatalf("scanned bytes=%d exceed the 100-byte budget", len(decoded))
-	}
-	if !utf8.ValidString(decoded) {
-		t.Fatal("truncation split a rune")
+	for _, onError := range []string{"block", "allow"} {
+		t.Run(onError, func(t *testing.T) {
+			h := newHarness(t)
+			h.SetConfig(`{"provider":"local","model":"qwen","max_scan_bytes":100,"on_error":"` + onError + `"}`)
+			var payload string
+			h.StubHostCall("torana_offload_completion", func(args string) (string, error) {
+				payload = args
+				return sdktest.HostResultValue([]byte(`{"completion":"{\"pii\":false,\"findings\":[]}"}`)), nil
+			})
+			content := strings.Repeat("日本語", 500)
+			res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm(content))))
+			if res.Err != nil || !res.PassedThrough {
+				t.Fatalf("err=%v", res.Err)
+			}
+			idx := strings.Index(payload, "Output to scan:\\n")
+			if idx < 0 {
+				t.Fatal("offload payload missing the scan content")
+			}
+			scanned := payload[idx+len("Output to scan:\\n"):]
+			scanned = strings.TrimSuffix(scanned, `"}`)
+			var decoded string
+			_ = json.Unmarshal([]byte(`"`+scanned+`"`), &decoded)
+			if len(decoded) > 100 {
+				t.Fatalf("scanned bytes=%d exceed the 100-byte budget", len(decoded))
+			}
+			if !utf8.ValidString(decoded) {
+				t.Fatal("truncation split a rune")
+			}
+			if n := countCommand(h, "env.cache_set"); n != 0 {
+				t.Fatalf("incomplete scan wrote %d clean cache entries", n)
+			}
+			blocked := len(h.BlockCalls()) > 0
+			if want := onError == "block"; blocked != want {
+				t.Fatalf("blocked=%v, want %v for on_error=%s", blocked, want, onError)
+			}
+		})
 	}
 }
 

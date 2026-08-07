@@ -104,7 +104,7 @@ type pluginContract struct {
 // Migration-C). Every manifest must match its row exactly.
 var pluginContracts = map[string]pluginContract{
 	"auth": {hooks: []string{"run_before_request"},
-		permissions: []string{"env.host_call.verify_virtual_key", "env.request_headers", "env.set_identity"}},
+		permissions: []string{"env.block_request", "env.host_call.verify_virtual_key", "env.request_headers", "env.set_identity"}},
 	"cache_tier_selector": {hooks: []string{"run_before_request"},
 		permissions: []string{"env.host_call.torana_cache_pricing", "env.host_call.torana_plugin_counter", "env.log", "env.now", "env.plugin_config", "env.state_get", "env.state_keys", "env.state_set", "ir.cache_control.write"}},
 	"cache_warmer": {hooks: []string{"run_before_request", "run_on_tick"},
