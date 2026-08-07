@@ -34,7 +34,7 @@
       "type": "integer",
       "minimum": 0,
       "default": 0,
-      "description": "Maximum tool-output BYTES sent to the local scanner (rune-safe); zero is unbounded."
+      "description": "Maximum tool-output BYTES sent to the local scanner (rune-safe); zero is unbounded. Content beyond the limit is an incomplete scan governed by on_error and is never cached as clean."
     }
   },
   "dependentRequired": {

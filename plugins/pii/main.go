@@ -377,11 +377,13 @@ Never include the actual PII values — only the category and line number. If th
 
 func modelScan(content, toolName string) ([]finding, error) {
 	scanContent := content
+	truncated := false
 	if cfg.MaxScanBytes > 0 && len(scanContent) > cfg.MaxScanBytes {
 		// Byte budget with rune-safe boundary repair: a mid-rune cut would
 		// silently corrupt the last character of the text a PII detector is
 		// about to read.
 		scanContent = truncHead(scanContent, cfg.MaxScanBytes)
+		truncated = true
 	}
 	payload, _ := json.Marshal(map[string]any{
 		"provider":      cfg.Provider,
@@ -447,6 +449,13 @@ func modelScan(content, toolName string) ([]finding, error) {
 		return nil, &scannerFailure{"pii scan: contradictory verdict (pii false with findings)"}
 	}
 	if !pii {
+		if truncated {
+			// A clean verdict over a prefix is not a clean verdict over the
+			// tool result. Treat the uninspected suffix exactly like any other
+			// incomplete scan: on_error decides, and the caller must never cache
+			// this outcome as authoritative for the full content.
+			return nil, &scannerFailure{"pii scan incomplete: tool output exceeds max_scan_bytes"}
+		}
 		return nil, nil
 	}
 	// Bound the reporting: a hostile but valid model reply can return
