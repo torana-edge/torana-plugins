@@ -61,7 +61,10 @@ requests `env.host_call.verify_virtual_key` and `env.request_headers` — not a
 general-purpose authentication plugin, and it should not be deployed as an access
 control. Its reference policy treats a verifier's explicit `rejected` answer as
 authoritative and emits a value-free 401 block; an unwired or temporarily
-unavailable verifier remains advisory and does not block.
+unavailable verifier remains advisory and does not block. Its manifest also
+deliberately uses `failure_mode: pass`: transport, protocol, and contract errors
+fail open because this is a capability example, not an authentication boundary.
+A production auth plugin must use a fail-closed policy instead.
 
 An earlier iteration of this plugin shipped hardcoded stubs that returned a dummy
 tenant for every request. Those were removed (torana-edge#130) precisely because a
