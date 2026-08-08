@@ -107,7 +107,9 @@ func init() {
 		if err != nil {
 			// Transport/protocol failure or a contract-class host refusal:
 			// the identity cannot be established, and this plugin is the only
-			// source — surface it so failure_mode applies.
+			// source — surface it so failure_mode applies. This REFERENCE plugin
+			// deliberately ships failure_mode=pass because it is not access
+			// control. A production auth plugin must choose block semantics here.
 			return sdk.RequestResult{}, err
 		}
 		switch outcome {
