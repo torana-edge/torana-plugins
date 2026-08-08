@@ -13,18 +13,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: torana-plugins
-      # The SDK release these plugins are built and released against, read from
-      # the checked-in SDK_REF file. Declaring it as workflow env meant TWO
-      # copies — one per workflow — which is the drift this was meant to end.
-      - id: sdk_ref
-        run: echo "ref=$(cat torana-plugins/SDK_REF)" >> "$GITHUB_OUTPUT"
-      # The SDK is pinned to a release tag: plugins are built against a version
-      # a user can actually install, and it moves deliberately at release time.
+      # Fetch merged SDK history first. The next step validates that SDK_REF is
+      # reachable from main before checking it out, so a retained PR/object SHA
+      # cannot become an untraceable release dependency.
       - uses: actions/checkout@v4
         with:
           repository: torana-edge/torana-plugin-sdk
-          ref: ${{ steps.sdk_ref.outputs.ref }}
+          ref: main
+          fetch-depth: 0
           path: torana-plugin-sdk
+      - name: Check out the merged SDK revision
+        working-directory: torana-plugins
+        run: ./scripts/checkout_sdk_ref.sh ../torana-plugin-sdk
       # The proxy tracks main rather than a commit, because the question this
       # job exists to answer is "do these plugins work with the current host".
       # A pinned SHA answers it about a host nobody is running: both refs here
