@@ -39,7 +39,9 @@ else
   echo "note: no sibling torana-plugin-sdk checkout; building $plugin against the published module" >&2
   export GOWORK=off
 fi
-GOCACHE="$cache" GOOS=wasip1 GOARCH=wasm go build -trimpath -buildmode=c-shared -buildvcs=false -o "$root/dist/$plugin/plugin.wasm" "$source"
+(cd "$source" && GOCACHE="$cache" GOOS=wasip1 GOARCH=wasm \
+  go build -trimpath -buildmode=c-shared -buildvcs=false \
+  -o "$root/dist/$plugin/plugin.wasm" .)
 cp "$source/plugin.json" "$root/dist/$plugin/plugin.json"
 cp "$source/schema.json" "$root/dist/$plugin/schema.json"
 rm -f "$root/dist/$plugin/agent.json"
