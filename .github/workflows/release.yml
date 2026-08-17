@@ -22,13 +22,16 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: torana-plugins
+      - name: GitHub Actions use immutable commits
+        working-directory: torana-plugins
+        run: ./scripts/check-actions-pinned.sh
       # Fetch merged SDK history first. The next step validates that SDK_REF is
       # reachable from main before checking it out, so a retained PR/object SHA
       # cannot become an untraceable release dependency.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: torana-edge/torana-plugin-sdk
           ref: main
@@ -37,21 +40,21 @@ jobs:
       - name: Check out the merged SDK revision
         working-directory: torana-plugins
         run: ./scripts/checkout_sdk_ref.sh ../torana-plugin-sdk
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.26.x'
       - working-directory: torana-plugins
         run: ./scripts/test.sh
       - working-directory: torana-plugins
         run: ./scripts/package.sh '${{ inputs.plugin }}' '${{ inputs.version }}'
-      - uses: anchore/sbom-action@v0
+      - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
           path: torana-plugins/dist/${{ inputs.plugin }}
           output-file: torana-plugins/dist/${{ inputs.plugin }}/${{ inputs.plugin }}-${{ inputs.version }}.spdx.json
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: '${{ inputs.plugin }}/v${{ inputs.version }}'
           files: torana-plugins/dist/${{ inputs.plugin }}/*
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
         with:
           subject-path: torana-plugins/dist/${{ inputs.plugin }}/${{ inputs.plugin }}-${{ inputs.version }}.tar.gz
