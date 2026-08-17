@@ -38,3 +38,17 @@ if "$root/scripts/check-workflow-shell-inputs.sh" "$fixtures" >/dev/null 2>&1; t
 	echo "direct input interpolation in a run block was accepted" >&2
 	exit 1
 fi
+rm "$fixtures/unsafe-block.yml"
+
+cat >"$fixtures/unsafe-after-step-key.yml" <<'EOF'
+jobs:
+  release:
+    steps:
+      - name: Package
+        working-directory: torana-plugins
+        run: ./package.sh "${{ inputs.version }}"
+EOF
+if "$root/scripts/check-workflow-shell-inputs.sh" "$fixtures" >/dev/null 2>&1; then
+	echo "direct input interpolation after another step key was accepted" >&2
+	exit 1
+fi

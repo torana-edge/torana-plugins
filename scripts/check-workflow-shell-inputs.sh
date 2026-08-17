@@ -17,7 +17,7 @@ for workflow in "$workflow_dir"/*.yml "$workflow_dir"/*.yaml; do
 			if (in_run && $0 !~ /^[[:space:]]*$/ && level <= run_level) {
 				in_run = 0
 			}
-			if ($0 ~ /^[[:space:]]*-[[:space:]]+run:[[:space:]]*/) {
+			if ($0 ~ /^[[:space:]]*(-[[:space:]]+)?run:[[:space:]]*/) {
 				in_run = 1
 				run_level = level
 			}
