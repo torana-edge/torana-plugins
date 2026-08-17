@@ -18,9 +18,14 @@ permissions:
   id-token: write
   attestations: write
 
+concurrency:
+  group: plugin-release-${{ inputs.plugin }}-${{ inputs.version }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -46,7 +51,10 @@ jobs:
       - working-directory: torana-plugins
         run: ./scripts/test.sh
       - working-directory: torana-plugins
-        run: ./scripts/package.sh '${{ inputs.plugin }}' '${{ inputs.version }}'
+        env:
+          RELEASE_PLUGIN: ${{ inputs.plugin }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: ./scripts/package.sh "$RELEASE_PLUGIN" "$RELEASE_VERSION"
       - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
           path: torana-plugins/dist/${{ inputs.plugin }}
