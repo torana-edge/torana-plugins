@@ -34,11 +34,10 @@
 //     due entry that later ticks keep spending on (replay invariant: a seeded
 //     pending entry causes zero sends).
 //
-// # v2 semantics
+// # Safety semantics
 //
-//   - Durable entries carry a schema version; anything else stops with zero
-//     sends (no v1 decoder, no compatibility branch — v1 wire layouts overlap
-//     and can misdecode as v2).
+//   - Durable entries carry the current schema version; unsupported versions
+//     stop with zero sends rather than being guessed or partially decoded.
 //   - State refusals split by class: advisory (NOT_CONFIGURED/UNAVAILABLE)
 //     declines safely; contract/protocol refusals error the hook so a broken
 //     enabled plugin is visible. Corrupt stored JSON is a key-local data
@@ -61,9 +60,8 @@ import (
 func main() {}
 
 // schemaVersion marks the durable entry format written by this plugin. Any
-// other version — including anything a v1/v2 plugin stored — is stopped with
-// zero sends. v3 added the domain-separated PrefixFingerprint; there is NO
-// v2 fallback/decoder (pre-release policy).
+// other version stops with zero sends. Version 3 requires the domain-separated
+// PrefixFingerprint and has no fallback decoder.
 const schemaVersion = 3
 
 // warmEntry is everything needed to refresh one conversation, stored durably so
@@ -84,7 +82,7 @@ type warmEntry struct {
 
 	// PrefixFingerprint is the fixed, domain-separated digest of the SDK
 	// observable projection at observation time — the identity the replay
-	// must match. v3 schema; required non-empty before any pricing call.
+	// must match. Required non-empty before any pricing call.
 	PrefixFingerprint string `json:"prefix_fingerprint"`
 
 	LastRefreshMillis int64 `json:"last_refresh_millis"`

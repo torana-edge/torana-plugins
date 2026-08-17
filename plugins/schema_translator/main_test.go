@@ -196,7 +196,7 @@ func TestNestedMapKeepsItsValueSchema(t *testing.T) {
 }
 
 // TestEmbeddedValueSchemaIsDeepCopied — the embedded copy must not alias the
-// caller's map. The v1 shallow copy shared nested maps, so mutating the
+// caller's map. A shallow copy would share nested maps, so mutating the
 // embedded value schema reached back into the author's schema.
 func TestEmbeddedValueSchemaIsDeepCopied(t *testing.T) {
 	var schema map[string]any
@@ -495,7 +495,7 @@ func TestRegistryWirePresenceDistinctions(t *testing.T) {
 }
 
 // TestRegistryWireNestedPathsAndUnicode — dotted fields, "[]"-suffixed field
-// names (the v1 ambiguity), and unicode/empty names round-trip exactly.
+// names, and unicode/empty names round-trip exactly.
 func TestRegistryWireNestedPathsAndUnicode(t *testing.T) {
 	raw := `{"version":1,"tools":{"t":[{"path":[{"field":"a.b","each":false},{"field":"c[]","each":false},{"field":"","each":true},{"field":"名前","each":false}]}]}}`
 	decoded, err := decodeRegistry([]byte(raw))

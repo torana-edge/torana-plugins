@@ -50,8 +50,8 @@ Each operation must use JSON input and output. `input_schema` is optional;
 `output_schema` is required. Supported methods are `GET`, `POST`, `PUT`,
 `PATCH`, and `DELETE`. Risk must be `read`, `write`, or `destructive`, and it
 must agree with the method. Schemas describe the contract to callers; plugin
-bundles are rejected if they use schema keywords the v1 host cannot enforce,
-and Torana validates both request and response values at dispatch.
+bundles are rejected if they use schema keywords the host cannot enforce, and
+Torana validates both request and response values at dispatch.
 
 The supported subset is `type`, `properties`, `required`,
 `additionalProperties` (boolean), `items`, `const`, `enum`, `$schema`, `title`,

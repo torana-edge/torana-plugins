@@ -545,10 +545,10 @@ func hasAdditionalProperties(schema map[string]any) bool {
 // a model that cannot emit free-form object keys can still populate it.
 //
 // valueSchema is the author's declared schema for the map's values, when there
-// was one; it is DEEP-copied before embedding (the v1 shallow copy aliased
-// nested maps and slices). When the author declared NO value constraint (a
+// was one; it is deep-copied before embedding so nested maps and slices cannot
+// alias the source schema. When the author declared no value constraint (a
 // bare object property, or additionalProperties:true), the value schema is
-// UNCONSTRAINED — only a description, no type — so arbitrary JSON values
+// unconstrained — only a description, no type — so arbitrary JSON values
 // (booleans, numbers, objects, arrays, null) survive translation and strict
 // reversal. Narrowing unconstrained values to type:string made the schema
 // stricter than the author wrote it (review round-1 F5).

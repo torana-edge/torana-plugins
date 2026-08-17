@@ -72,7 +72,7 @@ type config struct {
 // parseConfig is the pure config decoder; loadConfig installs its result into
 // the process-global state exactly once. The host validates config against
 // schema.json at write time, so an unmarshal failure here is unreachable in
-// practice and falls back to defaults, matching v1.
+// practice and falls back to defaults.
 func parseConfig(raw string) config {
 	var c config
 	if raw != "" {
