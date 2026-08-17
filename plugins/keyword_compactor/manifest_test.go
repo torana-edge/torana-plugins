@@ -7,11 +7,9 @@ import (
 	"testing"
 )
 
-// TestManifestPermissionSetExact — the EXACT final permission set,
-// order-independently with duplicate rejection: the S1 executable contract
-// table must not inherit a stale grant (env.log was dropped; the approved
-// Migration-C inventory allows exactly this set). ir.tool_results.write is
-// the ONLY IR write grant.
+// TestManifestPermissionSetExact — the exact release permission set,
+// order-independently with duplicate rejection. The table must not inherit a
+// stale grant; ir.tool_results.write is the only IR write grant.
 func TestManifestPermissionSetExact(t *testing.T) {
 	raw, err := os.ReadFile("plugin.json")
 	if err != nil {

@@ -100,8 +100,8 @@ type pluginContract struct {
 	requiresUpstream []string
 }
 
-// pluginContracts is the executable nine-plugin contract table (atomic
-// Migration-C). Every manifest must match its row exactly.
+// pluginContracts is the executable nine-plugin release contract. Every
+// manifest must match its row exactly.
 var pluginContracts = map[string]pluginContract{
 	"auth": {hooks: []string{"run_before_request"},
 		permissions: []string{"env.block_request", "env.host_call.verify_virtual_key", "env.request_headers", "env.set_identity"}},
@@ -219,7 +219,7 @@ func main() {
 			}
 			seen["requires:"+requiredID] = true
 		}
-		// The atomic Migration-C CONTRACT TABLE: the exact approved hooks,
+		// The release contract table: the exact approved hooks,
 		// permissions, and requires_upstream per plugin, compared
 		// order-independently with duplicate rejection on both sides. A
 		// stale grant, a missing grant, a dropped hook, or a drifted
