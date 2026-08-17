@@ -57,6 +57,8 @@ else
 fi
 
 go run "$root/scripts/validate_manifests.go" "$root/plugins"
+"$root/scripts/check-workflow-shell-inputs.sh"
+"$root/scripts/test-workflow-shell-inputs.sh"
 "$root/scripts/test_manifest_contract_negatives.sh"
 "$root/scripts/test_capability_sync.sh"
 "$root/scripts/test_capability_sync_negatives.sh"
