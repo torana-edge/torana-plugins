@@ -8,7 +8,7 @@ Each plugin requests capabilities in `plugin.json`; users approve those
 requests for the exact installed artifact. A request in a manifest is never a
 grant.
 
-All nine official plugins use ABI v2 and pin the same SDK revision. Their
+All ten official plugins use ABI v2 and pin the same SDK revision. Their
 manifest ABI, hook, permission, and upstream contracts are checked as one
 executable release inventory.
 
@@ -52,6 +52,13 @@ This repository is only the first-party set — see
 - `otel` — request metrics and a minimal plugin HTTP endpoint.
 - `pii` — local-model and regex PII request guard.
 - `schema_translator` — translates map schemas for constrained providers.
+- `tool_governor` — restricts or replaces model-visible tool definitions; it is policy, not an execution sandbox.
+
+When combining them, put `tool_governor` before `intent` and
+`schema_translator`: governance applies to the harness's original definitions,
+then the later plugins may add intent fields or translate an approved schema
+for the provider. Run only one of the two compactors; their manifests declare
+that conflict and the host enforces it before loading either guest.
 
 ## A note on `auth`
 

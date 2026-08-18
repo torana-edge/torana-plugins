@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "torana/tool_governor",
+  "name": "tool_governor",
+  "version": "0.1.0",
+  "abi_version": "v2",
+  "minimum_torana_version": "0.1.0",
+  "failure_mode": "block",
+  "repository": "https://github.com/torana-edge/torana-plugins",
+  "description": "Restricts or replaces the tool definitions advertised to the model",
+  "hooks": [
+    {
+      "name": "run_before_request"
+    }
+  ],
+  "permissions": [
+    {
+      "name": "env.plugin_config",
+      "description": "Read the tool allowlist, denylist, and approved definition replacements"
+    },
+    {
+      "name": "ir.cache_control.write",
+      "description": "Remove or reposition cache-marker carriers when their tool definitions are filtered"
+    },
+    {
+      "name": "ir.tools.write",
+      "description": "Remove or replace tool definitions before they reach the model"
+    }
+  ]
+}
