@@ -96,13 +96,14 @@ func (c piiConfig) scannerPairValid() bool {
 // High-precision patterns — deterministic, no model call, exact line numbers,
 // and they still catch obvious PII when the local model is unavailable.
 var piiPatterns = []struct {
-	name string
-	re   *regexp.Regexp
+	name            string
+	requiredLiteral string
+	re              *regexp.Regexp
 }{
-	{"email", regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)},
-	{"us_ssn", regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)},
-	{"aws_access_key", regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`)},
-	{"private_key", regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`)},
+	{"email", "@", regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)},
+	{"us_ssn", "-", regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)},
+	{"aws_access_key", "AKIA", regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`)},
+	{"private_key", "-----BEGIN ", regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`)},
 }
 
 type finding struct {
@@ -346,6 +347,12 @@ func regexScan(content string) []finding {
 		lineNo := i + 1
 		i++
 		for _, p := range piiPatterns {
+			// Each regex contains this literal in every accepting path. Avoid
+			// initializing and retaining the regexp execution machinery when a
+			// line cannot possibly match; the regex remains the authority.
+			if !strings.Contains(line, p.requiredLiteral) {
+				continue
+			}
 			if p.re.MatchString(line) {
 				key := fmt.Sprintf("%s:%d", p.name, lineNo)
 				if !seen[key] {

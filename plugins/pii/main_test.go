@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -275,6 +276,70 @@ func TestRegexCategoriesBlock(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRegexRequiredLiteralPrefilterMatchesReference(t *testing.T) {
+	cases := []string{
+		"plain output without trigger bytes",
+		"contains @ but not an email",
+		"hyphenated-but-not-an-ssn",
+		"AKIA-short",
+		"-----BEGIN but not a private key",
+		"contact someone@example.com now",
+		"ssn: 123-45-6789",
+		"key AKIA1234567890ABCDEF",
+		"-----BEGIN RSA PRIVATE KEY-----",
+		"someone@example.com and 123-45-6789\nAKIA1234567890ABCDEF\n-----BEGIN PRIVATE KEY-----",
+		"first@example.com second@example.com",
+		"wordAKIA1234567890ABCDEFword",
+	}
+	for _, input := range cases {
+		if got, want := regexScan(input), regexScanWithoutPrefilter(input); !reflect.DeepEqual(got, want) {
+			t.Fatalf("input %q: filtered=%+v reference=%+v", input, got, want)
+		}
+	}
+}
+
+func FuzzRegexRequiredLiteralPrefilterMatchesReference(f *testing.F) {
+	for _, seed := range []string{
+		"plain",
+		"someone@example.com",
+		"123-45-6789",
+		"AKIA1234567890ABCDEF",
+		"-----BEGIN EC PRIVATE KEY-----",
+		"@-AKIA-----BEGIN \n",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, input string) {
+		if got, want := regexScan(input), regexScanWithoutPrefilter(input); !reflect.DeepEqual(got, want) {
+			t.Fatalf("filtered=%+v reference=%+v", got, want)
+		}
+	})
+}
+
+func regexScanWithoutPrefilter(content string) []finding {
+	var out []finding
+	seen := map[string]bool{}
+	lineNo := 0
+	for line := range strings.SplitSeq(content, "\n") {
+		lineNo++
+		for _, p := range piiPatterns {
+			if !p.re.MatchString(line) {
+				continue
+			}
+			key := p.name + ":" + strconv.Itoa(lineNo)
+			if seen[key] {
+				continue
+			}
+			if len(out) >= maxReportedFindings {
+				return append(out, finding{Type: "overflow", Line: 0})
+			}
+			seen[key] = true
+			out = append(out, finding{Type: p.name, Line: lineNo})
+		}
+	}
+	return out
 }
 
 // TestDuplicateToolCallIDsAmbiguous — finding 2: duplicated/reused IDs are
@@ -1130,6 +1195,20 @@ func BenchmarkRegexScanLargeSuffix(b *testing.B) {
 		out := regexScan(content)
 		if len(out) != 21 {
 			b.Fatalf("len=%d, want 21 (cap+1 sentinel)", len(out))
+		}
+	}
+}
+
+// BenchmarkRegexScanAgentToolResult mirrors the clean 16 KiB historical tool
+// result used by Edge's retained plugin-chain and per-instance memory probes.
+func BenchmarkRegexScanAgentToolResult(b *testing.B) {
+	content := strings.Repeat("p", 16<<10)
+	b.SetBytes(int64(len(content)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if out := regexScan(content); len(out) != 0 {
+			b.Fatalf("unexpected findings: %+v", out)
 		}
 	}
 }
