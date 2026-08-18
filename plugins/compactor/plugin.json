@@ -8,6 +8,9 @@
   "failure_mode": "pass",
   "repository": "https://github.com/torana-edge/torana-plugins",
   "description": "Economically gated cheap-model tool-result compaction; uses cached intent when available and a bounded local fallback otherwise. Alternative to keyword_compactor \u2014 run ONE of the two; running after intent improves relevance.",
+  "conflicts_with": [
+    "torana/keyword_compactor"
+  ],
   "hooks": [
     {
       "name": "run_before_request"

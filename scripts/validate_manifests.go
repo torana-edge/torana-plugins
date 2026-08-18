@@ -20,6 +20,7 @@ type manifest struct {
 	FailureMode          string   `json:"failure_mode"`
 	Repository           string   `json:"repository"`
 	RequiresUpstream     []string `json:"requires_upstream"`
+	ConflictsWith        []string `json:"conflicts_with"`
 	Hooks                []struct {
 		Name string `json:"name"`
 	} `json:"hooks"`
@@ -98,6 +99,7 @@ type pluginContract struct {
 	hooks            []string
 	permissions      []string
 	requiresUpstream []string
+	conflictsWith    []string
 }
 
 // pluginContracts is the executable nine-plugin release contract. Every
@@ -110,11 +112,13 @@ var pluginContracts = map[string]pluginContract{
 	"cache_warmer": {hooks: []string{"run_before_request", "run_on_tick"},
 		permissions: []string{"env.background_tick", "env.host_call.torana_cache_pricing", "env.host_call.torana_send_request", "env.now", "env.plugin_config", "env.state_get", "env.state_keys", "env.state_set"}},
 	"compactor": {hooks: []string{"run_before_request"},
-		permissions: []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.host_call.torana_evaluate_compaction", "env.host_call.torana_offload_completion", "env.host_call.torana_record_savings", "env.plugin_config", "env.shared_cache_get", "ir.tool_results.write"}},
+		permissions:   []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.host_call.torana_evaluate_compaction", "env.host_call.torana_offload_completion", "env.host_call.torana_record_savings", "env.plugin_config", "env.shared_cache_get", "ir.tool_results.write"},
+		conflictsWith: []string{"torana/keyword_compactor"}},
 	"intent": {hooks: []string{"run_before_request", "run_on_stream_chunk"},
 		permissions: []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.log", "env.meta_get", "env.meta_set", "env.plugin_config", "env.shared_cache_set", "ir.cache_control.write", "ir.messages.write.assistant", "ir.messages.write.developer", "ir.messages.write.other", "ir.messages.write.system", "ir.messages.write.tool", "ir.messages.write.user", "ir.stream.write", "ir.tool_results.write", "ir.tools.write"}},
 	"keyword_compactor": {hooks: []string{"run_before_request"},
-		permissions: []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.host_call.torana_record_savings", "env.plugin_config", "env.shared_cache_get", "ir.tool_results.write"}},
+		permissions:   []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.host_call.torana_record_savings", "env.plugin_config", "env.shared_cache_get", "ir.tool_results.write"},
+		conflictsWith: []string{"torana/compactor"}},
 	"otel": {hooks: []string{"run_before_request", "run_after_response", "run_on_http_request"},
 		permissions: []string{"env.emit_metric", "env.serve_http"}},
 	"pii": {hooks: []string{"run_before_request"},
@@ -217,11 +221,17 @@ func main() {
 			}
 			seen["requires:"+requiredID] = true
 		}
+		for _, conflictingID := range m.ConflictsWith {
+			if strings.TrimSpace(conflictingID) == "" || conflictingID == m.ID || seen["conflicts:"+conflictingID] || seen["requires:"+conflictingID] {
+				panic(fmt.Sprintf("%s: invalid or duplicate conflicts_with %q", entry.Name(), conflictingID))
+			}
+			seen["conflicts:"+conflictingID] = true
+		}
 		// The release contract table: the exact approved hooks,
-		// permissions, and requires_upstream per plugin, compared
+		// permissions, requires_upstream, and conflicts_with per plugin, compared
 		// order-independently with duplicate rejection on both sides. A
 		// stale grant, a missing grant, a dropped hook, or a drifted
-		// upstream dependency fails here.
+		// dependency or incompatibility declaration fails here.
 		contract, ok := pluginContracts[entry.Name()]
 		if !ok {
 			panic(fmt.Sprintf("%s: no entry in the nine-plugin contract table", entry.Name()))
@@ -234,6 +244,9 @@ func main() {
 		}
 		if !sameStringSet(contract.requiresUpstream, m.RequiresUpstream) {
 			panic(fmt.Sprintf("%s: requires_upstream %v does not match the contract %v", entry.Name(), m.RequiresUpstream, contract.requiresUpstream))
+		}
+		if !sameStringSet(contract.conflictsWith, m.ConflictsWith) {
+			panic(fmt.Sprintf("%s: conflicts_with %v does not match the contract %v", entry.Name(), m.ConflictsWith, contract.conflictsWith))
 		}
 		var schema map[string]any
 		readJSON(filepath.Join(dir, "schema.json"), &schema)
