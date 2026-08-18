@@ -3,6 +3,8 @@ set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
+"$root/scripts/check-go-toolchain-source.sh"
+
 # No native build output in the tree.
 #
 # `go build ./...` inside a plugin module writes an executable named after the
