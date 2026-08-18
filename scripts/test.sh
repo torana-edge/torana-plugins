@@ -3,6 +3,8 @@ set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
+"$root/scripts/check-go-toolchain-source.sh"
+
 # No native build output in the tree.
 #
 # `go build ./...` inside a plugin module writes an executable named after the
@@ -60,6 +62,7 @@ go run "$root/scripts/validate_manifests.go" "$root/plugins"
 "$root/scripts/check-workflow-shell-inputs.sh"
 "$root/scripts/test-workflow-shell-inputs.sh"
 "$root/scripts/test-behaviour-skip-policy.sh"
+"$root/scripts/test-behaviour-fixture-diagnostics.sh"
 "$root/scripts/test_manifest_contract_negatives.sh"
 "$root/scripts/test_capability_sync.sh"
 "$root/scripts/test_capability_sync_negatives.sh"

@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           path: torana-plugins
       - name: GitHub Actions use immutable commits
@@ -26,7 +26,7 @@ jobs:
       # Fetch merged SDK history first. The next step validates that SDK_REF is
       # reachable from main before checking it out, so a retained PR/object SHA
       # cannot become an untraceable release dependency.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: torana-edge/torana-plugin-sdk
           ref: main
@@ -43,7 +43,7 @@ jobs:
       #
       # The cost is that an unrelated torana-edge change can turn this red. That
       # is the signal, not the noise.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: torana-edge/torana-edge
           ref: main
@@ -61,13 +61,13 @@ jobs:
             git fetch --depth 1 origin "refs/heads/${GITHUB_HEAD_REF}"
             git checkout --detach FETCH_HEAD
           fi
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          # 1.26.x, not 1.25.x: this job runs `go test` inside a torana-edge
-          # checkout whose go.mod requires 1.26.4. It passes today only because
-          # GOTOOLCHAIN=auto downloads that on demand — name the version the
-          # job actually needs instead of relying on the fallback.
-          go-version: '1.26.x'
+          # This job compiles torana-edge's real fixtures with GOTOOLCHAIN=local.
+          # Resolve the exact version from the host checkout instead of a minor
+          # wildcard: setup-go's manifest can lag a new patch release, which
+          # previously selected 1.26.5 after Edge required 1.26.6.
+          go-version-file: torana-edge/go.mod
       - working-directory: torana-plugins
         run: ./scripts/test.sh
       - name: Vet every plugin module
