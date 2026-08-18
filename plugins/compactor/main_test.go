@@ -36,6 +36,10 @@ func toolMsg(id, name, content string) *pbv2.Message {
 	}}}}}
 }
 
+func requestTextBlock(text string) *pbv2.RequestBlock {
+	return &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: text}}}
+}
+
 func toolText(t *testing.T, req *pbv2.ChatRequest, mi int) string {
 	t.Helper()
 	for _, b := range req.Messages[mi].Blocks {
@@ -99,6 +103,20 @@ func countCommand(h *sdktest.Harness, cmd string) int {
 		}
 	}
 	return n
+}
+
+func hasMetric(h *sdktest.Harness, name string) bool {
+	return metricValue(h, name) != 0
+}
+
+func metricValue(h *sdktest.Harness, name string) float64 {
+	var value float64
+	for _, metric := range h.Metrics() {
+		if metric.Name == name {
+			value += metric.Value
+		}
+	}
+	return value
 }
 
 // ==========================================================================
@@ -366,6 +384,9 @@ func TestModelPathAppliesWithV2OffloadShape(t *testing.T) {
 	if strings.Contains(offloadArgs, "[truncated]") {
 		t.Fatal("default max_offload_input_bytes=0 must send the FULL output, not a truncated one")
 	}
+	if hasMetric(h, "torana_intent_missing_total") {
+		t.Fatal("a captured intent must take precedence over the derived fallback")
+	}
 	// The transformation cache entry exists (best-effort write).
 	cached := false
 	for _, c := range h.Calls() {
@@ -544,7 +565,7 @@ func TestAllCachedBatchEvaluatesOnce(t *testing.T) {
 	h.StubHostCall("torana_offload_completion", offloadStub("must-not-run"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	content := bigContent()
-	modelKey := sdk.ContentAddressedCacheKey(compactionCache, "v3", "read", `{"path":"server.go"}`, content, "find the bug", "model")
+	modelKey := sdk.ContentAddressedCacheKey(compactionCache, "v4", "read", `{"path":"server.go"}`, content, "captured", "find the bug", "model")
 	h.SeedCache(modelKey, "cached-summary")
 
 	res := h.BeforeRequest(bigToolRequest(content))
@@ -572,7 +593,7 @@ func TestCachedValueNotShorterLeavesUntouched(t *testing.T) {
 	h.StubHostCall("torana_offload_completion", offloadStub("must-not-run"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	content := bigContent()
-	modelKey := sdk.ContentAddressedCacheKey(compactionCache, "v3", "read", `{"path":"server.go"}`, content, "find the bug", "model")
+	modelKey := sdk.ContentAddressedCacheKey(compactionCache, "v4", "read", `{"path":"server.go"}`, content, "captured", "find the bug", "model")
 	// Value exactly as long as the original: not shorter -> untouched.
 	h.SeedCache(modelKey, content)
 
@@ -621,11 +642,11 @@ func TestProviderModelInconsistencyRejectsBatch(t *testing.T) {
 	}
 }
 
-// TestIntentMissSkipsWithMetric — NOT_FOUND intent: eligible, no intent;
-// skip + metric. Present-empty intent is the same OUTCOME (unusable) but the
-// plugin read the key as present (a present-empty entry is never treated as
-// absence at the ABI layer).
-func TestIntentMissSkipsWithMetric(t *testing.T) {
+// TestIntentMissUsesBoundedFallback — NOT_FOUND and present-empty remain
+// distinct host states but have the same policy outcome: emit the miss metric,
+// derive the exact bounded local intent, and continue through the real
+// economic/offload path.
+func TestIntentMissUsesBoundedFallback(t *testing.T) {
 	for _, name := range []string{"absent", "present-empty"} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)
@@ -637,23 +658,165 @@ func TestIntentMissSkipsWithMetric(t *testing.T) {
 				h = newHarness(t)
 				h.SetConfig(modelConfig)
 			}
-			h.StubHostCall("torana_offload_completion", offloadStub("summary"))
+			var offloadArgs string
+			h.StubHostCall("torana_offload_completion", func(args string) (string, error) {
+				offloadArgs = args
+				return offloadStub("summary")(args)
+			})
 			h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 			res := h.BeforeRequest(bigToolRequest(bigContent()))
-			if res.Err != nil {
-				t.Fatal(res.Err)
+			if res.Err != nil || res.Request == nil {
+				t.Fatalf("derived fallback did not apply: %v", res.Err)
 			}
-			if !res.PassedThrough {
-				t.Fatal("no usable intent, nothing may change")
+			if got := toolText(t, res.Request, 3); got != "summary" {
+				t.Fatalf("replacement = %q, want summary", got)
 			}
-			missed := false
-			for _, m := range h.Metrics() {
-				if m.Name == "torana_intent_missing_total" {
-					missed = true
-				}
+			if got := metricValue(h, "torana_intent_missing_total"); got != 1 {
+				t.Fatalf("intent-missing metric = %v, want 1", got)
 			}
-			if !missed {
-				t.Fatal("missing torana_intent_missing_total metric")
+			if got := metricValue(h, "torana_compact_eligible_total"); got != 1 {
+				t.Fatalf("eligible metric = %v, want 1", got)
+			}
+			const wantIntent = `torana-derived-intent-v1:{"user_request":"find the bug","tool_name":"read","tool_arguments":"{\"path\":\"server.go\"}"}`
+			var decoded struct {
+				UserPrompt string `json:"user_prompt"`
+			}
+			if err := json.Unmarshal([]byte(offloadArgs), &decoded); err != nil {
+				t.Fatalf("decode offload args: %v", err)
+			}
+			if !strings.HasPrefix(decoded.UserPrompt, "Intent: "+wantIntent+"\n\n") {
+				t.Fatalf("offload prompt lacks exact derived intent %q: %q", wantIntent, decoded.UserPrompt)
+			}
+			wantCalls := map[string]int{
+				"env.plugin_config":          1,
+				"env.shared_cache_get":       1,
+				"env.cache_get":              1,
+				"torana_offload_completion":  1,
+				"torana_evaluate_compaction": 2,
+				"env.cache_set":              1,
+				"torana_record_savings":      1,
+			}
+			gotCalls := map[string]int{}
+			for _, call := range h.Calls() {
+				gotCalls[call.Command]++
+			}
+			if !equalCallMultiset(gotCalls, wantCalls) {
+				t.Fatalf("host-call multiset = %v, want %v", gotCalls, wantCalls)
+			}
+		})
+	}
+}
+
+func equalCallMultiset(got, want map[string]int) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for command, count := range want {
+		if got[command] != count {
+			return false
+		}
+	}
+	return true
+}
+
+func TestDerivedIntentBoundaryAndPrecedence(t *testing.T) {
+	messages := []*pbv2.Message{
+		{Role: "user", Blocks: []*pbv2.RequestBlock{requestTextBlock("old request")}},
+		{Role: "assistant", Blocks: []*pbv2.RequestBlock{requestTextBlock("work")}},
+		{Role: "user", Blocks: []*pbv2.RequestBlock{
+			requestTextBlock(strings.Repeat("日", 300)),
+			toolMsg("c", "read", "result").Blocks[0],
+			requestTextBlock("same-message text after the result must not leak"),
+		}},
+		{Role: "user", Blocks: []*pbv2.RequestBlock{requestTextBlock("later request must not leak")}},
+	}
+	got := deriveCompactionIntent(messages, 2, 1, strings.Repeat("n", 600), strings.Repeat("a", 600))
+	if !strings.HasPrefix(got, derivedIntentPrefix) || !utf8.ValidString(got) {
+		t.Fatalf("derived intent prefix/UTF-8 = %q", got)
+	}
+	var payload derivedIntentPayload
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(got, derivedIntentPrefix)), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(payload.UserRequest, "after the result") || strings.Contains(payload.UserRequest, "later") || len(payload.UserRequest) > maxDerivedIntentBytes ||
+		len(payload.ToolName) > maxDerivedIntentBytes || len(payload.ToolArguments) > maxDerivedIntentBytes {
+		t.Fatalf("derived payload = %#v", payload)
+	}
+	if payload.UserRequest == "" || !utf8.ValidString(payload.UserRequest) {
+		t.Fatalf("rune-safe user request = %q", payload.UserRequest)
+	}
+}
+
+func TestDerivedIntentCacheIdentity(t *testing.T) {
+	const derived = `torana-derived-intent-v1:{"user_request":"find the bug","tool_name":"read","tool_arguments":"{\"path\":\"server.go\"}"}`
+	content := bigContent()
+	derivedKey := sdk.ContentAddressedCacheKey(compactionCache,
+		"v4", "read", `{"path":"server.go"}`, content, "derived", derived, "model")
+
+	t.Run("derived cache hit", func(t *testing.T) {
+		h := newHarness(t)
+		h.SetConfig(modelConfig)
+		h.SeedCache(derivedKey, "cached-derived")
+		h.StubHostCall("torana_offload_completion", offloadStub("must-not-run"))
+		h.StubHostCall("torana_evaluate_compaction", applyStub(true))
+		res := h.BeforeRequest(bigToolRequest(content))
+		if res.Err != nil || res.Request == nil {
+			t.Fatalf("derived cache hit failed: %v", res.Err)
+		}
+		if got := toolText(t, res.Request, 3); got != "cached-derived" {
+			t.Fatalf("derived cached value = %q", got)
+		}
+		if calls := countCommand(h, "torana_offload_completion"); calls != 0 {
+			t.Fatalf("derived cache hit made %d offload calls", calls)
+		}
+	})
+
+	t.Run("captured bytes cannot alias derived domain", func(t *testing.T) {
+		h := newHarness(t)
+		h.SetConfig(modelConfig)
+		h.SeedCache("intent:call_1", derived)
+		h.SeedCache(derivedKey, "wrong-domain")
+		h.StubHostCall("torana_offload_completion", offloadStub("fresh-summary"))
+		h.StubHostCall("torana_evaluate_compaction", applyStub(true))
+		res := h.BeforeRequest(bigToolRequest(content))
+		if res.Err != nil || res.Request == nil {
+			t.Fatalf("captured row failed: %v", res.Err)
+		}
+		if got := toolText(t, res.Request, 3); got != "fresh-summary" {
+			t.Fatalf("captured row reused derived-domain value: %q", got)
+		}
+	})
+
+	mutations := map[string]func(*pbv2.ChatRequest){
+		"user request": func(req *pbv2.ChatRequest) {
+			req.Messages[1].Blocks[0].GetText().Text = "find another bug"
+		},
+		"tool name": func(req *pbv2.ChatRequest) {
+			req.Messages[2].Blocks[0].GetToolUse().Name = "read_file"
+			req.Messages[3].Blocks[0].GetToolResult().ToolName = "read_file"
+		},
+		"tool arguments": func(req *pbv2.ChatRequest) {
+			req.Messages[2].Blocks[0].GetToolUse().ArgumentsJson = []byte(`{"path":"other.go"}`)
+		},
+	}
+	for name, mutate := range mutations {
+		t.Run(name+" partitions derived cache", func(t *testing.T) {
+			h := newHarness(t)
+			h.SetConfig(modelConfig)
+			h.SeedCache(derivedKey, "wrong-input")
+			h.StubHostCall("torana_offload_completion", offloadStub("fresh-summary"))
+			h.StubHostCall("torana_evaluate_compaction", applyStub(true))
+			req := bigToolRequest(content)
+			mutate(req)
+			res := h.BeforeRequest(req)
+			if res.Err != nil || res.Request == nil {
+				t.Fatalf("mutated row failed: %v", res.Err)
+			}
+			if calls := countCommand(h, "torana_offload_completion"); calls != 1 {
+				t.Fatalf("mutated row made %d offload calls, want 1", calls)
+			}
+			if got := toolText(t, res.Request, 3); got != "fresh-summary" {
+				t.Fatalf("mutated row reused baseline cache: %q", got)
 			}
 		})
 	}
@@ -949,7 +1112,7 @@ func TestModelPresentEmptyReplacementRecomputes(t *testing.T) {
 	h.SetConfig(modelConfig)
 	h.SeedCache("intent:call_1", "find the bug")
 	content := bigContent()
-	modelKey := sdk.ContentAddressedCacheKey(compactionCache, "v3", "read", `{"path":"server.go"}`, content, "find the bug", "model")
+	modelKey := sdk.ContentAddressedCacheKey(compactionCache, "v4", "read", `{"path":"server.go"}`, content, "captured", "find the bug", "model")
 	h.SeedCache(modelKey, "") // present, empty
 	h.StubHostCall("torana_offload_completion", offloadStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))

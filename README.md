@@ -46,9 +46,9 @@ This repository is only the first-party set — see
 - `auth` — virtual-key and request-header identity normalization.
 - `cache_tier_selector` — buys the cheapest prompt-cache lifetime per conversation.
 - `cache_warmer` — keeps a chosen conversation's cache alive across an idle gap.
-- `compactor` — economically gated cheap-model tool-result compaction.
+- `compactor` — economically gated cheap-model tool-result compaction; cached intent improves relevance but is optional.
 - `intent` — captures tool-call intent for compaction policies.
-- `keyword_compactor` — deterministic intent-guided compaction.
+- `keyword_compactor` — deterministic keyword compaction with cached-intent or bounded local guidance.
 - `otel` — request metrics and a minimal plugin HTTP endpoint.
 - `pii` — local-model and regex PII request guard.
 - `schema_translator` — translates map schemas for constrained providers.

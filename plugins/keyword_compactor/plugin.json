@@ -7,10 +7,7 @@
   "minimum_torana_version": "0.1.0",
   "failure_mode": "pass",
   "repository": "https://github.com/torana-edge/torana-plugins",
-  "description": "Deterministic keyword-based tool result compaction using the intent plugin's cache; alternative to compactor \u2014 run ONE of the two, after 'intent'",
-  "requires_upstream": [
-    "torana/intent"
-  ],
+  "description": "Deterministic keyword-based tool-result compaction; uses cached intent when available and a bounded local fallback otherwise. Alternative to compactor \u2014 run ONE of the two; running after intent improves relevance.",
   "hooks": [
     {
       "name": "run_before_request"
@@ -27,7 +24,7 @@
     },
     {
       "name": "env.shared_cache_get",
-      "description": "Read intent:<tool_call_id> values published by the intent plugin"
+      "description": "Read optional intent:<tool_call_id> values published by the intent plugin"
     },
     {
       "name": "env.emit_metric",

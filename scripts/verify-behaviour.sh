@@ -66,7 +66,8 @@ if [ "$status" -ne 0 ]; then
   # non-zero and would terminate the script here — before the three guards
   # below print their counters, turning a red build into one with no
   # diagnostics at all.
-  grep -E '^(---|\s+---) (FAIL|ERROR)|^[[:space:]]+[^[:space:]]+_test\.go:[0-9]+:|^(FAIL|ok|panic)' "$log" | head -80 || true
+  grep -E '^(---|\s+---) (FAIL|ERROR)|^[[:space:]]+[^[:space:]]+_test\.go:[0-9]+:|^(FAIL|ok|panic)' "$log" |
+    grep -v 'official-plugin behaviour: bundles from' | head -80 || true
 fi
 
 # The marker is the one string this repository and torana-edge agree on by
@@ -77,29 +78,31 @@ ran=$(grep -c 'official-plugin behaviour: bundles from' "$log" || true)
 # Skips are counted structurally instead. Matching a skip REASON meant
 # hardcoding sentences owned by another repository: torana-edge already has a
 # second wording ("TORANA_PLUGIN_BUNDLES_DIR is unset") that the previous
-# pattern missed, so the guard was already partly blind. Any skip in these
-# packages is suspect here, because the whole point of this job is that the
-# bundles are present.
+# pattern missed, so the guard was already partly blind. The broad wasm package
+# now also contains retained, explicitly opt-in memory profiles; their exact
+# names are classified separately while every other skip still fails closed.
 skipped=$(grep -cE '^\s*--- SKIP:' "$log" || true)
 # `|| true` on the pipeline too, not just the count: with pipefail a grep that
 # matches nothing fails the whole pipeline, and set -e then kills the script
 # before a single guard reports. Which is exactly what happened the first time
 # this ran green.
 skipped_names=$(grep -E '^\s*--- SKIP:' "$log" | sed -E 's/^[[:space:]]*--- SKIP:[[:space:]]*//; s/ \(.*//' | sort -u || true)
+skip_filter="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/filter-behaviour-skips.sh"
+unexpected_skips=$(printf '%s\n' "$skipped_names" | "$skip_filter" || true)
+unexpected_count=$(printf '%s\n' "$unexpected_skips" | sed '/^$/d' | wc -l)
 
 echo "--- behaviour suite ---"
 echo "gated tests that ran: $ran"
 echo "tests skipped:        $skipped"
+echo "unexpected skips:     $unexpected_count"
 
-# 1 & 2. Nothing should skip. The bundles are built by the step before this one
-#    and the directory is exported below, so a skip means the suite is not
-#    actually exercising what this job exists to exercise — whatever reason the
-#    test gave.
-if [ "$skipped" -ne 0 ]; then
-  echo "FAIL: $skipped test(s) skipped, but every official bundle was just built." >&2
+# 1 & 2. No bundle/conformance row may skip. The exact opt-in memory profiles
+#    are unrelated to plugin behavior and are the only permitted skips.
+if [ "$unexpected_count" -ne 0 ]; then
+  echo "FAIL: $unexpected_count unexpected test(s) skipped, but every official bundle was just built." >&2
   echo "      This job is the only place plugin behaviour runs, so a skip here is" >&2
   echo "      indistinguishable from that behaviour being untested." >&2
-  echo "$skipped_names" | sed 's/^/        /' >&2
+  echo "$unexpected_skips" | sed 's/^/        /' >&2
   status=1
 fi
 

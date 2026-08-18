@@ -16,12 +16,16 @@ func TestManifestPermissionSetExact(t *testing.T) {
 		t.Fatal(err)
 	}
 	var m struct {
-		Permissions []struct {
+		RequiresUpstream []string `json:"requires_upstream"`
+		Permissions      []struct {
 			Name string `json:"name"`
 		} `json:"permissions"`
 	}
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatal(err)
+	}
+	if len(m.RequiresUpstream) != 0 {
+		t.Fatalf("requires_upstream = %v, want no hard intent dependency", m.RequiresUpstream)
 	}
 	got := make([]string, 0, len(m.Permissions))
 	seen := map[string]bool{}
