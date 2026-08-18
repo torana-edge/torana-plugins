@@ -68,6 +68,12 @@ jobs:
           # wildcard: setup-go's manifest can lag a new patch release, which
           # previously selected 1.26.5 after Edge required 1.26.6.
           go-version-file: torana-edge/go.mod
+          # This job compiles three repositories. Hash every dependency graph
+          # it consumes so a host or SDK update cannot reuse a stale key.
+          cache-dependency-path: |
+            torana-plugins/plugins/*/go.sum
+            torana-plugin-sdk/go.sum
+            torana-edge/go.sum
       - working-directory: torana-plugins
         run: ./scripts/test.sh
       - name: Vet every plugin module

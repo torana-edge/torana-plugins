@@ -60,6 +60,7 @@ fi
 
 go run "$root/scripts/validate_manifests.go" "$root/plugins"
 "$root/scripts/check-workflow-shell-inputs.sh"
+"$root/scripts/check-setup-go-cache-paths.sh"
 "$root/scripts/test-workflow-shell-inputs.sh"
 "$root/scripts/test-behaviour-skip-policy.sh"
 "$root/scripts/test-behaviour-fixture-diagnostics.sh"
