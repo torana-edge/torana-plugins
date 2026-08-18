@@ -102,7 +102,7 @@ type pluginContract struct {
 	conflictsWith    []string
 }
 
-// pluginContracts is the executable nine-plugin release contract. Every
+// pluginContracts is the executable ten-plugin release contract. Every
 // manifest must match its row exactly.
 var pluginContracts = map[string]pluginContract{
 	"auth": {hooks: []string{"run_before_request"},
@@ -125,6 +125,8 @@ var pluginContracts = map[string]pluginContract{
 		permissions: []string{"env.block_request", "env.cache_get", "env.cache_set", "env.host_call.torana_offload_completion", "env.plugin_config"}},
 	"schema_translator": {hooks: []string{"run_before_request", "run_on_stream_chunk"},
 		permissions: []string{"env.meta_get", "env.meta_set", "ir.messages.write.assistant", "ir.stream.write", "ir.tools.write"}},
+	"tool_governor": {hooks: []string{"run_before_request"},
+		permissions: []string{"env.plugin_config", "ir.cache_control.write", "ir.tools.write"}},
 }
 
 func hookNames(hooks []struct {
@@ -234,7 +236,7 @@ func main() {
 		// dependency or incompatibility declaration fails here.
 		contract, ok := pluginContracts[entry.Name()]
 		if !ok {
-			panic(fmt.Sprintf("%s: no entry in the nine-plugin contract table", entry.Name()))
+			panic(fmt.Sprintf("%s: no entry in the ten-plugin contract table", entry.Name()))
 		}
 		if !sameStringSet(contract.hooks, hookNames(m.Hooks)) {
 			panic(fmt.Sprintf("%s: hooks %v do not match the contract %v", entry.Name(), hookNames(m.Hooks), contract.hooks))
