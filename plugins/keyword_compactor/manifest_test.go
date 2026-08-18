@@ -17,6 +17,7 @@ func TestManifestPermissionSetExact(t *testing.T) {
 	}
 	var m struct {
 		RequiresUpstream []string `json:"requires_upstream"`
+		ConflictsWith    []string `json:"conflicts_with"`
 		Permissions      []struct {
 			Name string `json:"name"`
 		} `json:"permissions"`
@@ -26,6 +27,9 @@ func TestManifestPermissionSetExact(t *testing.T) {
 	}
 	if len(m.RequiresUpstream) != 0 {
 		t.Fatalf("requires_upstream = %v, want no hard intent dependency", m.RequiresUpstream)
+	}
+	if len(m.ConflictsWith) != 1 || m.ConflictsWith[0] != "torana/compactor" {
+		t.Fatalf("conflicts_with = %v, want [torana/compactor]", m.ConflictsWith)
 	}
 	got := make([]string, 0, len(m.Permissions))
 	seen := map[string]bool{}
