@@ -9,8 +9,7 @@ import (
 )
 
 // ==========================================================================
-// Pure helpers (ported from v1; the response surface is now first-class v2
-// ChatResponse fields instead of ToranaMeta._response parsing).
+// Pure helpers over the response's first-class ChatResponse fields.
 // ==========================================================================
 
 func TestStatusClass(t *testing.T) {
@@ -79,8 +78,8 @@ func resp(model string, status int32, durationMs int64, input, output int32) *pb
 	}
 }
 
-// TestEveryResponseSeriesCarriesStatusClass — the v1 regression: status_class
-// on EVERY series when a status is observed.
+// TestEveryResponseSeriesCarriesStatusClass requires status_class on every
+// series when a status is observed.
 func TestEveryResponseSeriesCarriesStatusClass(t *testing.T) {
 	out := responseMetrics(resp("gpt-4", 503, 1234, 100, 20))
 	if len(out) != 4 {

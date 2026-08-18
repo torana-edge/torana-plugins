@@ -54,7 +54,7 @@ func baseRequest() *pbv2.ChatRequest {
 	}
 }
 
-// TestDecisionExpiresWithProviderTier — ported from v1.
+// TestDecisionExpiresWithProviderTier pins provider-tier expiry.
 func TestDecisionExpiresWithProviderTier(t *testing.T) {
 	value := decision{DecidedAtMillis: 1_000, TierTTL: 300}
 	if decisionExpired(value, 300_999) {

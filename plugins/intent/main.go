@@ -20,12 +20,11 @@
 //
 // The response side runs on the SDK's StreamHandler: tool-call fragments are
 // buffered host-side (meta_append, under env.meta_set) and presented to
-// OnToolCall as one complete call. This is a deliberate timing change from
-// v1, which hand-rolled its own fragment maps: start/deltas are suppressed
-// and an equivalent assembled start+delta+stop is emitted at block
-// completion. Callback errors are consumed by StreamHandler for fail-open
-// re-emission of the original block — a streamed response must never be
-// truncated by a plugin failure.
+// OnToolCall as one complete call. Start/deltas are suppressed and an
+// equivalent assembled start+delta+stop is emitted at block completion.
+// Callback errors are consumed by StreamHandler for fail-open re-emission of
+// the original block — a streamed response must never be truncated by a
+// plugin failure.
 package main
 
 import (
@@ -66,7 +65,7 @@ var (
 // parseConfig is the pure config decoder; loadConfig installs its result into
 // the process-global state exactly once. The host validates config against
 // schema.json at write time, so an unmarshal failure here is unreachable in
-// practice and falls back to defaults, matching v1.
+// practice and falls back to defaults.
 func parseConfig(raw string) (fill string) {
 	if raw == "" {
 		return "heuristic"

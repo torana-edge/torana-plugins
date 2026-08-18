@@ -24,9 +24,8 @@ func newHarness(t *testing.T) *sdktest.Harness {
 }
 
 // ==========================================================================
-// Schema injection helpers (ported from v1; the injected-parameter rules are
-// unchanged behavior, now driven through the v2 harness so hadI meta writes
-// reach a host).
+// Schema injection helpers, driven through the harness so hadI meta writes
+// reach a host.
 // ==========================================================================
 
 func inject(t *testing.T, params string) map[string]any {
@@ -552,7 +551,7 @@ func TestStreamFailOpenOnCallbackError(t *testing.T) {
 	if sig := emittedSig(t, res); sig != "sig" {
 		t.Fatalf("fail-open must preserve the signature, got %q", sig)
 	}
-	// The capture happens BEFORE the hadI read (v1 ordering), so a failed
+	// The capture happens before the hadI read, so a failed
 	// strip must not retroactively uncache a valid capture — the block is
 	// what matters, and it is untouched.
 	if got, _ := h.Cache("intent:call_1"); got != "find the bug" {
@@ -710,7 +709,7 @@ func TestStreamSemanticHandlingTable(t *testing.T) {
 	}
 }
 
-// TestRehydrationUnrepresentableArgumentsNoPanic — historical arguments_json
+// TestRehydrationUnrepresentableArgumentsNoPanic — stored arguments_json
 // that is null (which decodes to a nil map), an array, a scalar, or malformed
 // JSON must be left byte-identical; only a real JSON object may be filled.
 // Regression for the nil-map assignment panic on "null".
