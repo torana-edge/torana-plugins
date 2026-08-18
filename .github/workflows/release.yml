@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           path: torana-plugins
       - name: GitHub Actions use immutable commits
@@ -36,7 +36,7 @@ jobs:
       # Fetch merged SDK history first. The next step validates that SDK_REF is
       # reachable from main before checking it out, so a retained PR/object SHA
       # cannot become an untraceable release dependency.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: torana-edge/torana-plugin-sdk
           ref: main
@@ -45,7 +45,7 @@ jobs:
       - name: Check out the merged SDK revision
         working-directory: torana-plugins
         run: ./scripts/checkout_sdk_ref.sh ../torana-plugin-sdk
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: '1.26.x'
       - working-directory: torana-plugins
