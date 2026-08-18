@@ -36,15 +36,20 @@ echo "built bundles: $(ls -d "$bundles"/*/ | wc -l)"
 export TORANA_PLUGIN_BUNDLES_DIR="$bundles"
 
 log=$(mktemp)
-trap 'rm -f "$log"' EXIT
+fixture_log=$(mktemp)
+trap 'rm -f "$log" "$fixture_log"' EXIT
 
 # torana-edge's OWN fixtures are build artifacts and are deliberately not
 # committed, so they have to be built before its suite will run. Without this
 # the fixture-backed tests skip — around 37 of them — and the skip guard below
 # fails the build for skips this script caused itself.
 echo "building torana-edge test fixtures"
-(cd "$edge_dir" && make testdata) >/dev/null 2>&1 || {
+(cd "$edge_dir" && make testdata) >"$fixture_log" 2>&1 || {
   echo "failed to build torana-edge test fixtures" >&2
+  # Keep successful jobs quiet, but never discard the evidence needed to
+  # diagnose a cross-repository fixture failure. Bound the output so one noisy
+  # compiler cannot flood the workflow log.
+  tail -80 "$fixture_log" >&2
   exit 1
 }
 
