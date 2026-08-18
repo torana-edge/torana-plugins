@@ -49,6 +49,9 @@ jobs:
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: torana-plugins/.go-version
+          cache-dependency-path: |
+            torana-plugins/plugins/*/go.sum
+            torana-plugin-sdk/go.sum
       - working-directory: torana-plugins
         run: ./scripts/test.sh
       - working-directory: torana-plugins
