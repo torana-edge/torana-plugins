@@ -1,14 +1,16 @@
 // The keyword_compactor shrinks large tool results deterministically: it
-// extracts the intent captured by the intent plugin, scores the output's
-// lines by intent keywords, and keeps the matching lines with a small context
-// window — no model call, no offload spend. Compacted results are cached by
+// scores output lines using a cached intent when one is available or a
+// bounded deterministic signal derived from the request and tool call
+// otherwise, then keeps matching lines with a small context window — no model
+// call, no offload spend. Compacted results are cached by
 // content-address, so later turns replaying the same result reuse the compact
 // form for free.
 //
-// Run it AFTER the intent plugin. It is an alternative to compactor
-// (cheap-model offload) — pick ONE per deployment; both consume the same
-// intent cache, but their cache namespaces are disjoint
-// (keyword_compactor/* vs compactor/*), so no cross-plugin collision.
+// Running it AFTER the intent plugin improves relevance but is not required.
+// It is an alternative to compactor (cheap-model offload) — pick ONE per
+// deployment; both can consume the same optional intent cache, but their
+// cache namespaces are disjoint (keyword_compactor/* vs compactor/*), so no
+// cross-plugin collision.
 //
 // v2 semantics (typed host calls, same rules as compactor):
 //   - cache reads distinguish absent (NOT_FOUND) from present-empty; a
@@ -43,11 +45,13 @@ import (
 func main() {}
 
 const (
-	minContentLength = 2000     // below this, content is already small enough
-	contextLines     = 2        // lines of context around keyword matches
-	maxKeepLines     = 200      // HARD cap on kept lines (selection is bounded)
-	maxResultBytes   = 8000     // total output budget, truncation notice included
-	intentCacheKey   = "intent" // cache key for intent (set by the intent plugin)
+	minContentLength      = 2000     // below this, content is already small enough
+	contextLines          = 2        // lines of context around keyword matches
+	maxKeepLines          = 200      // HARD cap on kept lines (selection is bounded)
+	maxResultBytes        = 8000     // total output budget, truncation notice included
+	intentCacheKey        = "intent" // cache key for intent (set by the intent plugin)
+	derivedIntentPrefix   = "torana-derived-intent-v1:"
+	maxDerivedIntentBytes = 500
 	// Namespaced by plugin. env.cache_* is a SHARED store — unlike
 	// env.state_*, which the host keys by module name — so two plugins using
 	// the same namespace string read and write each other's entries. These
@@ -185,10 +189,9 @@ func compactToolResults(req *pbv2.ChatRequest) (bool, error) {
 				continue
 			}
 
-			// Retrieve cached intent for this tool call (written by the intent
-			// plugin). NOT_FOUND and present-empty are both unusable (skip +
-			// metric); any other refusal or malformed reply is a contract defect
-			// — error the hook.
+			// Retrieve the optional model-authored intent for this tool call.
+			// NOT_FOUND and present-empty both use the bounded fallback; any other
+			// refusal or malformed reply is a contract defect — error the hook.
 			intent, herr, err := sdk.SharedCacheGet(intentCacheKey + ":" + view.ToolCallId)
 			if err != nil {
 				return false, fmt.Errorf("keyword_compactor: cache_get %s:%s: %w", intentCacheKey, view.ToolCallId, err)
@@ -196,13 +199,13 @@ func compactToolResults(req *pbv2.ChatRequest) (bool, error) {
 			if herr != nil && !sdk.IsNotFound(herr) {
 				return false, fmt.Errorf("keyword_compactor: cache_get %s:%s refused: %s", intentCacheKey, view.ToolCallId, herr.Message)
 			}
-			if herr != nil || intent == "" {
+			derived := herr != nil || intent == ""
+			if derived {
 				sdk.EmitMetric("torana_intent_missing_total", sdk.MetricCounter, 1, map[string]string{"tool": toolName})
-				continue
+				intent = deriveCompactionIntent(req.Messages, mi, view.Block, toolName, toolArgs)
 			}
 
-			keywordKey := sdk.ContentAddressedCacheKey(keywordCompactionCache,
-				"v2", toolName, toolArgs, text, intent, "keyword")
+			keywordKey := keywordResultCacheKey(toolName, toolArgs, text, intent, derived)
 			cached, herr, err := sdk.CacheGet(keywordKey)
 			if err != nil {
 				return false, fmt.Errorf("keyword_compactor: cache_get keyword key: %w", err)
@@ -223,7 +226,7 @@ func compactToolResults(req *pbv2.ChatRequest) (bool, error) {
 				continue
 			}
 
-			compacted := compactDeterministic(text, intent)
+			compacted := compactDeterministic(text, keywordIntent(intent, derived))
 			if compacted == text {
 				continue
 			}
@@ -244,6 +247,64 @@ func compactToolResults(req *pbv2.ChatRequest) (bool, error) {
 		}
 	}
 	return modified, nil
+}
+
+func keywordResultCacheKey(toolName, toolArgs, text, intent string, derived bool) string {
+	source := "captured"
+	if derived {
+		source = "derived"
+	}
+	return sdk.ContentAddressedCacheKey(keywordCompactionCache,
+		"v3", toolName, toolArgs, text, source, intent, "keyword")
+}
+
+type derivedIntentPayload struct {
+	UserRequest   string `json:"user_request"`
+	ToolName      string `json:"tool_name"`
+	ToolArguments string `json:"tool_arguments"`
+}
+
+func deriveCompactionIntent(messages []*pbv2.Message, resultIndex, resultBlock int, toolName, toolArgs string) string {
+	userRequest := ""
+	if resultIndex >= len(messages) {
+		resultIndex = len(messages) - 1
+	}
+	for i := resultIndex; i >= 0; i-- {
+		if messages[i] == nil || messages[i].Role != "user" {
+			continue
+		}
+		text := sdk.Text(messages[i])
+		if i == resultIndex {
+			var before strings.Builder
+			for _, segment := range sdk.TextSegments(messages[i]) {
+				if segment.Block <= resultBlock {
+					before.WriteString(segment.Text)
+				}
+			}
+			text = before.String()
+		}
+		if text != "" {
+			userRequest = text
+			break
+		}
+	}
+	payload, _ := json.Marshal(derivedIntentPayload{
+		UserRequest:   truncHead(userRequest, maxDerivedIntentBytes),
+		ToolName:      truncHead(toolName, maxDerivedIntentBytes),
+		ToolArguments: truncHead(toolArgs, maxDerivedIntentBytes),
+	})
+	return derivedIntentPrefix + string(payload)
+}
+
+func keywordIntent(intent string, derived bool) string {
+	if !derived {
+		return intent
+	}
+	var payload derivedIntentPayload
+	if json.Unmarshal([]byte(strings.TrimPrefix(intent, derivedIntentPrefix)), &payload) != nil {
+		return ""
+	}
+	return payload.UserRequest + " " + payload.ToolName + " " + payload.ToolArguments
 }
 
 // worthwhileReduction reports whether final is a reduction of more than 50%:

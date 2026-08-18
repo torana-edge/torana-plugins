@@ -212,6 +212,10 @@ func toolMsg(id, name, content string) *pbv2.Message {
 	}}}}}
 }
 
+func requestTextBlock(text string) *pbv2.RequestBlock {
+	return &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: text}}}
+}
+
 // toolText returns the first text arm of the first tool-result block in
 // message mi.
 func toolText(t *testing.T, req *pbv2.ChatRequest, mi int) string {
@@ -253,12 +257,17 @@ func countCommand(h *sdktest.Harness, cmd string) int {
 }
 
 func hasMetric(h *sdktest.Harness, name string) bool {
+	return metricValue(h, name) != 0
+}
+
+func metricValue(h *sdktest.Harness, name string) float64 {
+	var value float64
 	for _, m := range h.Metrics() {
 		if m.Name == name {
-			return true
+			value += m.Value
 		}
 	}
-	return false
+	return value
 }
 
 // TestDefaultConfigIsInert — schema default ([] policies) means pass-through
@@ -459,6 +468,9 @@ func TestKeywordHappyPath(t *testing.T) {
 	if !hasMetric(h, "torana_compact_eligible_total") {
 		t.Fatal("eligible metric missing")
 	}
+	if hasMetric(h, "torana_intent_missing_total") {
+		t.Fatal("a captured intent must take precedence over the derived fallback")
+	}
 }
 
 // TestKeywordCacheReuse — a cached value that is non-empty AND shorter is
@@ -468,7 +480,7 @@ func TestKeywordCacheReuse(t *testing.T) {
 	h.SetConfig(keywordCfg)
 	h.SeedCache("intent:call_1", "find the bug in server")
 	content := keywordContent()
-	key := sdk.ContentAddressedCacheKey(keywordCompactionCache, "v2", "read", `{"path":"server.go"}`, content, "find the bug in server", "keyword")
+	key := sdk.ContentAddressedCacheKey(keywordCompactionCache, "v3", "read", `{"path":"server.go"}`, content, "captured", "find the bug in server", "keyword")
 	h.SeedCache(key, "MATCH bug server.go: the failure is in the retry loop")
 	res := h.BeforeRequest(bigToolRequest(content))
 	if res.Err != nil || res.Request == nil {
@@ -486,7 +498,7 @@ func TestKeywordCacheReuse(t *testing.T) {
 // cache values are recomputed; the applied output is the computed selection.
 func TestKeywordUnusableCachesRecompute(t *testing.T) {
 	content := keywordContent()
-	key := sdk.ContentAddressedCacheKey(keywordCompactionCache, "v2", "read", `{"path":"server.go"}`, content, "find the bug in server", "keyword")
+	key := sdk.ContentAddressedCacheKey(keywordCompactionCache, "v3", "read", `{"path":"server.go"}`, content, "captured", "find the bug in server", "keyword")
 	for name, seed := range map[string]string{
 		"present-empty": "",
 		"non-shorter":   content + "extra",
@@ -550,9 +562,10 @@ func TestKeywordConsumptionGate(t *testing.T) {
 	}
 }
 
-// TestIntentMissSkipsWithMetric — NOT_FOUND and present-empty intents are both
-// unusable: skip + torana_intent_missing_total.
-func TestIntentMissSkipsWithMetric(t *testing.T) {
+// TestIntentMissUsesBoundedFallback — NOT_FOUND and present-empty both emit
+// the miss metric, then evaluate the candidate with deterministic local
+// guidance rather than depending on model cooperation.
+func TestIntentMissUsesBoundedFallback(t *testing.T) {
 	for _, name := range []string{"absent", "present-empty"} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)
@@ -561,11 +574,157 @@ func TestIntentMissSkipsWithMetric(t *testing.T) {
 				h.SeedCache("intent:call_1", "")
 			}
 			res := h.BeforeRequest(bigToolRequest(keywordContent()))
-			if res.Err != nil || !res.PassedThrough {
-				t.Fatalf("no usable intent, nothing may change, err=%v", res.Err)
+			if res.Err != nil || res.Request == nil {
+				t.Fatalf("derived fallback did not apply, err=%v", res.Err)
 			}
-			if !hasMetric(h, "torana_intent_missing_total") {
-				t.Fatal("missing torana_intent_missing_total metric")
+			if got := metricValue(h, "torana_intent_missing_total"); got != 1 {
+				t.Fatalf("intent-missing metric = %v, want 1", got)
+			}
+			if got := metricValue(h, "torana_compact_eligible_total"); got != 1 {
+				t.Fatalf("eligible metric = %v, want 1", got)
+			}
+			if got := toolText(t, res.Request, 3); !strings.Contains(got, "MATCH bug server.go") || got == keywordContent() {
+				t.Fatalf("fallback replacement = %q", got)
+			}
+			wantCalls := map[string]int{
+				"env.plugin_config":     1,
+				"env.shared_cache_get":  1,
+				"env.cache_get":         1,
+				"env.cache_set":         1,
+				"torana_record_savings": 1,
+			}
+			gotCalls := map[string]int{}
+			for _, call := range h.Calls() {
+				gotCalls[call.Command]++
+			}
+			if !equalCallMultiset(gotCalls, wantCalls) {
+				t.Fatalf("host-call multiset = %v, want %v", gotCalls, wantCalls)
+			}
+		})
+	}
+}
+
+func equalCallMultiset(got, want map[string]int) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for command, count := range want {
+		if got[command] != count {
+			return false
+		}
+	}
+	return true
+}
+
+func TestDerivedIntentBoundaryAndKeywordProjection(t *testing.T) {
+	messages := []*pbv2.Message{
+		{Role: "user", Blocks: []*pbv2.RequestBlock{requestTextBlock("old request")}},
+		{Role: "user", Blocks: []*pbv2.RequestBlock{
+			requestTextBlock(strings.Repeat("日", 300)),
+			toolMsg("c", "read", "result").Blocks[0],
+			requestTextBlock("same-message text after the result must not leak"),
+		}},
+		{Role: "user", Blocks: []*pbv2.RequestBlock{requestTextBlock("later request must not leak")}},
+	}
+	got := deriveCompactionIntent(messages, 1, 1, strings.Repeat("n", 600), strings.Repeat("a", 600))
+	if !strings.HasPrefix(got, derivedIntentPrefix) || !utf8.ValidString(got) {
+		t.Fatalf("derived intent prefix/UTF-8 = %q", got)
+	}
+	var payload derivedIntentPayload
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(got, derivedIntentPrefix)), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(payload.UserRequest, "after the result") || strings.Contains(payload.UserRequest, "later") || len(payload.UserRequest) > maxDerivedIntentBytes ||
+		len(payload.ToolName) > maxDerivedIntentBytes || len(payload.ToolArguments) > maxDerivedIntentBytes {
+		t.Fatalf("derived payload = %#v", payload)
+	}
+	projected := keywordIntent(got, true)
+	if projected == "" || strings.Contains(projected, "later") || !strings.Contains(projected, payload.UserRequest) {
+		t.Fatalf("keyword projection = %q", projected)
+	}
+	if got := keywordIntent("captured exact", false); got != "captured exact" {
+		t.Fatalf("captured intent changed to %q", got)
+	}
+}
+
+func TestDerivedIntentCacheIdentity(t *testing.T) {
+	const derived = `torana-derived-intent-v1:{"user_request":"find the bug","tool_name":"read","tool_arguments":"{\"path\":\"server.go\"}"}`
+	content := keywordContent()
+	derivedKey := sdk.ContentAddressedCacheKey(keywordCompactionCache,
+		"v3", "read", `{"path":"server.go"}`, content, "derived", derived, "keyword")
+
+	t.Run("derived cache hit", func(t *testing.T) {
+		h := newHarness(t)
+		h.SetConfig(keywordCfg)
+		h.SeedCache(derivedKey, "cached-derived")
+		res := h.BeforeRequest(bigToolRequest(content))
+		if res.Err != nil || res.Request == nil {
+			t.Fatalf("derived cache hit failed: %v", res.Err)
+		}
+		if got := toolText(t, res.Request, 3); got != "cached-derived" {
+			t.Fatalf("derived cached value = %q", got)
+		}
+		if calls := countCommand(h, "env.cache_set"); calls != 0 {
+			t.Fatalf("derived cache hit made %d cache writes", calls)
+		}
+	})
+
+	t.Run("captured bytes cannot alias derived domain", func(t *testing.T) {
+		h := newHarness(t)
+		h.SetConfig(keywordCfg)
+		h.SeedCache("intent:call_1", derived)
+		h.SeedCache(derivedKey, "wrong-domain")
+		res := h.BeforeRequest(bigToolRequest(content))
+		if res.Err != nil {
+			t.Fatalf("captured row failed: %v", res.Err)
+		}
+		if res.Request != nil && toolText(t, res.Request, 3) == "wrong-domain" {
+			t.Fatal("captured intent applied a derived-domain cache entry")
+		}
+		var keys []string
+		for _, call := range h.Calls() {
+			if call.Command != "env.cache_get" {
+				continue
+			}
+			var args pbv2.CacheGetArgs
+			if err := proto.Unmarshal([]byte(call.Args), &args); err != nil {
+				t.Fatalf("decode cache_get args: %v", err)
+			}
+			keys = append(keys, args.Key)
+		}
+		if len(keys) != 1 || keys[0] == derivedKey {
+			t.Fatalf("captured cache keys = %v, must be one key outside derived domain", keys)
+		}
+	})
+
+	mutations := map[string]func(*pbv2.ChatRequest){
+		"user request": func(req *pbv2.ChatRequest) {
+			req.Messages[1].Blocks[0].GetText().Text = "find another bug"
+		},
+		"tool name": func(req *pbv2.ChatRequest) {
+			req.Messages[2].Blocks[0].GetToolUse().Name = "read_file"
+			req.Messages[3].Blocks[0].GetToolResult().ToolName = "read_file"
+		},
+		"tool arguments": func(req *pbv2.ChatRequest) {
+			req.Messages[2].Blocks[0].GetToolUse().ArgumentsJson = []byte(`{"path":"other.go"}`)
+		},
+	}
+	for name, mutate := range mutations {
+		t.Run(name+" partitions derived cache", func(t *testing.T) {
+			h := newHarness(t)
+			h.SetConfig(keywordCfg)
+			h.SeedCache(derivedKey, "wrong-input")
+			req := bigToolRequest(content)
+			mutate(req)
+			res := h.BeforeRequest(req)
+			if res.Err != nil || res.Request == nil {
+				t.Fatalf("mutated row failed: %v", res.Err)
+			}
+			if got := toolText(t, res.Request, 3); got == "wrong-input" {
+				t.Fatal("mutated row reused baseline cache")
+			}
+			if calls := countCommand(h, "env.cache_set"); calls != 1 {
+				t.Fatalf("mutated row made %d cache writes, want 1", calls)
 			}
 		})
 	}

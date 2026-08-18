@@ -1,19 +1,20 @@
 // The compactor shrinks large tool results by delegating extraction to a
-// cheap model (torana_offload_completion), guided by the intent captured by
-// the intent plugin: "given what the agent was trying to find out, keep only
-// the relevant parts of this output". Compacted results are cached by
+// cheap model (torana_offload_completion), guided by a cached intent when one
+// is available or by a bounded deterministic signal derived from the request
+// and tool call otherwise. Compacted results are cached by
 // tool_call_id, so later turns replaying the same result reuse the compact
 // form for free. Cache identity includes the original content, tool arguments,
 // intent, and policy version so reused call IDs cannot return stale summaries.
 //
-// Run it AFTER the intent plugin. It is an alternative to keyword_compactor
-// (deterministic, local, no model call) — pick ONE per deployment; both
-// consume the same intent cache.
+// Running it AFTER the intent plugin improves relevance but is not required.
+// It is an alternative to keyword_compactor (deterministic, local, no model
+// call) — pick ONE per deployment; both can consume the same optional intent
+// cache.
 //
 // v2 semantics (typed host calls):
-//   - cache reads distinguish absent (NOT_FOUND) from present-empty; a
-//     present-empty value is UNUSABLE, never a usable value, and never a
-//     reason to erase a tool result;
+//   - cache reads distinguish absent (NOT_FOUND) from present-empty; neither
+//     is a usable model-authored intent, so both emit the miss metric and use
+//     the bounded local fallback;
 //   - any non-NOT_FOUND cache refusal or malformed reply is a
 //     contract/configuration defect: the hook errors, so failure_mode
 //     preserves the request and the host records the failure;
@@ -47,6 +48,8 @@ const (
 	// the same namespace string read and write each other's entries.
 	policyCompactionCache = "compactor/policy_compacted"
 	minOffloadChars       = 2000
+	derivedIntentPrefix   = "torana-derived-intent-v1:"
+	maxDerivedIntentBytes = 500
 )
 
 // maxOffloadInputBytes caps how many SOURCE bytes of a tool output are sent
@@ -193,9 +196,9 @@ func compactToolResults(ctx context.Context, req *pbv2.ChatRequest) (bool, error
 				continue
 			}
 
-			// Get intent from cache (written by the intent plugin). NOT_FOUND and
-			// present-empty are both unusable (skip + metric); any other refusal
-			// or malformed reply is a contract defect — error the hook.
+			// Get the optional model-authored intent. NOT_FOUND and present-empty
+			// both use the bounded fallback; any other refusal or malformed reply
+			// is a contract defect — error the hook.
 			intent, herr, err := sdk.SharedCacheGet(intentCacheKey + ":" + view.ToolCallId)
 			if err != nil {
 				return false, fmt.Errorf("compactor: cache_get %s:%s: %w", intentCacheKey, view.ToolCallId, err)
@@ -203,16 +206,18 @@ func compactToolResults(ctx context.Context, req *pbv2.ChatRequest) (bool, error
 			if herr != nil && !sdk.IsNotFound(herr) {
 				return false, fmt.Errorf("compactor: cache_get %s:%s refused: %s", intentCacheKey, view.ToolCallId, herr.Message)
 			}
-			if herr != nil || intent == "" {
-				// Eligible but no usable intent — the money left on the table.
+			derived := herr != nil || intent == ""
+			if derived {
+				// A missing model-authored intent lowers relevance but no longer
+				// disables an otherwise safe/economical candidate. Derive a bounded,
+				// deterministic local signal; every downstream gate still applies.
 				sdk.EmitMetric("torana_intent_missing_total", sdk.MetricCounter, 1, map[string]string{"tool": toolName})
-				continue
+				intent = deriveCompactionIntent(req.Messages, mi, view.Block, toolName, toolArgs)
 			}
 
 			// Include every semantic input in the cache identity. A harness may
 			// reuse tool_call_ids, and intents can change across rehydrated rounds.
-			modelCacheKey := sdk.ContentAddressedCacheKey(compactionCache,
-				"v3", toolName, toolArgs, text, intent, "model")
+			modelCacheKey := modelResultCacheKey(toolName, toolArgs, text, intent, derived)
 			cached, herr, err := sdk.CacheGet(modelCacheKey)
 			if err != nil {
 				return false, fmt.Errorf("compactor: cache_get model key: %w", err)
@@ -235,6 +240,57 @@ func compactToolResults(ctx context.Context, req *pbv2.ChatRequest) (bool, error
 		return false, err
 	}
 	return modified || applied, nil
+}
+
+func modelResultCacheKey(toolName, toolArgs, text, intent string, derived bool) string {
+	source := "captured"
+	if derived {
+		source = "derived"
+	}
+	return sdk.ContentAddressedCacheKey(compactionCache,
+		"v4", toolName, toolArgs, text, source, intent, "model")
+}
+
+type derivedIntentPayload struct {
+	UserRequest   string `json:"user_request"`
+	ToolName      string `json:"tool_name"`
+	ToolArguments string `json:"tool_arguments"`
+}
+
+// deriveCompactionIntent is the bounded fallback for a missing/empty intent.
+// Only user text at or before the result can describe why the historical tool
+// call happened; later turns must not rewrite it. JSON framing makes arbitrary
+// newlines and labels in caller text unambiguous to the offload model.
+func deriveCompactionIntent(messages []*pbv2.Message, resultIndex, resultBlock int, toolName, toolArgs string) string {
+	userRequest := ""
+	if resultIndex >= len(messages) {
+		resultIndex = len(messages) - 1
+	}
+	for i := resultIndex; i >= 0; i-- {
+		if messages[i] == nil || messages[i].Role != "user" {
+			continue
+		}
+		text := sdk.Text(messages[i])
+		if i == resultIndex {
+			var before strings.Builder
+			for _, segment := range sdk.TextSegments(messages[i]) {
+				if segment.Block <= resultBlock {
+					before.WriteString(segment.Text)
+				}
+			}
+			text = before.String()
+		}
+		if text != "" {
+			userRequest = text
+			break
+		}
+	}
+	payload, _ := json.Marshal(derivedIntentPayload{
+		UserRequest:   truncHead(userRequest, maxDerivedIntentBytes),
+		ToolName:      truncHead(toolName, maxDerivedIntentBytes),
+		ToolArguments: truncHead(toolArgs, maxDerivedIntentBytes),
+	})
+	return derivedIntentPrefix + string(payload)
 }
 
 type tokenUsage struct {
