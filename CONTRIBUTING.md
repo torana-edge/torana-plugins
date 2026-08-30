@@ -13,7 +13,7 @@ as examples people copy and as defaults people trust.
 
 Official plugins target ABI v1. New or changed plugins must use the repository's
 pinned Go SDK, declare the exact grants they exercise, and remain consistent
-with the executable ten-module contract table. Nine modules are public catalog
+with the executable eleven-module contract table. Ten modules are public catalog
 plugins; `auth` remains a reference-only integration but is still part of the
 release inventory.
 

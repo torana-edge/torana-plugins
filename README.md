@@ -31,7 +31,7 @@ no index to register with and nothing to publish. Put yours anywhere and users
 install it by path:
 
 ```bash
-torana plugin install github.com/you/your-plugin
+torana plugin install https://github.com/you/your-plugin
 ```
 
 Torana fetches the source, builds it locally, and prints the digest of what it
