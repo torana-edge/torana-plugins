@@ -7,9 +7,9 @@ import (
 	"testing"
 )
 
-// TestManifestPermissionSetExact — the EXACT final permission set,
-// order-independently with duplicate rejection (env.log dropped; the
-// Migration-C inventory allows exactly this set).
+// TestManifestPermissionSetExact — the exact release permission set,
+// order-independently with duplicate rejection (env.log is intentionally
+// absent).
 func TestManifestPermissionSetExact(t *testing.T) {
 	raw, err := os.ReadFile("plugin.json")
 	if err != nil {

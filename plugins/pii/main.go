@@ -96,23 +96,20 @@ func (c piiConfig) scannerPairValid() bool {
 // High-precision patterns — deterministic, no model call, exact line numbers,
 // and they still catch obvious PII when the local model is unavailable.
 var piiPatterns = []struct {
-	name string
-	re   *regexp.Regexp
+	name            string
+	requiredLiteral string
+	re              *regexp.Regexp
 }{
-	{"email", regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)},
-	{"us_ssn", regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)},
-	{"aws_access_key", regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`)},
-	{"private_key", regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`)},
+	{"email", "@", regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)},
+	{"us_ssn", "-", regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)},
+	{"aws_access_key", "AKIA", regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`)},
+	{"private_key", "-----BEGIN ", regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`)},
 }
 
 type finding struct {
 	Type string
 	Line int
 }
-
-// textPartType is the only ContentPartsJson part type the text scanner can
-// inspect. Anything else that is provider-visible is unscannable.
-const textPartType = "text"
 
 // extraction is the result of composing a tool message's scannable content.
 type extraction struct {
@@ -350,6 +347,12 @@ func regexScan(content string) []finding {
 		lineNo := i + 1
 		i++
 		for _, p := range piiPatterns {
+			// Each regex contains this literal in every accepting path. Avoid
+			// initializing and retaining the regexp execution machinery when a
+			// line cannot possibly match; the regex remains the authority.
+			if !strings.Contains(line, p.requiredLiteral) {
+				continue
+			}
 			if p.re.MatchString(line) {
 				key := fmt.Sprintf("%s:%d", p.name, lineNo)
 				if !seen[key] {
@@ -377,11 +380,13 @@ Never include the actual PII values — only the category and line number. If th
 
 func modelScan(content, toolName string) ([]finding, error) {
 	scanContent := content
+	truncated := false
 	if cfg.MaxScanBytes > 0 && len(scanContent) > cfg.MaxScanBytes {
 		// Byte budget with rune-safe boundary repair: a mid-rune cut would
 		// silently corrupt the last character of the text a PII detector is
 		// about to read.
 		scanContent = truncHead(scanContent, cfg.MaxScanBytes)
+		truncated = true
 	}
 	payload, _ := json.Marshal(map[string]any{
 		"provider":      cfg.Provider,
@@ -447,6 +452,13 @@ func modelScan(content, toolName string) ([]finding, error) {
 		return nil, &scannerFailure{"pii scan: contradictory verdict (pii false with findings)"}
 	}
 	if !pii {
+		if truncated {
+			// A clean verdict over a prefix is not a clean verdict over the
+			// tool result. Treat the uninspected suffix exactly like any other
+			// incomplete scan: on_error decides, and the caller must never cache
+			// this outcome as authoritative for the full content.
+			return nil, &scannerFailure{"pii scan incomplete: tool output exceeds max_scan_bytes"}
+		}
 		return nil, nil
 	}
 	// Bound the reporting: a hostile but valid model reply can return

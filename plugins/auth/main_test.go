@@ -352,9 +352,9 @@ func TestVerifiedEmptyProfileUsesTokenDigest(t *testing.T) {
 	}
 }
 
-// TestDomainRejectionIsTerminal — a value-arm `rejected` produces no verdict
-// and passes; nothing else may resolve (there is no lower-precedence
-// candidate), so the diagnostic message never surfaces anywhere.
+// TestDomainRejectionIsTerminal — a value-arm `rejected` produces one
+// attributed, value-free 401 block. It must never fall back to the operator's
+// provider credential, and the verifier diagnostic never reaches the caller.
 func TestDomainRejectionIsTerminal(t *testing.T) {
 	h := newHarness(t)
 	stubVerify(t, h, func(token string) (string, bool) {
@@ -362,13 +362,25 @@ func TestDomainRejectionIsTerminal(t *testing.T) {
 	})
 	res := h.BeforeRequest(reqWithHeaders(map[string]string{"Authorization": "Bearer sk-torana-revoked"}))
 	if !res.PassedThrough || res.Err != nil {
-		t.Fatalf("domain rejection must pass without error, err=%v", res.Err)
+		t.Fatalf("block verdict is a side effect followed by pass, err=%v", res.Err)
 	}
 	if ids := identityCalls(t, h); len(ids) != 0 {
 		t.Fatalf("a revoked key produced an identity: %v", ids)
 	}
 	if logs := h.Logs(); len(logs) != 0 {
 		t.Fatalf("the diagnostic message must never be logged: %+v", logs)
+	}
+	if got := h.BlockCalls(); len(got) != 1 {
+		t.Fatalf("block calls = %d, want 1", len(got))
+	} else {
+		args := sdktest.DecodeBlockArgs(t, got[0].Args)
+		if args.Status != 401 || args.Code != "virtual_key_rejected" ||
+			args.Message != "The Torana virtual key was rejected." {
+			t.Fatalf("block args = %+v", args)
+		}
+		if strings.Contains(args.Message, "revoked") || strings.Contains(args.Message, "2026") {
+			t.Fatalf("verifier diagnostic leaked into block: %q", args.Message)
+		}
 	}
 }
 

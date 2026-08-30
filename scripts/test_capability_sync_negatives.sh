@@ -71,7 +71,12 @@ for dir in "$root"/plugins/*/; do
   cp "$dir/go.mod" "$tmp/plugins/$(basename "$dir")/go.mod"
 done
 drifted="$tmp/plugins/schema_translator/go.mod"
-sed 's|995c0bd40baa|deadbeef0000|' "$drifted" > "$drifted.tmp" && mv "$drifted.tmp" "$drifted"
+pin_suffix=$(sed -n 's|.*torana-plugin-sdk v[^ ]*-\([0-9a-f]\{12\}\)$|\1|p' "$drifted")
+if [[ ! "$pin_suffix" =~ ^[0-9a-f]{12}$ ]]; then
+  echo "capability sync negative: could not resolve the current pin suffix" >&2
+  exit 1
+fi
+sed "s|$pin_suffix|deadbeef0000|" "$drifted" > "$drifted.tmp" && mv "$drifted.tmp" "$drifted"
 if [[ $(grep -c 'deadbeef0000' "$drifted") -ne 1 ]]; then
   echo "capability sync negative: the one-module drift did not apply exactly once" >&2
   exit 1

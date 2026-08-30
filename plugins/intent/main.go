@@ -20,12 +20,11 @@
 //
 // The response side runs on the SDK's StreamHandler: tool-call fragments are
 // buffered host-side (meta_append, under env.meta_set) and presented to
-// OnToolCall as one complete call. This is a deliberate timing change from
-// v1, which hand-rolled its own fragment maps: start/deltas are suppressed
-// and an equivalent assembled start+delta+stop is emitted at block
-// completion. Callback errors are consumed by StreamHandler for fail-open
-// re-emission of the original block — a streamed response must never be
-// truncated by a plugin failure.
+// OnToolCall as one complete call. Start/deltas are suppressed and an
+// equivalent assembled start+delta+stop is emitted at block completion.
+// Callback errors are consumed by StreamHandler for fail-open re-emission of
+// the original block — a streamed response must never be truncated by a
+// plugin failure.
 package main
 
 import (
@@ -66,7 +65,7 @@ var (
 // parseConfig is the pure config decoder; loadConfig installs its result into
 // the process-global state exactly once. The host validates config against
 // schema.json at write time, so an unmarshal failure here is unreachable in
-// practice and falls back to defaults, matching v1.
+// practice and falls back to defaults.
 func parseConfig(raw string) (fill string) {
 	if raw == "" {
 		return "heuristic"
@@ -177,7 +176,7 @@ func handleToolCall(call sdk.ToolCall) (sdk.ToolCallAction, error) {
 		// CacheSet is best-effort: a refusal affects FUTURE compaction, not
 		// the validity of this response, so it is logged and the current
 		// tool call still completes. The host records the refusal itself.
-		if herr, err := sdk.CacheSet(intentCacheKey+":"+call.ID, intent); err != nil || herr != nil {
+		if herr, err := sdk.SharedCacheSet(intentCacheKey+":"+call.ID, intent); err != nil || herr != nil {
 			sdk.Log(fmt.Sprintf("intent: cache_set %s:%s refused: %v %v", intentCacheKey, call.ID, herr, err), sdk.LogLevelInfo)
 		}
 		if herr, err := sdk.CacheSet(contentKey(call.Name, args), intent); err != nil || herr != nil {
@@ -297,7 +296,7 @@ func rehydrateHistoryIntents(req *pbv1.ChatRequest) (bool, error) {
 				// Bridge the real intent to this request's own tool_call_id so
 				// the compactors' intent:<tool_call_id> lookup (keyed off the
 				// tool RESULT message) works on harnesses that reassign IDs.
-				if herr, err := sdk.CacheSet(intentCacheKey+":"+tc.Id, intent); err != nil || herr != nil {
+				if herr, err := sdk.SharedCacheSet(intentCacheKey+":"+tc.Id, intent); err != nil || herr != nil {
 					return false, fmt.Errorf("intent: cache_set %s:%s refused: %v %v", intentCacheKey, tc.Id, herr, err)
 				}
 				restored++
@@ -378,10 +377,11 @@ func truncateRunes(s string, n int) string {
 	return string(r[:n]) + "…"
 }
 
-// contentKey derives a cache key from a tool call's name and arguments,
+// contentKey derives an opaque cache key from a tool call's name and arguments,
 // excluding "i". Go's json.Marshal sorts map keys, so the encoding is
-// canonical: the response side (which strips "i") and the request side (where
-// "i" is already absent) produce the same key for the same logical call.
+// canonical before ContentAddressedCacheKey hashes it: the response side
+// (which strips "i") and the request side (where "i" is already absent)
+// produce the same key for the same logical call.
 // Collisions (same tool + args, different intent) resolve last-write-wins,
 // which is acceptable for a hint.
 func contentKey(name string, args map[string]any) string {
@@ -392,11 +392,12 @@ func contentKey(name string, args map[string]any) string {
 		}
 		cp[k] = v
 	}
-	// Encode as a JSON array so the key stays JSON-safe (no control-char
-	// separator that would break the cache_set payload) while remaining
-	// canonical — Go sorts the inner map's keys.
+	// Encode as a JSON array to keep the name/map boundary explicit, then hash
+	// the canonical bytes. Raw arguments can contain paths, commands, source,
+	// and user data; they must not become Redis key names or defeat local-cache
+	// size accounting.
 	b, _ := json.Marshal([]any{name, cp})
-	return "intentc:" + string(b)
+	return sdk.ContentAddressedCacheKey("intent/content/v1", string(b))
 }
 
 // ==========================================================================

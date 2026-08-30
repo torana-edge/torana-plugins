@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -275,6 +276,70 @@ func TestRegexCategoriesBlock(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRegexRequiredLiteralPrefilterMatchesReference(t *testing.T) {
+	cases := []string{
+		"plain output without trigger bytes",
+		"contains @ but not an email",
+		"hyphenated-but-not-an-ssn",
+		"AKIA-short",
+		"-----BEGIN but not a private key",
+		"contact someone@example.com now",
+		"ssn: 123-45-6789",
+		"key AKIA1234567890ABCDEF",
+		"-----BEGIN RSA PRIVATE KEY-----",
+		"someone@example.com and 123-45-6789\nAKIA1234567890ABCDEF\n-----BEGIN PRIVATE KEY-----",
+		"first@example.com second@example.com",
+		"wordAKIA1234567890ABCDEFword",
+	}
+	for _, input := range cases {
+		if got, want := regexScan(input), regexScanWithoutPrefilter(input); !reflect.DeepEqual(got, want) {
+			t.Fatalf("input %q: filtered=%+v reference=%+v", input, got, want)
+		}
+	}
+}
+
+func FuzzRegexRequiredLiteralPrefilterMatchesReference(f *testing.F) {
+	for _, seed := range []string{
+		"plain",
+		"someone@example.com",
+		"123-45-6789",
+		"AKIA1234567890ABCDEF",
+		"-----BEGIN EC PRIVATE KEY-----",
+		"@-AKIA-----BEGIN \n",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, input string) {
+		if got, want := regexScan(input), regexScanWithoutPrefilter(input); !reflect.DeepEqual(got, want) {
+			t.Fatalf("filtered=%+v reference=%+v", got, want)
+		}
+	})
+}
+
+func regexScanWithoutPrefilter(content string) []finding {
+	var out []finding
+	seen := map[string]bool{}
+	lineNo := 0
+	for line := range strings.SplitSeq(content, "\n") {
+		lineNo++
+		for _, p := range piiPatterns {
+			if !p.re.MatchString(line) {
+				continue
+			}
+			key := p.name + ":" + strconv.Itoa(lineNo)
+			if seen[key] {
+				continue
+			}
+			if len(out) >= maxReportedFindings {
+				return append(out, finding{Type: "overflow", Line: 0})
+			}
+			seen[key] = true
+			out = append(out, finding{Type: p.name, Line: lineNo})
+		}
+	}
+	return out
 }
 
 // TestDuplicateToolCallIDsAmbiguous — finding 2: duplicated/reused IDs are
@@ -652,33 +717,45 @@ func TestExtractJSONCases(t *testing.T) {
 }
 
 // TestMaxScanBytesTruncation — the byte budget is rune-safe and asserted by
-// BYTE length; the stubbed offload payload never exceeds it.
+// BYTE length. A clean prefix verdict remains incomplete for the full result:
+// on_error governs it and it is never cached as clean.
 func TestMaxScanBytesTruncation(t *testing.T) {
-	h := newHarness(t)
-	h.SetConfig(`{"provider":"local","model":"qwen","max_scan_bytes":100}`)
-	var payload string
-	h.StubHostCall("torana_offload_completion", func(args string) (string, error) {
-		payload = args
-		return sdktest.HostResultValue([]byte(`{"completion":"{\"pii\":false,\"findings\":[]}"}`)), nil
-	})
-	content := strings.Repeat("日本語", 500)
-	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm(content))))
-	if res.Err != nil || !res.PassedThrough {
-		t.Fatalf("err=%v", res.Err)
-	}
-	idx := strings.Index(payload, "Output to scan:\\n")
-	if idx < 0 {
-		t.Fatal("offload payload missing the scan content")
-	}
-	scanned := payload[idx+len("Output to scan:\\n"):]
-	scanned = strings.TrimSuffix(scanned, `"}`)
-	var decoded string
-	_ = json.Unmarshal([]byte(`"`+scanned+`"`), &decoded)
-	if len(decoded) > 100 {
-		t.Fatalf("scanned bytes=%d exceed the 100-byte budget", len(decoded))
-	}
-	if !utf8.ValidString(decoded) {
-		t.Fatal("truncation split a rune")
+	for _, onError := range []string{"block", "allow"} {
+		t.Run(onError, func(t *testing.T) {
+			h := newHarness(t)
+			h.SetConfig(`{"provider":"local","model":"qwen","max_scan_bytes":100,"on_error":"` + onError + `"}`)
+			var payload string
+			h.StubHostCall("torana_offload_completion", func(args string) (string, error) {
+				payload = args
+				return sdktest.HostResultValue([]byte(`{"completion":"{\"pii\":false,\"findings\":[]}"}`)), nil
+			})
+			content := strings.Repeat("日本語", 500)
+			res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm(content))))
+			if res.Err != nil || !res.PassedThrough {
+				t.Fatalf("err=%v", res.Err)
+			}
+			idx := strings.Index(payload, "Output to scan:\\n")
+			if idx < 0 {
+				t.Fatal("offload payload missing the scan content")
+			}
+			scanned := payload[idx+len("Output to scan:\\n"):]
+			scanned = strings.TrimSuffix(scanned, `"}`)
+			var decoded string
+			_ = json.Unmarshal([]byte(`"`+scanned+`"`), &decoded)
+			if len(decoded) > 100 {
+				t.Fatalf("scanned bytes=%d exceed the 100-byte budget", len(decoded))
+			}
+			if !utf8.ValidString(decoded) {
+				t.Fatal("truncation split a rune")
+			}
+			if n := countCommand(h, "env.cache_set"); n != 0 {
+				t.Fatalf("incomplete scan wrote %d clean cache entries", n)
+			}
+			blocked := len(h.BlockCalls()) > 0
+			if want := onError == "block"; blocked != want {
+				t.Fatalf("blocked=%v, want %v for on_error=%s", blocked, want, onError)
+			}
+		})
 	}
 }
 
@@ -1118,6 +1195,20 @@ func BenchmarkRegexScanLargeSuffix(b *testing.B) {
 		out := regexScan(content)
 		if len(out) != 21 {
 			b.Fatalf("len=%d, want 21 (cap+1 sentinel)", len(out))
+		}
+	}
+}
+
+// BenchmarkRegexScanAgentToolResult mirrors the clean 16 KiB historical tool
+// result used by Edge's retained plugin-chain and per-instance memory probes.
+func BenchmarkRegexScanAgentToolResult(b *testing.B) {
+	content := strings.Repeat("p", 16<<10)
+	b.SetBytes(int64(len(content)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if out := regexScan(content); len(out) != 0 {
+			b.Fatalf("unexpected findings: %+v", out)
 		}
 	}
 }

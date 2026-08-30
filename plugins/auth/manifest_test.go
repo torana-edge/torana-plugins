@@ -7,9 +7,8 @@ import (
 	"testing"
 )
 
-// TestManifestPermissionSetExact — the EXACT final permission set,
-// order-independently with duplicate rejection (the S1 Migration-C audit:
-// stale grants fail the pin).
+// TestManifestPermissionSetExact — the exact release permission set,
+// order-independently with duplicate rejection; stale grants fail the pin.
 func TestManifestPermissionSetExact(t *testing.T) {
 	raw, err := os.ReadFile("plugin.json")
 	if err != nil {
@@ -33,7 +32,7 @@ func TestManifestPermissionSetExact(t *testing.T) {
 		got = append(got, p.Name)
 	}
 	sort.Strings(got)
-	want := []string{"env.host_call.verify_virtual_key", "env.request_headers", "env.set_identity"}
+	want := []string{"env.block_request", "env.host_call.verify_virtual_key", "env.request_headers", "env.set_identity"}
 	if len(got) != len(want) {
 		t.Fatalf("permissions = %v, want %v", got, want)
 	}

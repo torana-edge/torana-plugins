@@ -7,9 +7,8 @@ import (
 	"testing"
 )
 
-// TestManifestPermissionSetExact — the EXACT final permission set,
-// order-independently with duplicate rejection (the S1 Migration-C audit:
-// stale grants fail the pin).
+// TestManifestPermissionSetExact — the exact release permission set,
+// order-independently with duplicate rejection; stale grants fail the pin.
 func TestManifestPermissionSetExact(t *testing.T) {
 	raw, err := os.ReadFile("plugin.json")
 	if err != nil {

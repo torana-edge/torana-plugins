@@ -13,14 +13,12 @@ import (
 func main() {}
 
 // ==========================================================================
-// v2 identity resolution (approved batch-5 contract)
+// Identity resolution
 // ==========================================================================
 //
-// This plugin is the ONLY identity source in v2. The v1 writes of
-// tenant_id/team_id/user_id into ToranaMeta are GONE — those fields are
-// host-owned, and identity now flows through the attributed env.set_identity
-// verdict, which changes the ACTUAL rate-limit key. Consequences, each pinned
-// by a matrix row:
+// This plugin is the only identity source. Identity flows through the
+// attributed env.set_identity verdict, which changes the actual rate-limit
+// key; ToranaMeta is host-owned. Consequences, each pinned by a matrix row:
 //
 //   - Caller-controlled X-Torana-* headers are NOT identity candidates. Edge
 //     forwards them without a trusted-proxy boundary, so a caller could rotate
@@ -55,8 +53,8 @@ const (
 	verifiedKeyNamespace = "auth-verified-key-v2"
 )
 
-// VerifyResponse is the strictly validated v2 response to verify_virtual_key.
-// The wire grammar (section 8A of the checkpoint):
+// VerifyResponse is the strictly validated response to verify_virtual_key.
+// The wire grammar is:
 //
 //   - exactly two case-sensitive statuses: "ok" and "rejected";
 //   - status is REQUIRED; unknown statuses, unknown members, duplicate
@@ -107,16 +105,24 @@ func init() {
 		if err != nil {
 			// Transport/protocol failure or a contract-class host refusal:
 			// the identity cannot be established, and this plugin is the only
-			// source — surface it so failure_mode applies.
+			// source — surface it so failure_mode applies. This REFERENCE plugin
+			// deliberately ships failure_mode=pass because it is not access
+			// control. A production auth plugin must choose block semantics here.
 			return sdk.RequestResult{}, err
 		}
 		switch outcome {
 		case verifyOK:
 			sdk.SetIdentity(id)
 			return sdk.PassRequest(), nil
-		default:
-			// verifyRejected (terminal domain refusal) and verifyNoIdentity
-			// (advisory) both pass without a verdict.
+		case verifyRejected:
+			// A domain rejection is an authoritative answer about the presented
+			// credential. Falling back to the operator's provider credential would
+			// turn an explicitly revoked/invalid Torana key into authenticated
+			// access. Keep the verifier's optional diagnostic private and return a
+			// stable, value-free denial.
+			sdk.BlockRequest(401, "virtual_key_rejected", "The Torana virtual key was rejected.")
+			return sdk.PassRequest(), nil
+		default: // verifyNoIdentity: advisory unwired/unavailable verifier.
 			return sdk.PassRequest(), nil
 		}
 	})

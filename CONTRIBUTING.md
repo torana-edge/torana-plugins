@@ -11,6 +11,12 @@ This file is for the narrower case: proposing a plugin for the first-party set,
 or changing one that is already in it. The bar is higher here because these ship
 as examples people copy and as defaults people trust.
 
+Official plugins target ABI v2. New or changed plugins must use the repository's
+pinned Go v2 SDK, declare the exact grants they exercise, and remain consistent
+with the executable ten-module contract table. Nine modules are public catalog
+plugins; `auth` remains a reference-only integration but is still part of the
+release inventory.
+
 ## Local setup
 
 ```bash
@@ -81,7 +87,8 @@ for d in plugins/*/; do ./scripts/build.sh "$(basename "$d")"; done
 ./scripts/verify-behaviour.sh ../torana-edge dist
 ```
 
-Expect `62 gated tests ran, 0 skipped`. A *skip* fails that script deliberately:
+Expect every currently registered gated row to run with zero skips. A *skip*
+fails that script deliberately:
 this is the only place plugin behaviour runs, so a silently-skipped suite is
 indistinguishable from one that passes.
 

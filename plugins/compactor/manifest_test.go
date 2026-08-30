@@ -7,23 +7,29 @@ import (
 	"testing"
 )
 
-// TestManifestPermissionSetExact — the EXACT final permission set,
-// order-independently with duplicate rejection: the S1 executable contract
-// table must not inherit a stale grant (env.log was dropped; the approved
-// Migration-C inventory allows exactly this set). ir.tool_results.write is
-// the ONLY IR write grant.
+// TestManifestPermissionSetExact — the exact release permission set,
+// order-independently with duplicate rejection. The table must not inherit a
+// stale grant; ir.tool_results.write is the only IR write grant.
 func TestManifestPermissionSetExact(t *testing.T) {
 	raw, err := os.ReadFile("plugin.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var m struct {
-		Permissions []struct {
+		RequiresUpstream []string `json:"requires_upstream"`
+		ConflictsWith    []string `json:"conflicts_with"`
+		Permissions      []struct {
 			Name string `json:"name"`
 		} `json:"permissions"`
 	}
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatal(err)
+	}
+	if len(m.RequiresUpstream) != 0 {
+		t.Fatalf("requires_upstream = %v, want no hard intent dependency", m.RequiresUpstream)
+	}
+	if len(m.ConflictsWith) != 1 || m.ConflictsWith[0] != "torana/keyword_compactor" {
+		t.Fatalf("conflicts_with = %v, want [torana/keyword_compactor]", m.ConflictsWith)
 	}
 	got := make([]string, 0, len(m.Permissions))
 	seen := map[string]bool{}
@@ -43,6 +49,7 @@ func TestManifestPermissionSetExact(t *testing.T) {
 		"env.host_call.torana_offload_completion",
 		"env.host_call.torana_record_savings",
 		"env.plugin_config",
+		"env.shared_cache_get",
 		"ir.tool_results.write",
 	}
 	if len(got) != len(want) {

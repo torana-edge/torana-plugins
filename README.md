@@ -8,6 +8,10 @@ Each plugin requests capabilities in `plugin.json`; users approve those
 requests for the exact installed artifact. A request in a manifest is never a
 grant.
 
+All ten official plugins use ABI v2 and pin the same SDK revision. Their
+manifest ABI, hook, permission, and upstream contracts are checked as one
+executable release inventory.
+
 ## Build locally
 
 ```bash
@@ -42,12 +46,19 @@ This repository is only the first-party set — see
 - `auth` — virtual-key and request-header identity normalization.
 - `cache_tier_selector` — buys the cheapest prompt-cache lifetime per conversation.
 - `cache_warmer` — keeps a chosen conversation's cache alive across an idle gap.
-- `compactor` — economically gated cheap-model tool-result compaction.
+- `compactor` — economically gated cheap-model tool-result compaction; cached intent improves relevance but is optional.
 - `intent` — captures tool-call intent for compaction policies.
-- `keyword_compactor` — deterministic intent-guided compaction.
+- `keyword_compactor` — deterministic keyword compaction with cached-intent or bounded local guidance.
 - `otel` — request metrics and a minimal plugin HTTP endpoint.
 - `pii` — local-model and regex PII request guard.
 - `schema_translator` — translates map schemas for constrained providers.
+- `tool_governor` — restricts or replaces model-visible tool definitions; it is policy, not an execution sandbox.
+
+When combining them, put `tool_governor` before `intent` and
+`schema_translator`: governance applies to the harness's original definitions,
+then the later plugins may add intent fields or translate an approved schema
+for the provider. Run only one of the two compactors; their manifests declare
+that conflict and the host enforces it before loading either guest.
 
 ## A note on `auth`
 
@@ -55,7 +66,12 @@ This repository is only the first-party set — see
 registry** at torana.sh. It is a reference for the capability surface — how a plugin
 requests `env.host_call.verify_virtual_key` and `env.request_headers` — not a
 general-purpose authentication plugin, and it should not be deployed as an access
-control.
+control. Its reference policy treats a verifier's explicit `rejected` answer as
+authoritative and emits a value-free 401 block; an unwired or temporarily
+unavailable verifier remains advisory and does not block. Its manifest also
+deliberately uses `failure_mode: pass`: transport, protocol, and contract errors
+fail open because this is a capability example, not an authentication boundary.
+A production auth plugin must use a fail-closed policy instead.
 
 An earlier iteration of this plugin shipped hardcoded stubs that returned a dummy
 tenant for every request. Those were removed (torana-edge#130) precisely because a

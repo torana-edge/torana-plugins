@@ -20,6 +20,7 @@ type manifest struct {
 	FailureMode          string   `json:"failure_mode"`
 	Repository           string   `json:"repository"`
 	RequiresUpstream     []string `json:"requires_upstream"`
+	ConflictsWith        []string `json:"conflicts_with"`
 	Hooks                []struct {
 		Name string `json:"name"`
 	} `json:"hooks"`
@@ -69,6 +70,7 @@ var knownHooks = map[string]bool{
 var knownPermissions = map[string]bool{
 	"env.background_tick": true,
 	"env.block_request":   true, "env.cache_get": true, "env.cache_set": true,
+	"env.shared_cache_get": true, "env.shared_cache_set": true,
 	"env.emit_metric":                          true,
 	"env.host_call.torana_cache_pricing":       true,
 	"env.host_call.torana_db_query":            true,
@@ -84,6 +86,8 @@ var knownPermissions = map[string]bool{
 	"env.plugin_config": true, "env.request_headers": true,
 	"env.respond_request": true, "env.route_request": true, "env.serve_http": true, "env.set_identity": true,
 	"env.state_get": true, "env.state_keys": true, "env.state_set": true,
+	"env.credential_get": true, "env.file_append": true, "env.file_delete": true,
+	"env.file_list": true, "env.file_read": true, "env.file_write": true, "env.http_request": true,
 	"ir.cache_control.write":      true,
 	"ir.messages.write.assistant": true, "ir.messages.write.developer": true,
 	"ir.messages.write.other": true, "ir.messages.write.system": true,
@@ -97,31 +101,35 @@ type pluginContract struct {
 	hooks            []string
 	permissions      []string
 	requiresUpstream []string
+	conflictsWith    []string
 }
 
-// pluginContracts is the executable nine-plugin contract table (atomic
-// Migration-C). Every manifest must match its row exactly.
+// pluginContracts is the executable ten-plugin release contract. Every
+// manifest must match its row exactly.
 var pluginContracts = map[string]pluginContract{
 	"auth": {hooks: []string{"run_before_request"},
-		permissions: []string{"env.host_call.verify_virtual_key", "env.request_headers", "env.set_identity"}},
+		permissions: []string{"env.block_request", "env.host_call.verify_virtual_key", "env.request_headers", "env.set_identity"}},
 	"cache_tier_selector": {hooks: []string{"run_before_request"},
 		permissions: []string{"env.host_call.torana_cache_pricing", "env.host_call.torana_plugin_counter", "env.log", "env.now", "env.plugin_config", "env.state_get", "env.state_keys", "env.state_set", "ir.cache_control.write"}},
 	"cache_warmer": {hooks: []string{"run_before_request", "run_on_tick"},
 		permissions: []string{"env.background_tick", "env.host_call.torana_cache_pricing", "env.host_call.torana_send_request", "env.now", "env.plugin_config", "env.state_get", "env.state_keys", "env.state_set"}},
 	"compactor": {hooks: []string{"run_before_request"},
-		permissions:      []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.host_call.torana_evaluate_compaction", "env.host_call.torana_offload_completion", "env.host_call.torana_record_savings", "env.plugin_config", "ir.tool_results.write"},
-		requiresUpstream: []string{"torana/intent"}},
+		permissions:   []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.host_call.torana_evaluate_compaction", "env.host_call.torana_offload_completion", "env.host_call.torana_record_savings", "env.plugin_config", "env.shared_cache_get", "ir.tool_results.write"},
+		conflictsWith: []string{"torana/keyword_compactor"}},
 	"intent": {hooks: []string{"run_before_request", "run_on_stream_chunk"},
-		permissions: []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.log", "env.meta_get", "env.meta_set", "env.plugin_config", "ir.cache_control.write", "ir.messages.write.assistant", "ir.messages.write.developer", "ir.messages.write.other", "ir.messages.write.system", "ir.messages.write.tool", "ir.messages.write.user", "ir.stream.write", "ir.tool_results.write", "ir.tools.write"}},
+		permissions: []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.log", "env.meta_get", "env.meta_set", "env.plugin_config", "env.shared_cache_set", "ir.cache_control.write", "ir.messages.write.assistant", "ir.messages.write.developer", "ir.messages.write.other", "ir.messages.write.system", "ir.messages.write.tool", "ir.messages.write.user", "ir.stream.write", "ir.tool_results.write", "ir.tools.write"}},
 	"keyword_compactor": {hooks: []string{"run_before_request"},
-		permissions:      []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.host_call.torana_record_savings", "env.plugin_config", "ir.tool_results.write"},
-		requiresUpstream: []string{"torana/intent"}},
+		permissions:   []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.host_call.torana_record_savings", "env.plugin_config", "env.shared_cache_get", "ir.tool_results.write"},
+		conflictsWith: []string{"torana/compactor"}},
 	"otel": {hooks: []string{"run_before_request", "run_after_response", "run_on_http_request"},
 		permissions: []string{"env.emit_metric", "env.serve_http"}},
 	"pii": {hooks: []string{"run_before_request"},
 		permissions: []string{"env.block_request", "env.cache_get", "env.cache_set", "env.host_call.torana_offload_completion", "env.plugin_config"}},
 	"schema_translator": {hooks: []string{"run_before_request", "run_on_stream_chunk"},
 		permissions: []string{"env.meta_get", "env.meta_set", "ir.messages.write.assistant", "ir.stream.write", "ir.tools.write"}},
+	"tool_governor": {hooks: []string{"run_before_request"},
+		permissions: []string{"env.plugin_config", "ir.cache_control.write", "ir.tools.write"}},
+	"usage_logger": {hooks: []string{"run_after_response"}, permissions: []string{"env.file_append"}},
 }
 
 func hookNames(hooks []struct {
@@ -218,14 +226,20 @@ func main() {
 			}
 			seen["requires:"+requiredID] = true
 		}
-		// The atomic Migration-C CONTRACT TABLE: the exact approved hooks,
-		// permissions, and requires_upstream per plugin, compared
+		for _, conflictingID := range m.ConflictsWith {
+			if strings.TrimSpace(conflictingID) == "" || conflictingID == m.ID || seen["conflicts:"+conflictingID] || seen["requires:"+conflictingID] {
+				panic(fmt.Sprintf("%s: invalid or duplicate conflicts_with %q", entry.Name(), conflictingID))
+			}
+			seen["conflicts:"+conflictingID] = true
+		}
+		// The release contract table: the exact approved hooks,
+		// permissions, requires_upstream, and conflicts_with per plugin, compared
 		// order-independently with duplicate rejection on both sides. A
 		// stale grant, a missing grant, a dropped hook, or a drifted
-		// upstream dependency fails here.
+		// dependency or incompatibility declaration fails here.
 		contract, ok := pluginContracts[entry.Name()]
 		if !ok {
-			panic(fmt.Sprintf("%s: no entry in the nine-plugin contract table", entry.Name()))
+			panic(fmt.Sprintf("%s: no entry in the ten-plugin contract table", entry.Name()))
 		}
 		if !sameStringSet(contract.hooks, hookNames(m.Hooks)) {
 			panic(fmt.Sprintf("%s: hooks %v do not match the contract %v", entry.Name(), hookNames(m.Hooks), contract.hooks))
@@ -235,6 +249,9 @@ func main() {
 		}
 		if !sameStringSet(contract.requiresUpstream, m.RequiresUpstream) {
 			panic(fmt.Sprintf("%s: requires_upstream %v does not match the contract %v", entry.Name(), m.RequiresUpstream, contract.requiresUpstream))
+		}
+		if !sameStringSet(contract.conflictsWith, m.ConflictsWith) {
+			panic(fmt.Sprintf("%s: conflicts_with %v does not match the contract %v", entry.Name(), m.ConflictsWith, contract.conflictsWith))
 		}
 		var schema map[string]any
 		readJSON(filepath.Join(dir, "schema.json"), &schema)

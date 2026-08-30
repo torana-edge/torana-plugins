@@ -1,0 +1,4 @@
+{"name":"before/clean-16k-native","revision":"769e8c8","bytes_per_op":1265408,"allocs_per_op":29,"median_ns":3314042}
+{"name":"after/clean-16k-native","revision":"522a559","bytes_per_op":0,"allocs_per_op":0,"median_ns":3336}
+{"name":"before/pii-wasm-instance","revision":"769e8c8","wasm_bytes":10116268,"initialized_bytes":7340032,"after_one_call_bytes":8912896,"growth_bytes":1572864,"instances":4}
+{"name":"after/pii-wasm-instance","revision":"522a559","wasm_bytes":10116598,"initialized_bytes":7340032,"after_one_call_bytes":7864320,"growth_bytes":524288,"instances":4}

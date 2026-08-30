@@ -15,8 +15,8 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 validator="${VALIDATOR:-$root/scripts/validate_manifests.go}"
 plugins_dir="${PLUGINS_DIR:-$root/plugins}"
 
-# The pinned SDK module: EVERY plugin go.mod must require the SAME revision
-# (the atomic Migration-C contract). Parse each module's direct SDK
+# The pinned SDK module: EVERY plugin go.mod must require the SAME revision.
+# Parse each module's direct SDK
 # requirement; require exactly one unique non-empty version — a one-module
 # drift fails here, never silently.
 pin=""
@@ -38,8 +38,8 @@ if [[ -z "$pin" ]]; then
   exit 1
 fi
 
-# The checked-in SDK_REF must name the SAME revision every module pins (the
-# atomic Migration-C contract): a drift between the reference and the pins
+# The checked-in SDK_REF must name the SAME revision every module pins: a drift
+# between the reference and the pins
 # fails here, never silently.
 sdk_ref_file="${SDK_REF_FILE:-$root/SDK_REF}"
 expected_ref=$(cat "$sdk_ref_file" 2>/dev/null || true)

@@ -2,7 +2,8 @@
 # Executable negatives for the manifest contract gate: the unmodified
 # plugins tree passes, and EACH of a missing plugin, an extra plugin, a
 # duplicate permission, an extra grant, a missing grant, a hook drift, and
-# an upstream drift FAILS the validator. A one-way inventory (rows without
+# an upstream drift, a conflict drift, and a duplicate conflict FAIL the
+# validator. A one-way inventory (rows without
 # directories) or a silent drift fails here.
 set -euo pipefail
 
@@ -112,4 +113,28 @@ open(f, 'a').write('\n')
 PYEOF
 expect fail "an upstream drift" "$tmp/upstream-drift"
 
-echo "manifest contract negatives: all eight cases pass"
+# Conflict drift in one manifest.
+cp_plugins "$tmp/conflict-drift"
+python3 - "$tmp/conflict-drift/compactor/plugin.json" << 'PYEOF'
+import json, sys
+f = sys.argv[1]
+d = json.load(open(f))
+d['conflicts_with'] = ['torana/other']
+json.dump(d, open(f, 'w'), indent=2)
+open(f, 'a').write('\n')
+PYEOF
+expect fail "a conflict drift" "$tmp/conflict-drift"
+
+# Duplicate conflict in one manifest.
+cp_plugins "$tmp/duplicate-conflict"
+python3 - "$tmp/duplicate-conflict/compactor/plugin.json" << 'PYEOF'
+import json, sys
+f = sys.argv[1]
+d = json.load(open(f))
+d['conflicts_with'].append(d['conflicts_with'][0])
+json.dump(d, open(f, 'w'), indent=2)
+open(f, 'a').write('\n')
+PYEOF
+expect fail "a duplicate conflict" "$tmp/duplicate-conflict"
+
+echo "manifest contract negatives: all ten cases pass"

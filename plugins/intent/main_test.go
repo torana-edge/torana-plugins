@@ -24,9 +24,8 @@ func newHarness(t *testing.T) *sdktest.Harness {
 }
 
 // ==========================================================================
-// Schema injection helpers (ported from v1; the injected-parameter rules are
-// unchanged behavior, now driven through the v2 harness so hadI meta writes
-// reach a host).
+// Schema injection helpers, driven through the harness so hadI meta writes
+// reach a host.
 // ==========================================================================
 
 func inject(t *testing.T, params string) map[string]any {
@@ -332,6 +331,24 @@ func TestRehydrationRestoresAndBridges(t *testing.T) {
 	}
 }
 
+func TestContentKeyIsCanonicalOpaqueAndBounded(t *testing.T) {
+	a := contentKey("read", map[string]any{"path": "/secret/customer.go", "line": 12})
+	b := contentKey("read", map[string]any{"line": 12, "path": "/secret/customer.go", intentField: "ignored"})
+	if a != b {
+		t.Fatalf("canonical equivalent calls differ: %q vs %q", a, b)
+	}
+	if strings.Contains(a, "secret") || strings.Contains(a, "customer.go") || strings.Contains(a, "read") {
+		t.Fatalf("cache key exposes tool inputs: %q", a)
+	}
+	large := contentKey("shell", map[string]any{"command": strings.Repeat("private-command ", 10000)})
+	if len(large) != len(a) {
+		t.Fatalf("key length depends on argument size: small=%d large=%d", len(a), len(large))
+	}
+	if large == a {
+		t.Fatal("different calls collided")
+	}
+}
+
 // TestRehydrationFillNeverCached — heuristic fills stay request-local: the
 // intent cache keeps real-captured-only values.
 func TestRehydrationFillNeverCached(t *testing.T) {
@@ -534,7 +551,7 @@ func TestStreamFailOpenOnCallbackError(t *testing.T) {
 	if sig := emittedSig(t, res); sig != "sig" {
 		t.Fatalf("fail-open must preserve the signature, got %q", sig)
 	}
-	// The capture happens BEFORE the hadI read (v1 ordering), so a failed
+	// The capture happens before the hadI read, so a failed
 	// strip must not retroactively uncache a valid capture — the block is
 	// what matters, and it is untouched.
 	if got, _ := h.Cache("intent:call_1"); got != "find the bug" {
@@ -594,11 +611,12 @@ func TestStreamNoUnauthorizedCalls(t *testing.T) {
 		// The harness records StreamHandler's buffer storage by its raw
 		// command; the HOST gates meta_append under the env.meta_set grant
 		// (documented StreamHandler contract), so it is in-permission.
-		"env.meta_append": true,
-		"env.cache_get":   true,
-		"env.cache_set":   true,
-		"env.emit_metric": true,
-		"env.log":         true,
+		"env.meta_append":      true,
+		"env.cache_get":        true,
+		"env.cache_set":        true,
+		"env.shared_cache_set": true,
+		"env.emit_metric":      true,
+		"env.log":              true,
 	}
 	for _, c := range h.Calls() {
 		if !allowed[c.Command] {
@@ -691,7 +709,7 @@ func TestStreamSemanticHandlingTable(t *testing.T) {
 	}
 }
 
-// TestRehydrationUnrepresentableArgumentsNoPanic — historical arguments_json
+// TestRehydrationUnrepresentableArgumentsNoPanic — stored arguments_json
 // that is null (which decodes to a nil map), an array, a scalar, or malformed
 // JSON must be left byte-identical; only a real JSON object may be filled.
 // Regression for the nil-map assignment panic on "null".
