@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"github.com/torana-edge/torana-plugin-sdk/sdktest"
 )
 
@@ -69,12 +69,12 @@ func findEmissions(t *testing.T, out []emission, name string) []emission {
 }
 
 // resp builds a ChatResponse with the given facts.
-func resp(model string, status int32, durationMs int64, input, output int32) *pbv2.ChatResponse {
-	return &pbv2.ChatResponse{
+func resp(model string, status int32, durationMs int64, input, output int32) *pbv1.ChatResponse {
+	return &pbv1.ChatResponse{
 		Model:          model,
 		UpstreamStatus: status,
 		DurationMs:     durationMs,
-		Usage:          &pbv2.Usage{InputTokens: input, OutputTokens: output},
+		Usage:          &pbv1.Usage{InputTokens: input, OutputTokens: output},
 	}
 }
 
@@ -190,7 +190,7 @@ func TestZeroTokenCountsAreNotEmitted(t *testing.T) {
 // and always passes through.
 func TestRequestShapeMetricsAndPassThrough(t *testing.T) {
 	h := sdktest.New(t)
-	res := h.BeforeRequest(&pbv2.ChatRequest{Model: "gpt-4", Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}}}})
+	res := h.BeforeRequest(&pbv1.ChatRequest{Model: "gpt-4", Messages: []*pbv1.Message{{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "hi"}}}}}}})
 	if res.Err != nil || !res.PassedThrough {
 		t.Fatalf("otel must pass requests through, err=%v", res.Err)
 	}
@@ -235,10 +235,10 @@ func TestModelLabelsHaveFiniteCardinality(t *testing.T) {
 // hook emits the same factual series for mutable=true and stream/error-shaped
 // mutable=false dispatches.
 func TestResponseHookEmitsFactsForMutableAndObservational(t *testing.T) {
-	for name, mk := range map[string]func() *pbv2.ChatResponse{
-		"mutable json":  func() *pbv2.ChatResponse { return resp("gpt-4", 200, 100, 10, 5) },
-		"stream shaped": func() *pbv2.ChatResponse { r := resp("gpt-4", 200, 200, 20, 6); r.Message = nil; return r },
-		"error shaped":  func() *pbv2.ChatResponse { return resp("gpt-4", 502, 300, 0, 0) },
+	for name, mk := range map[string]func() *pbv1.ChatResponse{
+		"mutable json":  func() *pbv1.ChatResponse { return resp("gpt-4", 200, 100, 10, 5) },
+		"stream shaped": func() *pbv1.ChatResponse { r := resp("gpt-4", 200, 200, 20, 6); r.Message = nil; return r },
+		"error shaped":  func() *pbv1.ChatResponse { return resp("gpt-4", 502, 300, 0, 0) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := sdktest.New(t)
@@ -263,15 +263,15 @@ func TestResponseHookEmitsFactsForMutableAndObservational(t *testing.T) {
 // host (404).
 func TestHTTPRoutes(t *testing.T) {
 	h := sdktest.New(t)
-	ok := h.HTTPRequest(&pbv2.HttpRequest{Method: "GET", Path: "/agent/status"})
+	ok := h.HTTPRequest(&pbv1.HttpRequest{Method: "GET", Path: "/agent/status"})
 	if ok.Err != nil || ok.Response == nil || ok.Response.Status != 200 {
 		t.Fatalf("agent/status must be served, got %+v", ok.Response)
 	}
-	root := h.HTTPRequest(&pbv2.HttpRequest{Method: "GET", Path: "/"})
+	root := h.HTTPRequest(&pbv1.HttpRequest{Method: "GET", Path: "/"})
 	if root.Err != nil || root.Response == nil || root.Response.Status != 200 {
 		t.Fatalf("/ must be served, got %+v", root.Response)
 	}
-	unknown := h.HTTPRequest(&pbv2.HttpRequest{Method: "GET", Path: "/nope"})
+	unknown := h.HTTPRequest(&pbv1.HttpRequest{Method: "GET", Path: "/nope"})
 	if unknown.Err != nil || !unknown.PassedThrough {
 		t.Fatalf("unknown paths must pass to the host 404, err=%v", unknown.Err)
 	}
@@ -281,7 +281,7 @@ func TestHTTPRoutes(t *testing.T) {
 // pricing); metrics ride the dedicated emit path.
 func TestNoUnauthorizedCalls(t *testing.T) {
 	h := sdktest.New(t)
-	h.BeforeRequest(&pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}}}})
+	h.BeforeRequest(&pbv1.ChatRequest{Model: "m", Messages: []*pbv1.Message{{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "hi"}}}}}}})
 	h.AfterResponse(resp("m", 200, 1, 2, 3), false)
 	for _, c := range h.Calls() {
 		t.Errorf("otel made a host call outside its grant set: %s", c.Command)

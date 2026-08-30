@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -19,14 +23,38 @@ type manifest struct {
 	MaximumToranaVersion string   `json:"maximum_torana_version"`
 	FailureMode          string   `json:"failure_mode"`
 	Repository           string   `json:"repository"`
+	Description          string   `json:"description"`
 	RequiresUpstream     []string `json:"requires_upstream"`
 	ConflictsWith        []string `json:"conflicts_with"`
 	Hooks                []struct {
 		Name string `json:"name"`
 	} `json:"hooks"`
 	Permissions []struct {
-		Name string `json:"name"`
+		Name        string `json:"name"`
+		Description string `json:"description"`
 	} `json:"permissions"`
+	Files []struct {
+		Path          string   `json:"path"`
+		Operations    []string `json:"operations"`
+		MaxBytes      int64    `json:"max_bytes"`
+		RetainedFiles int      `json:"retained_files"`
+	} `json:"files"`
+	Credentials []struct {
+		Slot        string `json:"slot"`
+		Description string `json:"description"`
+		Required    bool   `json:"required"`
+	} `json:"credentials"`
+	HTTPEndpoints []struct {
+		Name              string   `json:"name"`
+		Description       string   `json:"description"`
+		Origin            string   `json:"origin"`
+		Methods           []string `json:"methods"`
+		Required          bool     `json:"required"`
+		TimeoutMS         int      `json:"timeout_ms"`
+		MaxRequestBytes   int64    `json:"max_request_bytes"`
+		MaxResponseBytes  int64    `json:"max_response_bytes"`
+		MaxCallsPerMinute int      `json:"max_calls_per_minute"`
+	} `json:"http_endpoints"`
 }
 
 var semver = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$`)
@@ -86,6 +114,8 @@ var knownPermissions = map[string]bool{
 	"env.plugin_config": true, "env.request_headers": true,
 	"env.respond_request": true, "env.route_request": true, "env.serve_http": true, "env.set_identity": true,
 	"env.state_get": true, "env.state_keys": true, "env.state_set": true,
+	"env.credential_get": true, "env.file_append": true, "env.file_delete": true,
+	"env.file_list": true, "env.file_read": true, "env.file_write": true, "env.http_request": true,
 	"ir.cache_control.write":      true,
 	"ir.messages.write.assistant": true, "ir.messages.write.developer": true,
 	"ir.messages.write.other": true, "ir.messages.write.system": true,
@@ -102,7 +132,7 @@ type pluginContract struct {
 	conflictsWith    []string
 }
 
-// pluginContracts is the executable ten-plugin release contract. Every
+// pluginContracts is the executable eleven-plugin release contract. Every
 // manifest must match its row exactly.
 var pluginContracts = map[string]pluginContract{
 	"auth": {hooks: []string{"run_before_request"},
@@ -127,6 +157,7 @@ var pluginContracts = map[string]pluginContract{
 		permissions: []string{"env.meta_get", "env.meta_set", "ir.messages.write.assistant", "ir.stream.write", "ir.tools.write"}},
 	"tool_governor": {hooks: []string{"run_before_request"},
 		permissions: []string{"env.plugin_config", "ir.cache_control.write", "ir.tools.write"}},
+	"usage_logger": {hooks: []string{"run_after_response"}, permissions: []string{"env.file_append"}},
 }
 
 func hookNames(hooks []struct {
@@ -140,7 +171,8 @@ func hookNames(hooks []struct {
 }
 
 func permissionNames(perms []struct {
-	Name string `json:"name"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
 }) []string {
 	out := make([]string, 0, len(perms))
 	for _, p := range perms {
@@ -188,9 +220,9 @@ func main() {
 		dirs[entry.Name()] = true
 		dir := filepath.Join(os.Args[1], entry.Name())
 		var m manifest
-		readJSON(filepath.Join(dir, "plugin.json"), &m)
-		if m.SchemaVersion != 1 || m.ID != "torana/"+entry.Name() || m.Name != entry.Name() || !semver.MatchString(m.Version) || m.ABIVersion != "v2" {
-			panic(fmt.Sprintf("%s: incomplete v2 manifest", entry.Name()))
+		readManifest(filepath.Join(dir, "plugin.json"), &m)
+		if m.SchemaVersion != 1 || m.ID != "torana/"+entry.Name() || m.Name != entry.Name() || !semver.MatchString(m.Version) || m.ABIVersion != "v1" {
+			panic(fmt.Sprintf("%s: incomplete v1 manifest", entry.Name()))
 		}
 		if m.MinimumToranaVersion == "" || !semver.MatchString(m.MinimumToranaVersion) {
 			panic(fmt.Sprintf("%s: invalid or missing minimum_torana_version %q", entry.Name(), m.MinimumToranaVersion))
@@ -217,6 +249,9 @@ func main() {
 			}
 			seen["permission:"+permission.Name] = true
 		}
+		validateFileDeclarations(entry.Name(), m)
+		validateCredentialDeclarations(entry.Name(), m)
+		validateHTTPEndpointDeclarations(entry.Name(), m)
 		for _, requiredID := range m.RequiresUpstream {
 			if strings.TrimSpace(requiredID) == "" || requiredID == m.ID || seen["requires:"+requiredID] {
 				panic(fmt.Sprintf("%s: invalid or duplicate requires_upstream %q", entry.Name(), requiredID))
@@ -236,7 +271,7 @@ func main() {
 		// dependency or incompatibility declaration fails here.
 		contract, ok := pluginContracts[entry.Name()]
 		if !ok {
-			panic(fmt.Sprintf("%s: no entry in the ten-plugin contract table", entry.Name()))
+			panic(fmt.Sprintf("%s: no entry in the eleven-plugin contract table", entry.Name()))
 		}
 		if !sameStringSet(contract.hooks, hookNames(m.Hooks)) {
 			panic(fmt.Sprintf("%s: hooks %v do not match the contract %v", entry.Name(), hookNames(m.Hooks), contract.hooks))
@@ -277,6 +312,95 @@ func main() {
 	for name := range dirs {
 		if _, ok := pluginContracts[name]; !ok {
 			panic(fmt.Sprintf("directory %s has no contract-table row", name))
+		}
+	}
+}
+
+func validateFileDeclarations(pluginName string, m manifest) {
+	permissions := map[string]bool{}
+	for _, permission := range m.Permissions {
+		permissions[permission.Name] = true
+	}
+	seenPaths := map[string]bool{}
+	for _, file := range m.Files {
+		if file.Path == "" || strings.HasPrefix(file.Path, "/") || strings.Contains(file.Path, "\\") {
+			panic(fmt.Sprintf("%s: invalid file path %q", pluginName, file.Path))
+		}
+		for _, part := range strings.Split(file.Path, "/") {
+			if part == "" || part == "." || part == ".." {
+				panic(fmt.Sprintf("%s: invalid file path %q", pluginName, file.Path))
+			}
+		}
+		if seenPaths[file.Path] {
+			panic(fmt.Sprintf("%s: duplicate file path %q", pluginName, file.Path))
+		}
+		seenPaths[file.Path] = true
+		if file.MaxBytes <= 0 || file.RetainedFiles < 0 || len(file.Operations) == 0 {
+			panic(fmt.Sprintf("%s: file %q requires positive max_bytes and operations", pluginName, file.Path))
+		}
+		seenOperations := map[string]bool{}
+		for _, operation := range file.Operations {
+			if seenOperations[operation] || !permissions["env.file_"+operation] {
+				panic(fmt.Sprintf("%s: file %q operation %q is duplicate or ungranted", pluginName, file.Path, operation))
+			}
+			seenOperations[operation] = true
+		}
+	}
+}
+
+func permissionSet(m manifest) map[string]bool {
+	out := make(map[string]bool, len(m.Permissions))
+	for _, permission := range m.Permissions {
+		out[permission.Name] = true
+	}
+	return out
+}
+
+func validateCredentialDeclarations(pluginName string, m manifest) {
+	if len(m.Credentials) > 0 && !permissionSet(m)["env.credential_get"] {
+		panic(fmt.Sprintf("%s: credential declarations require env.credential_get", pluginName))
+	}
+	seen := map[string]bool{}
+	for _, credential := range m.Credentials {
+		if strings.TrimSpace(credential.Slot) == "" || strings.TrimSpace(credential.Description) == "" || seen[credential.Slot] {
+			panic(fmt.Sprintf("%s: invalid or duplicate credential slot %q", pluginName, credential.Slot))
+		}
+		seen[credential.Slot] = true
+	}
+}
+
+func validateHTTPEndpointDeclarations(pluginName string, m manifest) {
+	permissions := permissionSet(m)
+	seen := map[string]bool{}
+	for _, endpoint := range m.HTTPEndpoints {
+		if !permissions["env.http_request"] {
+			panic(fmt.Sprintf("%s: HTTP endpoint %q requires env.http_request", pluginName, endpoint.Name))
+		}
+		if strings.TrimSpace(endpoint.Name) == "" || strings.TrimSpace(endpoint.Description) == "" || seen[endpoint.Name] {
+			panic(fmt.Sprintf("%s: invalid or duplicate HTTP endpoint %q", pluginName, endpoint.Name))
+		}
+		seen[endpoint.Name] = true
+		if endpoint.Origin != "" {
+			u, err := url.Parse(endpoint.Origin)
+			if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+				panic(fmt.Sprintf("%s: HTTP endpoint %q has invalid origin", pluginName, endpoint.Name))
+			}
+			if u.Scheme != "https" {
+				ip := net.ParseIP(u.Hostname())
+				if u.Scheme != "http" || ip == nil || !ip.IsLoopback() {
+					panic(fmt.Sprintf("%s: HTTP endpoint %q origin must use https or literal loopback http", pluginName, endpoint.Name))
+				}
+			}
+		}
+		if len(endpoint.Methods) == 0 || endpoint.TimeoutMS < 0 || endpoint.MaxRequestBytes < 0 || endpoint.MaxResponseBytes < 0 || endpoint.MaxCallsPerMinute < 0 {
+			panic(fmt.Sprintf("%s: HTTP endpoint %q has invalid methods or limits", pluginName, endpoint.Name))
+		}
+		methods := map[string]bool{}
+		for _, method := range endpoint.Methods {
+			if method == "" || method != strings.ToUpper(method) || methods[method] {
+				panic(fmt.Sprintf("%s: HTTP endpoint %q has invalid or duplicate method %q", pluginName, endpoint.Name, method))
+			}
+			methods[method] = true
 		}
 	}
 }
@@ -440,5 +564,20 @@ func readJSON(path string, into any) {
 	}
 	if err := json.Unmarshal(b, into); err != nil {
 		panic(fmt.Errorf("%s: %w", path, err))
+	}
+}
+
+func readManifest(path string, into *manifest) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		panic(err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(b))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(into); err != nil {
+		panic(fmt.Errorf("%s: %w", path, err))
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		panic(fmt.Errorf("%s: trailing JSON", path))
 	}
 }

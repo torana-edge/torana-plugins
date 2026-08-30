@@ -4,7 +4,7 @@
 // detection. If PII is found the request is vetoed (env.block_request) with an
 // actionable, value-free error so the upstream model can adjust next turn.
 //
-// # v2 semantics (ordered body)
+// # Ordered-body semantics
 //
 //   - Every message's tool-result blocks are candidates (role-independent,
 //     position-addressed by the ordered seam). Structured content is
@@ -41,12 +41,12 @@ import (
 	"unicode/utf8"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
 
-const cleanCachePrefix = "pii_clean:v2"
+const cleanCachePrefix = "pii/clean"
 
 type piiConfig struct {
 	Provider     string   `json:"provider"`       // local-model provider (required to enable the model scan)
@@ -151,7 +151,7 @@ func extractScannable(view sdk.ToolResultView) extraction {
 }
 
 func init() {
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv2.ChatRequest) (sdk.RequestResult, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
 		loadConfig()
 
 		// tool_call_id → tool name (the ordered tool-use blocks), so the
@@ -218,7 +218,7 @@ func init() {
 					return sdk.RequestResult{}, err
 				}
 				if herr != nil && !sdk.IsNotFound(herr) {
-					if herr.Code == pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED || herr.Code == pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE {
+					if herr.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED || herr.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE {
 						// Advisory: decline the cache, still scan.
 					} else {
 						return sdk.RequestResult{}, fmt.Errorf("pii: cache_get refused: %s", herr.Message)
@@ -404,13 +404,13 @@ func modelScan(content, toolName string) ([]finding, error) {
 		// contract refusals are the caller's/host's defect — the hook errors
 		// regardless of on_error.
 		switch herr.Code {
-		case pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE:
+		case pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE:
 			return nil, &scannerFailure{"pii scan failed: " + herr.Message}
 		default:
 			return nil, fmt.Errorf("pii offload refused: %s", herr.Message)
 		}
 	}
-	// The v2 offload result carries NO status field; refusals arrive only in
+	// The typed offload result carries NO status field; refusals arrive only in
 	// the framed error arm. An undecodable value arm is a protocol defect.
 	var resp struct {
 		Completion string `json:"completion"`

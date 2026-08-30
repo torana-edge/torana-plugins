@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"github.com/torana-edge/torana-plugin-sdk/sdktest"
 	"google.golang.org/protobuf/proto"
 )
@@ -31,7 +31,7 @@ func newHarness(t *testing.T) *sdktest.Harness {
 func inject(t *testing.T, params string) map[string]any {
 	t.Helper()
 	h := newHarness(t)
-	req := &pbv2.ChatRequest{Tools: []*pbv2.ToolDef{{
+	req := &pbv1.ChatRequest{Tools: []*pbv1.ToolDef{{
 		Name:           "test_tool",
 		ParametersJson: []byte(params),
 	}}}
@@ -183,16 +183,16 @@ func TestStrictSchemasSurviveInjection(t *testing.T) {
 
 // reqWith builds a request carrying one tool + an assistant history call,
 // which exercises schema injection, the system prompt, and rehydration.
-func reqWith(toolArgs string) *pbv2.ChatRequest {
-	return &pbv2.ChatRequest{
-		Tools: []*pbv2.ToolDef{{
+func reqWith(toolArgs string) *pbv1.ChatRequest {
+	return &pbv1.ChatRequest{
+		Tools: []*pbv1.ToolDef{{
 			Name:           "read",
 			ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"}}}`),
 		}},
-		Messages: []*pbv2.Message{
-			{Role: "system", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "You are a coding agent."}}}}},
-			{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "find the bug"}}}}},
-			{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "call_1", Name: "read", ArgumentsJson: []byte(toolArgs)}}}}},
+		Messages: []*pbv1.Message{
+			{Role: "system", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "You are a coding agent."}}}}},
+			{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "find the bug"}}}}},
+			{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "call_1", Name: "read", ArgumentsJson: []byte(toolArgs)}}}}},
 		},
 	}
 }
@@ -201,16 +201,16 @@ func reqWith(toolArgs string) *pbv2.ChatRequest {
 // through the real stream hook and returns the final dispatch's result.
 func streamCall(t *testing.T, h *sdktest.Harness, id, name, sig, args string) sdktest.StreamResult {
 	t.Helper()
-	h.StreamChunk(&pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
-		ContentBlockStart: &pbv2.ContentBlockStart{Index: 0, Block: &pbv2.ContentBlockStart_ToolCall{
-			ToolCall: &pbv2.ToolCallRef{Id: id, Name: name, Signature: sig},
+	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+		ContentBlockStart: &pbv1.ContentBlockStart{Index: 0, Block: &pbv1.ContentBlockStart_ToolCall{
+			ToolCall: &pbv1.ToolCallRef{Id: id, Name: name, Signature: sig},
 		}},
 	}})
-	h.StreamChunk(&pbv2.StreamEvent{Event: &pbv2.StreamEvent_ToolCallDelta{
-		ToolCallDelta: &pbv2.ToolCallDelta{Index: 0, ArgumentsDelta: args},
+	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
+		ToolCallDelta: &pbv1.ToolCallDelta{Index: 0, ArgumentsDelta: args},
 	}})
-	return h.StreamChunk(&pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
-		ContentBlockStop: &pbv2.ContentBlockStop{Index: 0},
+	return h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+		ContentBlockStop: &pbv1.ContentBlockStop{Index: 0},
 	}})
 }
 
@@ -246,7 +246,7 @@ func emittedSig(t *testing.T, res sdktest.StreamResult) string {
 // TestBeforeRequestNoToolsPasses — no tools: nothing to teach, no host calls.
 func TestBeforeRequestNoToolsPasses(t *testing.T) {
 	h := newHarness(t)
-	res := h.BeforeRequest(&pbv2.ChatRequest{Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}}}})
+	res := h.BeforeRequest(&pbv1.ChatRequest{Messages: []*pbv1.Message{{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "hi"}}}}}}})
 	if !res.PassedThrough || res.Err != nil {
 		t.Fatalf("expected pass-through, got err=%v request=%v", res.Err, res.Request != nil)
 	}
@@ -289,7 +289,7 @@ func TestBeforeRequestInjectsSchemaAndPromptAndIsDeterministic(t *testing.T) {
 	}
 }
 
-func mustSchema(t *testing.T, tool *pbv2.ToolDef) map[string]any {
+func mustSchema(t *testing.T, tool *pbv1.ToolDef) map[string]any {
 	t.Helper()
 	var out map[string]any
 	if err := json.Unmarshal(tool.ParametersJson, &out); err != nil {
@@ -298,7 +298,7 @@ func mustSchema(t *testing.T, tool *pbv2.ToolDef) map[string]any {
 	return out
 }
 
-func protoEqual(t *testing.T, a, b *pbv2.ChatRequest) bool {
+func protoEqual(t *testing.T, a, b *pbv1.ChatRequest) bool {
 	t.Helper()
 	ab, _ := json.Marshal(a)
 	bb, _ := json.Marshal(b)
@@ -448,7 +448,7 @@ func TestRehydrationCacheRefusalErrors(t *testing.T) {
 // strips the value.
 func TestNativeIFieldRecordsMarkerAndIsNotStripped(t *testing.T) {
 	h := newHarness(t)
-	req := &pbv2.ChatRequest{Tools: []*pbv2.ToolDef{{
+	req := &pbv1.ChatRequest{Tools: []*pbv1.ToolDef{{
 		Name:           "read",
 		ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"},"i":{"type":"string","description":"concise intent"}},"required":["path","i"]}`),
 	}}}
@@ -690,7 +690,7 @@ func TestStreamSemanticHandlingTable(t *testing.T) {
 			if tc.native {
 				// Drive the request side so hadI:read=true is recorded on this
 				// harness (the marker lives in the harness's meta store).
-				h.BeforeRequest(&pbv2.ChatRequest{Tools: []*pbv2.ToolDef{{
+				h.BeforeRequest(&pbv1.ChatRequest{Tools: []*pbv1.ToolDef{{
 					Name:           "read",
 					ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"},"i":{"type":"string"}},"required":["path","i"]}`),
 				}}})
@@ -724,15 +724,15 @@ func TestRehydrationUnrepresentableArgumentsNoPanic(t *testing.T) {
 	for _, raw := range cases {
 		t.Run(raw, func(t *testing.T) {
 			newHarness(t) // resets the process-global config for each row
-			req := &pbv2.ChatRequest{Tools: []*pbv2.ToolDef{{
+			req := &pbv1.ChatRequest{Tools: []*pbv1.ToolDef{{
 				Name:           "read",
 				ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"}}}`),
 			}}}
-			req.Messages = []*pbv2.Message{
-				{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}},
-				{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "call_1", Name: "read", ArgumentsJson: []byte(raw)}}}}},
+			req.Messages = []*pbv1.Message{
+				{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "hi"}}}}},
+				{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "call_1", Name: "read", ArgumentsJson: []byte(raw)}}}}},
 			}
-			before := proto.Clone(req).(*pbv2.ChatRequest)
+			before := proto.Clone(req).(*pbv1.ChatRequest)
 			modified, err := rehydrateHistoryIntents(req)
 			if err != nil {
 				t.Fatalf("hook error (must not panic): %v", err)
@@ -748,13 +748,13 @@ func TestRehydrationUnrepresentableArgumentsNoPanic(t *testing.T) {
 
 	// An EMPTY OBJECT is representable and must be filled.
 	h := newHarness(t)
-	req := &pbv2.ChatRequest{Tools: []*pbv2.ToolDef{{
+	req := &pbv1.ChatRequest{Tools: []*pbv1.ToolDef{{
 		Name:           "read",
 		ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"}}}`),
 	}}}
-	req.Messages = []*pbv2.Message{
-		{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}},
-		{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "call_1", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
+	req.Messages = []*pbv1.Message{
+		{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "hi"}}}}},
+		{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "call_1", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
 	}
 	res := h.BeforeRequest(req)
 	if res.Err != nil {
@@ -816,25 +816,25 @@ func TestSchemaDefaultsMatchRuntimeDefaults(t *testing.T) {
 // call's signature token while the siblings keep theirs, and a
 // byte-identical rewrite is a no-op that preserves every token.
 func TestRehydrationProvenanceAwareWrites(t *testing.T) {
-	use := func(id, name, args, sig string) *pbv2.RequestBlock {
-		return &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{
+	use := func(id, name, args, sig string) *pbv1.RequestBlock {
+		return &pbv1.RequestBlock{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{
 			Id: id, Name: name, ArgumentsJson: []byte(args), Signature: sig,
 		}}}
 	}
 	h := newHarness(t)
-	req := &pbv2.ChatRequest{Tools: []*pbv2.ToolDef{{
+	req := &pbv1.ChatRequest{Tools: []*pbv1.ToolDef{{
 		Name:           "read",
 		ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"}}}`),
 	}}}
-	req.Messages = []*pbv2.Message{
-		{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}},
-		{Role: "assistant", Blocks: []*pbv2.RequestBlock{
+	req.Messages = []*pbv1.Message{
+		{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "hi"}}}}},
+		{Role: "assistant", Blocks: []*pbv1.RequestBlock{
 			use("c1", "read", `{"path":"server.go"}`, "call-sig-1"),
 			// A NON-TOOL block interleaved between tool-use blocks: the
 			// views' ordinals (0,1,2) differ from the block indices
 			// (0,2,3), so a regression from tc.Block to the tool-call loop
 			// index would target the wrong blocks (and error on this one).
-			{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "interleaved note"}}},
+			{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "interleaved note"}}},
 			use("c2", "read", `{"path":"other.go","i":"existing"}`, "call-sig-2"),
 			use("c3", "grep", `{"pattern":"x"}`, "call-sig-3"),
 		}},
@@ -876,15 +876,15 @@ func TestRehydrationProvenanceAwareWrites(t *testing.T) {
 
 	// A request where EVERY call already carries "i" is a no-op preserving
 	// every token.
-	req2 := &pbv2.ChatRequest{Tools: req.Tools}
-	req2.Messages = []*pbv2.Message{
-		{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}},
-		{Role: "assistant", Blocks: []*pbv2.RequestBlock{
+	req2 := &pbv1.ChatRequest{Tools: req.Tools}
+	req2.Messages = []*pbv1.Message{
+		{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "hi"}}}}},
+		{Role: "assistant", Blocks: []*pbv1.RequestBlock{
 			use("c1", "read", `{"path":"server.go","i":"find the bug in server"}`, "call-sig-1"),
 			use("c2", "read", `{"path":"other.go","i":"existing"}`, "call-sig-2"),
 		}},
 	}
-	before := proto.Clone(req2).(*pbv2.ChatRequest)
+	before := proto.Clone(req2).(*pbv1.ChatRequest)
 	h.Run(func() { modified, err = rehydrateHistoryIntents(req2) })
 	if err != nil {
 		t.Fatal(err)
@@ -905,19 +905,19 @@ func TestRehydrationProvenanceAwareWrites(t *testing.T) {
 // and a no-text system message gets a valid appended text block (the
 // trailing carrier removed first).
 func TestSystemPromptProvenanceAwareInjection(t *testing.T) {
-	text := func(s, sig string) *pbv2.RequestBlock {
-		return &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: s, Signature: sig}}}
+	text := func(s, sig string) *pbv1.RequestBlock {
+		return &pbv1.RequestBlock{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: s, Signature: sig}}}
 	}
-	trailing := func() *pbv2.RequestBlock {
-		return &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_TrailingSignature{TrailingSignature: &pbv2.RequestTrailingSignatureBlock{Signature: "trail-sig"}}}
+	trailing := func() *pbv1.RequestBlock {
+		return &pbv1.RequestBlock{Kind: &pbv1.RequestBlock_TrailingSignature{TrailingSignature: &pbv1.RequestTrailingSignatureBlock{Signature: "trail-sig"}}}
 	}
 	h := newHarness(t)
-	req := &pbv2.ChatRequest{Tools: []*pbv2.ToolDef{{
+	req := &pbv1.ChatRequest{Tools: []*pbv1.ToolDef{{
 		Name:           "read",
 		ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"}}}`),
 	}}}
-	req.Messages = []*pbv2.Message{
-		{Role: "system", Blocks: []*pbv2.RequestBlock{
+	req.Messages = []*pbv1.Message{
+		{Role: "system", Blocks: []*pbv1.RequestBlock{
 			text("first part", "text-sig-1"),
 			text("sibling", "text-sig-2"),
 			text("last part", "text-sig-3"),
@@ -952,9 +952,9 @@ func TestSystemPromptProvenanceAwareInjection(t *testing.T) {
 
 	// A no-text system message: ReplaceAllText appends a valid text block
 	// (removing a final trailing carrier first).
-	req2 := &pbv2.ChatRequest{Tools: req.Tools}
-	req2.Messages = []*pbv2.Message{
-		{Role: "system", Blocks: []*pbv2.RequestBlock{trailing()}},
+	req2 := &pbv1.ChatRequest{Tools: req.Tools}
+	req2.Messages = []*pbv1.Message{
+		{Role: "system", Blocks: []*pbv1.RequestBlock{trailing()}},
 	}
 	h.Run(func() { changed, err = injectSystemPrompt(req2) })
 	if err != nil {

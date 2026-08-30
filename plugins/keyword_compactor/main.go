@@ -12,7 +12,7 @@
 // cache namespaces are disjoint (keyword_compactor/* vs compactor/*), so no
 // cross-plugin collision.
 //
-// v2 semantics (typed host calls, same rules as compactor):
+// Typed host-call semantics (same rules as compactor):
 //   - cache reads distinguish absent (NOT_FOUND) from present-empty; a
 //     present-empty or NON-SHORTER cached value is unusable and recomputed
 //     locally (these are local deterministic computations — trusting a
@@ -39,7 +39,7 @@ import (
 	"unicode/utf8"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -98,7 +98,7 @@ func resetConfigForTest() {
 }
 
 func init() {
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv2.ChatRequest) (sdk.RequestResult, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
 		modified, err := compactToolResults(req)
 		if err != nil {
 			// failure_mode (pass) preserves the request; the host records the
@@ -116,7 +116,7 @@ func init() {
 // Tool result compaction
 // ==========================================================================
 
-func compactToolResults(req *pbv2.ChatRequest) (bool, error) {
+func compactToolResults(req *pbv1.ChatRequest) (bool, error) {
 	loadConfig()
 	modified := false
 	assistantAfter := assistantMessageCountsAfter(req.Messages)
@@ -264,7 +264,7 @@ type derivedIntentPayload struct {
 	ToolArguments string `json:"tool_arguments"`
 }
 
-func deriveCompactionIntent(messages []*pbv2.Message, resultIndex, resultBlock int, toolName, toolArgs string) string {
+func deriveCompactionIntent(messages []*pbv1.Message, resultIndex, resultBlock int, toolName, toolArgs string) string {
 	userRequest := ""
 	if resultIndex >= len(messages) {
 		resultIndex = len(messages) - 1
@@ -314,7 +314,7 @@ func worthwhileReduction(original, final int) bool {
 	return final < original-final
 }
 
-func assistantMessageCountsAfter(messages []*pbv2.Message) []int {
+func assistantMessageCountsAfter(messages []*pbv1.Message) []int {
 	counts := make([]int, len(messages))
 	count := 0
 	for i := len(messages) - 1; i >= 0; i-- {
@@ -330,9 +330,9 @@ func assistantMessageCountsAfter(messages []*pbv2.Message) []int {
 // contract. The cached value is trusted only when it is non-empty AND shorter
 // than the original; missing, present-empty, or non-shorter values are
 // recomputed locally (the replacement is a pure function of the inputs).
-func applyDeterministicPolicy(msg *pbv2.Message, block int, text, toolName, toolArgs string, rule sdk.ToolPolicyRule) (bool, error) {
+func applyDeterministicPolicy(msg *pbv1.Message, block int, text, toolName, toolArgs string, rule sdk.ToolPolicyRule) (bool, error) {
 	cacheKey := sdk.ContentAddressedCacheKey(policyCompactionCache,
-		"v2", toolName, toolArgs, text, rule.Mode, rule.Rerun)
+		"policy-v1", toolName, toolArgs, text, rule.Mode, rule.Rerun)
 	cached, herr, err := sdk.CacheGet(cacheKey)
 	if err != nil {
 		return false, fmt.Errorf("keyword_compactor: policy cache_get: %w", err)

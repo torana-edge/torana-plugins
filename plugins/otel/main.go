@@ -21,13 +21,13 @@ import (
 	"strings"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
 
 func init() {
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv2.ChatRequest) (sdk.RequestResult, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
 		labels := map[string]string{"model_family": modelFamily(req.Model)}
 		sdk.EmitMetric("torana_plugin_requests_total", sdk.MetricCounter, 1, labels)
 		sdk.EmitMetric("torana_plugin_request_messages", sdk.MetricHistogram, float64(len(req.Messages)), labels)
@@ -35,7 +35,7 @@ func init() {
 		return sdk.PassRequest(), nil
 	})
 
-	sdk.OnAfterResponse(func(ctx context.Context, resp *pbv2.ChatResponse, mutable bool) (sdk.ResponseResult, error) {
+	sdk.OnAfterResponse(func(ctx context.Context, resp *pbv1.ChatResponse, mutable bool) (sdk.ResponseResult, error) {
 		for _, m := range responseMetrics(resp) {
 			sdk.EmitMetric(m.Name, m.Kind, m.Value, m.Labels)
 		}
@@ -45,13 +45,13 @@ func init() {
 	// Serve a tiny status page at /_torana/plugin/otel/.
 	// This demonstrates the run_on_http_request ABI: the page is intentionally
 	// minimal — a proof of the per-plugin HTTP namespace, not a real dashboard.
-	sdk.OnHTTPRequest(func(ctx context.Context, req *pbv2.HttpRequest) (sdk.HTTPResult, error) {
+	sdk.OnHTTPRequest(func(ctx context.Context, req *pbv1.HttpRequest) (sdk.HTTPResult, error) {
 		switch req.Path {
 		case "/agent/status":
 			hdrsJSON, _ := json.Marshal(map[string][]string{
 				"Content-Type": {"application/json"},
 			})
-			return sdk.ServeHTTP(&pbv2.HttpResponse{
+			return sdk.ServeHTTP(&pbv1.HttpResponse{
 				Status:      200,
 				HeadersJson: hdrsJSON,
 				Body:        []byte(`{"plugin":"otel","status":"ready","capabilities":["request_metrics","response_metrics","token_metrics"]}`),
@@ -65,7 +65,7 @@ func init() {
 			hdrsJSON, _ := json.Marshal(map[string][]string{
 				"Content-Type": {"text/html; charset=utf-8"},
 			})
-			return sdk.ServeHTTP(&pbv2.HttpResponse{
+			return sdk.ServeHTTP(&pbv1.HttpResponse{
 				Status:      200,
 				HeadersJson: hdrsJSON,
 				Body:        body,
@@ -119,7 +119,7 @@ type emission struct {
 // genuinely present facts (a response happened, duration, usage) with NO
 // status_class anywhere — labelling an unobserved outcome would invent a
 // measurement.
-func responseMetrics(resp *pbv2.ChatResponse) []emission {
+func responseMetrics(resp *pbv1.ChatResponse) []emission {
 	if resp == nil {
 		// No response facts at all: the only honest series is that a response
 		// happened, with no status_class.

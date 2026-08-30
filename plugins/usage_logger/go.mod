@@ -1,4 +1,4 @@
-module github.com/torana-edge/torana-plugins/plugins/auth
+module github.com/torana-edge/torana-plugins/plugins/usage_logger
 
 go 1.25.0
 

@@ -31,7 +31,7 @@
 // save it, and would fail Torana's determinism test — which is the test that
 // exists to catch precisely this class of bug.
 //
-// # v2 semantics (ordered ABI, cache-tier reconciliation)
+// # Ordered cache-prefix semantics
 //
 //   - The only request mutation is the cache breakpoint marker, governed by
 //     the dedicated ir.cache_control.write grant — never content, role, tool
@@ -68,7 +68,7 @@ import (
 	"strings"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -130,14 +130,14 @@ func isAdvisory(err error) bool {
 	}
 	var refusal *sdk.HostCallRefusalError
 	if errors.As(err, &refusal) {
-		return refusal.Code == pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED ||
-			refusal.Code == pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE
+		return refusal.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED ||
+			refusal.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE
 	}
 	return false
 }
 
 func init() {
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv2.ChatRequest) (sdk.RequestResult, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
 		cfg := loadConfig()
 		if cfg.Mode == "off" {
 			return sdk.PassRequest(), nil
@@ -199,7 +199,7 @@ func init() {
 			return sdk.RequestResult{}, err
 		case herr != nil && sdk.IsNotFound(herr):
 			// fresh
-		case herr != nil && (herr.Code == pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED || herr.Code == pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE):
+		case herr != nil && (herr.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED || herr.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE):
 			return sdk.PassRequest(), nil
 		case herr != nil:
 			return sdk.RequestResult{}, fmt.Errorf("cache_tier_selector: state_get %s refused: %s", decisionKey, herr.Message)
@@ -241,10 +241,10 @@ func init() {
 				if err != nil {
 					return sdk.RequestResult{}, err
 				}
-				if herr.Code == pbv2.ErrorCode_ERROR_CODE_NOT_FOUND {
+				if herr.Code == pbv1.ErrorCode_ERROR_CODE_NOT_FOUND {
 					// Already gone — fine.
-				} else if herr.Code == pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED ||
-					herr.Code == pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE {
+				} else if herr.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED ||
+					herr.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE {
 					// Advisory: decline (an expired decision held in place is
 					// harmless — the marker stays sticky).
 					return sdk.PassRequest(), nil
@@ -353,7 +353,7 @@ func recordActivity(convKey string, now int64) (activity, error) {
 	case err != nil:
 		return act, err // transport/protocol/frame
 	case herr != nil && !sdk.IsNotFound(herr):
-		if herr.Code != pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED && herr.Code != pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE {
+		if herr.Code != pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED && herr.Code != pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE {
 			return act, fmt.Errorf("cache_tier_selector: state_get %s refused: %s", key, herr.Message)
 		}
 		// Advisory: proceed with fresh history; the decision persist gates
@@ -460,8 +460,8 @@ func logStateError(operation string, err error) {
 // no-marker request can be declined before pricing and before any state
 // access. The SDK owns the projection and its descriptor inventory; the
 // plugin pins the decision-key consequence in its tests.
-func decisionKey(req *pbv2.ChatRequest) (key string, hasBreakpoint bool, err error) {
-	prefix, has, err := pbv2.RequestObservablePrefix(req)
+func decisionKey(req *pbv1.ChatRequest) (key string, hasBreakpoint bool, err error) {
+	prefix, has, err := pbv1.RequestObservablePrefix(req)
 	if err != nil {
 		return "", false, err
 	}
@@ -476,7 +476,7 @@ func decisionKey(req *pbv2.ChatRequest) (key string, hasBreakpoint bool, err err
 // avoids a pointless re-serialisation. The ONLY request mutation this
 // plugin performs is the cache-control marker — governed by
 // ir.cache_control.write.
-func replaceMarker(req *pbv2.ChatRequest, marker map[string]any) (bool, error) {
+func replaceMarker(req *pbv1.ChatRequest, marker map[string]any) (bool, error) {
 	if marker == nil {
 		return false, nil
 	}
@@ -484,8 +484,8 @@ func replaceMarker(req *pbv2.ChatRequest, marker map[string]any) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	changed, err := pbv2.ReplaceLastCacheBreakpoint(req, raw)
-	if errors.Is(err, pbv2.ErrNoCacheBreakpoint) {
+	changed, err := pbv1.ReplaceLastCacheBreakpoint(req, raw)
+	if errors.Is(err, pbv1.ErrNoCacheBreakpoint) {
 		// The carrier vanished (e.g. a downstream plugin removed it): decline
 		// without mutation — the sentinel guarantees the request is
 		// unchanged — and without touching state.
@@ -501,7 +501,7 @@ type hostMeta struct {
 
 // readHostMeta decodes it. Empty fields mean the host did not supply them, in
 // which case the plugin declines to act rather than guessing.
-func readHostMeta(req *pbv2.ChatRequest) hostMeta {
+func readHostMeta(req *pbv1.ChatRequest) hostMeta {
 	var meta hostMeta
 	if len(req.ToranaMetaJson) == 0 {
 		return meta

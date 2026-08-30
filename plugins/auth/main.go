@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -49,8 +49,8 @@ const maxVerifyMessageBytes = 1024
 // distinct by construction; the namespace keeps the two composition kinds
 // domain-separated.
 const (
-	identityNamespace    = "auth-identity-v2"
-	verifiedKeyNamespace = "auth-verified-key-v2"
+	identityNamespace    = "auth-identity"
+	verifiedKeyNamespace = "auth-verified-key"
 )
 
 // VerifyResponse is the strictly validated response to verify_virtual_key.
@@ -90,7 +90,7 @@ const (
 )
 
 func init() {
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv2.ChatRequest) (sdk.RequestResult, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
 		headers, err := requestHeaders(req)
 		if err != nil {
 			return sdk.RequestResult{}, err
@@ -134,7 +134,7 @@ func init() {
 // invalid JSON — is a protocol defect, and the decode is lossless
 // (decodeJSONObject) so no header byte is normalized before the token
 // grammar sees it.
-func requestHeaders(req *pbv2.ChatRequest) (map[string]any, error) {
+func requestHeaders(req *pbv1.ChatRequest) (map[string]any, error) {
 	if len(req.ToranaMetaJson) == 0 {
 		return nil, nil
 	}
@@ -150,7 +150,7 @@ func requestHeaders(req *pbv2.ChatRequest) (map[string]any, error) {
 }
 
 // validVirtualKey is the ONE virtual-key validator shared by both header
-// sources. The v2 token grammar is explicitly ASCII: the prefix "sk-torana-"
+// sources. The token grammar is explicitly ASCII: the prefix "sk-torana-"
 // followed by at least one printable ASCII byte (0x21..0x7e), with no
 // controls, whitespace, DEL, non-ASCII, or empty suffix. ASCII is the
 // normative token grammar for a simple, interoperable, byte-stable
@@ -259,7 +259,7 @@ func verifyVirtualKey(token string) (string, verifyOutcome, error) {
 	}
 	if herr != nil {
 		switch herr.Code {
-		case pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE:
+		case pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE:
 			// The verifier is unwired or temporarily unavailable: advisory.
 			// No identity is possible — this plugin is the only source.
 			return "", verifyNoIdentity, nil

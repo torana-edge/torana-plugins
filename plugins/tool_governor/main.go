@@ -12,8 +12,8 @@ import (
 	"slices"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
-	"github.com/torana-edge/torana-plugin-sdk/pb/v2/jsontext"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
+	"github.com/torana-edge/torana-plugin-sdk/pb/v1/jsontext"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -34,7 +34,7 @@ type policy struct {
 }
 
 func init() {
-	sdk.OnBeforeRequest(func(_ context.Context, req *pbv2.ChatRequest) (sdk.RequestResult, error) {
+	sdk.OnBeforeRequest(func(_ context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
 		p, err := parsePolicy([]byte(sdk.PluginConfig()))
 		if err != nil {
 			return sdk.RequestResult{}, fmt.Errorf("tool_governor: invalid configuration: %w", err)
@@ -215,7 +215,7 @@ func expectEOF(dec *json.Decoder) error {
 	return nil
 }
 
-func applyPolicy(req *pbv2.ChatRequest, p policy) (*pbv2.ChatRequest, bool, error) {
+func applyPolicy(req *pbv1.ChatRequest, p policy) (*pbv1.ChatRequest, bool, error) {
 	if req == nil {
 		return nil, false, fmt.Errorf("tool_governor: nil request")
 	}
@@ -253,8 +253,8 @@ func applyPolicy(req *pbv2.ChatRequest, p policy) (*pbv2.ChatRequest, bool, erro
 		return req, false, nil
 	}
 
-	out := proto.Clone(req).(*pbv2.ChatRequest)
-	retained := make([]*pbv2.ToolDef, 0, len(out.Tools))
+	out := proto.Clone(req).(*pbv1.ChatRequest)
+	retained := make([]*pbv1.ToolDef, 0, len(out.Tools))
 	for i, tool := range out.Tools {
 		if !keep[i] {
 			continue

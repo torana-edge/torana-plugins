@@ -5,13 +5,13 @@ import (
 	"strings"
 	"testing"
 
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"github.com/torana-edge/torana-plugin-sdk/sdktest"
 	"google.golang.org/protobuf/proto"
 )
 
-func tool(name, description, parameters string, strict bool, marker string) *pbv2.ToolDef {
-	return &pbv2.ToolDef{
+func tool(name, description, parameters string, strict bool, marker string) *pbv1.ToolDef {
+	return &pbv1.ToolDef{
 		Name:             name,
 		Description:      description,
 		ParametersJson:   []byte(parameters),
@@ -20,11 +20,11 @@ func tool(name, description, parameters string, strict bool, marker string) *pbv
 	}
 }
 
-func requestWithTools(tools ...*pbv2.ToolDef) *pbv2.ChatRequest {
-	return &pbv2.ChatRequest{
+func requestWithTools(tools ...*pbv1.ToolDef) *pbv1.ChatRequest {
+	return &pbv1.ChatRequest{
 		Model: "model",
-		Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{{
-			Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "help"}},
+		Messages: []*pbv1.Message{{Role: "user", Blocks: []*pbv1.RequestBlock{{
+			Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "help"}},
 		}}}},
 		Tools: tools,
 	}
@@ -96,7 +96,7 @@ func TestApplyPolicyFiltersAndReplacesStructurally(t *testing.T) {
 		tool("search", "keep", `{"q":1}`, false, `{"ttl":"1h"}`),
 		tool("shell", "remove", `{}`, false, ``),
 	)
-	before := proto.Clone(input).(*pbv2.ChatRequest)
+	before := proto.Clone(input).(*pbv1.ChatRequest)
 	p, err := parsePolicy([]byte(`{
 		"allow":["read","search"],
 		"deny":["shell"],
@@ -112,7 +112,7 @@ func TestApplyPolicyFiltersAndReplacesStructurally(t *testing.T) {
 	if !proto.Equal(input, before) {
 		t.Fatal("input request was mutated")
 	}
-	expected := proto.Clone(before).(*pbv2.ChatRequest)
+	expected := proto.Clone(before).(*pbv1.ChatRequest)
 	expected.Tools = expected.Tools[:2]
 	expected.Tools[0].Description = "approved"
 	expected.Tools[0].ParametersJson = []byte(`{"a":1.0}`)
@@ -128,7 +128,7 @@ func TestApplyPolicyFiltersAndReplacesStructurally(t *testing.T) {
 
 func TestApplyPolicyNoopAndRemoveAll(t *testing.T) {
 	input := requestWithTools(tool("read", "d", `{}`, false, `{"x":1}`))
-	before := proto.Clone(input).(*pbv2.ChatRequest)
+	before := proto.Clone(input).(*pbv1.ChatRequest)
 
 	noop, err := parsePolicy([]byte(`{"replace":{"absent":{"strict":true},"read":{"description":"d","parameters":{},"strict":false}}}`))
 	if err != nil {
@@ -154,7 +154,7 @@ func TestApplyPolicyNoopAndRemoveAll(t *testing.T) {
 
 func TestApplyPolicyDuplicateInputIsAtomic(t *testing.T) {
 	input := requestWithTools(tool("read", "a", `{}`, false, ``), tool("read", "b", `{}`, false, ``))
-	before := proto.Clone(input).(*pbv2.ChatRequest)
+	before := proto.Clone(input).(*pbv1.ChatRequest)
 	p, err := parsePolicy([]byte(`{"deny":["read"]}`))
 	if err != nil {
 		t.Fatal(err)
@@ -175,12 +175,12 @@ func TestHookUsesOnlyConfigAndReturnsExactReplacement(t *testing.T) {
 		tool("read", "old", `{}`, false, `{"type":"ephemeral"}`),
 		tool("shell", "danger", `{}`, false, ``),
 	)
-	before := proto.Clone(input).(*pbv2.ChatRequest)
+	before := proto.Clone(input).(*pbv1.ChatRequest)
 	res := h.BeforeRequest(input)
 	if res.Err != nil || res.Request == nil || res.PassedThrough {
 		t.Fatalf("result = %+v", res)
 	}
-	expected := proto.Clone(before).(*pbv2.ChatRequest)
+	expected := proto.Clone(before).(*pbv1.ChatRequest)
 	expected.Tools = expected.Tools[:1]
 	expected.Tools[0].Description = "approved"
 	if !proto.Equal(res.Request, expected) {
@@ -199,7 +199,7 @@ func TestHookInvalidPolicyFailsClosedWithoutMutation(t *testing.T) {
 	h := sdktest.New(t)
 	h.SetConfig(`{"allow":["read"],"deny":["read"]}`)
 	input := requestWithTools(tool("read", "d", `{}`, false, ``))
-	before := proto.Clone(input).(*pbv2.ChatRequest)
+	before := proto.Clone(input).(*pbv1.ChatRequest)
 	res := h.BeforeRequest(input)
 	if res.Err == nil || !strings.Contains(res.Err.Error(), "invalid configuration") {
 		t.Fatalf("error = %v", res.Err)
