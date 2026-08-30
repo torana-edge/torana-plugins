@@ -11,7 +11,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -219,7 +219,7 @@ func init() {
 	// (no partial schema mutation escapes); a contract/protocol failure is a
 	// hook error. A request with no tools needs no envelope: a conforming
 	// response cannot contain a tool call for it.
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv2.ChatRequest) (sdk.RequestResult, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
 		if len(req.Tools) == 0 {
 			return sdk.PassRequest(), nil
 		}
@@ -265,7 +265,7 @@ func init() {
 	//     translated" — successive calls may land on different WASM
 	//     instances — so pass-through requires positive proof.
 	asm := sdk.NewStreamAssembler().WithToolAssembly()
-	sdk.OnStreamChunk(func(ctx context.Context, ev *pbv2.StreamEvent) (sdk.StreamResult, error) {
+	sdk.OnStreamChunk(func(ctx context.Context, ev *pbv1.StreamEvent) (sdk.StreamResult, error) {
 		fr := asm.Feed(ev)
 		if fr.Err != nil {
 			return sdk.StreamResult{}, fr.Err
@@ -328,7 +328,7 @@ func handleAssembled(call sdk.ToolCall) (sdk.StreamResult, error) {
 // value change (already closed, different key order, whitespace, numeric
 // spellings) keeps its ORIGINAL raw bytes instead of being canonicalized, so
 // a pass stays a pass and prompt-cache bytes are untouched (review F4).
-func translateTools(tools []*pbv2.ToolDef) (*registry, []*pbv2.ToolDef, bool) {
+func translateTools(tools []*pbv1.ToolDef) (*registry, []*pbv1.ToolDef, bool) {
 	counts := make(map[string]int, len(tools))
 	for _, t := range tools {
 		if t == nil {
@@ -338,7 +338,7 @@ func translateTools(tools []*pbv2.ToolDef) (*registry, []*pbv2.ToolDef, bool) {
 	}
 
 	reg := &registry{version: 1, tools: make(map[string][]mutationPath)}
-	newTools := make([]*pbv2.ToolDef, 0, len(tools))
+	newTools := make([]*pbv1.ToolDef, 0, len(tools))
 	changed := false
 
 	for _, tool := range tools {
@@ -347,7 +347,7 @@ func translateTools(tools []*pbv2.ToolDef) (*registry, []*pbv2.ToolDef, bool) {
 			newTools = append(newTools, nil)
 			continue
 		}
-		nt := proto.Clone(tool).(*pbv2.ToolDef)
+		nt := proto.Clone(tool).(*pbv1.ToolDef)
 		if !validJSONString(tool.Name) || counts[tool.Name] > 1 || len(tool.ParametersJson) == 0 {
 			// An invalid tool name would be normalized by the envelope's JSON
 			// encoding, making the recorded key unreachable or shared; it is
@@ -405,9 +405,9 @@ func validJSONString(s string) bool {
 
 // isAdvisory reports whether a refusal code means "try without this
 // capability" rather than "this call was wrong".
-func isAdvisory(code pbv2.ErrorCode) bool {
-	return code == pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED ||
-		code == pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE
+func isAdvisory(code pbv1.ErrorCode) bool {
+	return code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED ||
+		code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE
 }
 
 // ==========================================================================

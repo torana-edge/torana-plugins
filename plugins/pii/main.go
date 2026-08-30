@@ -41,7 +41,7 @@ import (
 	"unicode/utf8"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -154,7 +154,7 @@ func extractScannable(view sdk.ToolResultView) extraction {
 }
 
 func init() {
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv2.ChatRequest) (sdk.RequestResult, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
 		loadConfig()
 
 		// tool_call_id → tool name (the ordered tool-use blocks), so the
@@ -221,7 +221,7 @@ func init() {
 					return sdk.RequestResult{}, err
 				}
 				if herr != nil && !sdk.IsNotFound(herr) {
-					if herr.Code == pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED || herr.Code == pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE {
+					if herr.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED || herr.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE {
 						// Advisory: decline the cache, still scan.
 					} else {
 						return sdk.RequestResult{}, fmt.Errorf("pii: cache_get refused: %s", herr.Message)
@@ -399,7 +399,7 @@ func modelScan(content, toolName string) ([]finding, error) {
 		// contract refusals are the caller's/host's defect — the hook errors
 		// regardless of on_error.
 		switch herr.Code {
-		case pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE:
+		case pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE:
 			return nil, &scannerFailure{"pii scan failed: " + herr.Message}
 		default:
 			return nil, fmt.Errorf("pii offload refused: %s", herr.Message)

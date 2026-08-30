@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"github.com/torana-edge/torana-plugin-sdk/sdktest"
 	"google.golang.org/protobuf/proto"
 )
@@ -16,10 +16,10 @@ import (
 // Pure helpers
 // ==========================================================================
 
-func msg(role, content string) *pbv2.Message {
-	return &pbv2.Message{Role: role, Blocks: []*pbv2.RequestBlock{
-		{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: content}}},
-		{Kind: &pbv2.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pbv2.RequestCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}},
+func msg(role, content string) *pbv1.Message {
+	return &pbv1.Message{Role: role, Blocks: []*pbv1.RequestBlock{
+		{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: content}}},
+		{Kind: &pbv1.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pbv1.RequestCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}},
 	}}
 }
 
@@ -28,7 +28,7 @@ func msg(role, content string) *pbv2.Message {
 // block position, so tests assert the row-designated carrier directly
 // instead of re-implementing the SDK's ordered carrier discovery (which
 // would reintroduce the drift class the SDK-owned seam eliminates).
-func carrierMarkerAt(t *testing.T, req *pbv2.ChatRequest, msg, block int) []byte {
+func carrierMarkerAt(t *testing.T, req *pbv1.ChatRequest, msg, block int) []byte {
 	t.Helper()
 	cb := req.Messages[msg].Blocks[block].GetCacheBreakpoint()
 	if cb == nil {
@@ -38,7 +38,7 @@ func carrierMarkerAt(t *testing.T, req *pbv2.ChatRequest, msg, block int) []byte
 }
 
 // keyFor is a thin test wrapper over the PRODUCTION decisionKey helper.
-func keyFor(t *testing.T, req *pbv2.ChatRequest) string {
+func keyFor(t *testing.T, req *pbv1.ChatRequest) string {
 	t.Helper()
 	k, _, err := decisionKey(req)
 	if err != nil {
@@ -47,10 +47,10 @@ func keyFor(t *testing.T, req *pbv2.ChatRequest) string {
 	return k
 }
 
-func baseRequest() *pbv2.ChatRequest {
-	return &pbv2.ChatRequest{
+func baseRequest() *pbv1.ChatRequest {
+	return &pbv1.ChatRequest{
 		Model:    "claude-sonnet-4",
-		Messages: []*pbv2.Message{msg("system", "you are a coding agent"), msg("user", "find the bug")},
+		Messages: []*pbv1.Message{msg("system", "you are a coding agent"), msg("user", "find the bug")},
 	}
 }
 
@@ -85,22 +85,22 @@ func TestDecisionWithoutUsableClockOrTTLDoesNotExpire(t *testing.T) {
 // safety settings, generation params) folds into the decision key, while
 // stream and torana_meta_json (the projection's only exclusions) do not.
 func TestDecisionKeySensitivity(t *testing.T) {
-	included := map[string]func(*pbv2.ChatRequest){
-		"model": func(r *pbv2.ChatRequest) { r.Model = "m2" },
-		"tools": func(r *pbv2.ChatRequest) {
-			r.Tools = []*pbv2.ToolDef{{Name: "read", Description: "d", ParametersJson: []byte(`{}`)}}
+	included := map[string]func(*pbv1.ChatRequest){
+		"model": func(r *pbv1.ChatRequest) { r.Model = "m2" },
+		"tools": func(r *pbv1.ChatRequest) {
+			r.Tools = []*pbv1.ToolDef{{Name: "read", Description: "d", ParametersJson: []byte(`{}`)}}
 		},
-		"messages":                 func(r *pbv2.ChatRequest) { r.Messages[0].Blocks[0].GetText().Text = "changed" },
-		"provider_extensions_json": func(r *pbv2.ChatRequest) { r.ProviderExtensionsJson = []byte(`{"x":1}`) },
-		"safety_settings_json":     func(r *pbv2.ChatRequest) { r.SafetySettingsJson = []byte(`[]`) },
-		"max_tokens":               func(r *pbv2.ChatRequest) { r.MaxTokens = proto.Int32(64) },
-		"temperature":              func(r *pbv2.ChatRequest) { r.Temperature = proto.Float64(0.5) },
-		"top_p":                    func(r *pbv2.ChatRequest) { r.TopP = proto.Float64(0.9) },
-		"stop_sequences":           func(r *pbv2.ChatRequest) { r.StopSequences = []string{"END"} },
+		"messages":                 func(r *pbv1.ChatRequest) { r.Messages[0].Blocks[0].GetText().Text = "changed" },
+		"provider_extensions_json": func(r *pbv1.ChatRequest) { r.ProviderExtensionsJson = []byte(`{"x":1}`) },
+		"safety_settings_json":     func(r *pbv1.ChatRequest) { r.SafetySettingsJson = []byte(`[]`) },
+		"max_tokens":               func(r *pbv1.ChatRequest) { r.MaxTokens = proto.Int32(64) },
+		"temperature":              func(r *pbv1.ChatRequest) { r.Temperature = proto.Float64(0.5) },
+		"top_p":                    func(r *pbv1.ChatRequest) { r.TopP = proto.Float64(0.9) },
+		"stop_sequences":           func(r *pbv1.ChatRequest) { r.StopSequences = []string{"END"} },
 	}
-	excluded := map[string]func(*pbv2.ChatRequest){
-		"stream":           func(r *pbv2.ChatRequest) { r.Stream = true },
-		"torana_meta_json": func(r *pbv2.ChatRequest) { r.ToranaMetaJson = []byte(`{"_provider":"x"}`) },
+	excluded := map[string]func(*pbv1.ChatRequest){
+		"stream":           func(r *pbv1.ChatRequest) { r.Stream = true },
+		"torana_meta_json": func(r *pbv1.ChatRequest) { r.ToranaMetaJson = []byte(`{"_provider":"x"}`) },
 	}
 	for name, mutate := range included {
 		t.Run("included/"+name, func(t *testing.T) {
@@ -130,7 +130,7 @@ func TestDecisionKeySensitivity(t *testing.T) {
 	t.Run("suffix messages excluded", func(t *testing.T) {
 		before := keyFor(t, baseRequest())
 		extended := baseRequest()
-		extended.Messages = append(extended.Messages, &pbv2.Message{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "thinking out loud"}}}}})
+		extended.Messages = append(extended.Messages, &pbv1.Message{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "thinking out loud"}}}}})
 		if got := keyFor(t, extended); got != before {
 			t.Errorf("an unmarked message after the breakpoint changed the decision key")
 		}
@@ -197,7 +197,7 @@ func countCommand(h *sdktest.Harness, cmd string) int {
 }
 
 // reqWith builds a request with a breakpoint + host meta.
-func reqWith(t *testing.T, h *sdktest.Harness) *pbv2.ChatRequest {
+func reqWith(t *testing.T, h *sdktest.Harness) *pbv1.ChatRequest {
 	t.Helper()
 	req := baseRequest()
 	req.ToranaMetaJson = []byte(`{"_provider":"anthropic","_conversation_id":"conv-1"}`)
@@ -223,7 +223,7 @@ func TestModeOffIsInert(t *testing.T) {
 func TestNoBreakpointPasses(t *testing.T) {
 	h := newHarness(t)
 	h.StubHostCall("torana_cache_pricing", pricingStub())
-	req := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}}}}
+	req := &pbv1.ChatRequest{Model: "m", Messages: []*pbv1.Message{{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "hi"}}}}}}}
 	req.ToranaMetaJson = []byte(`{"_provider":"anthropic"}`)
 	res := h.BeforeRequest(req)
 	if res.Err != nil || !res.PassedThrough {
@@ -244,7 +244,7 @@ func TestNoBreakpointPasses(t *testing.T) {
 func TestPricingAdvisoryDeclinesContractErrors(t *testing.T) {
 	h := newHarness(t)
 	h.StubHostCall("torana_cache_pricing", func(string) (string, error) {
-		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no pricing"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no pricing"), nil
 	})
 	res := h.BeforeRequest(reqWith(t, h))
 	if res.Err != nil || !res.PassedThrough {
@@ -253,7 +253,7 @@ func TestPricingAdvisoryDeclinesContractErrors(t *testing.T) {
 
 	h2 := newHarness(t)
 	h2.StubHostCall("torana_cache_pricing", func(string) (string, error) {
-		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub"), nil
 	})
 	res2 := h2.BeforeRequest(reqWith(t, h2))
 	if res2.Err == nil {
@@ -336,7 +336,7 @@ func TestNoClockPasses(t *testing.T) {
 	h := newHarness(t)
 	h.StubHostCall("torana_cache_pricing", pricingStub())
 	h.StubHostCall("env.now", func(string) (string, error) {
-		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no clock"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no clock"), nil
 	})
 	res := h.BeforeRequest(reqWith(t, h))
 	if res.Err != nil || !res.PassedThrough {
@@ -350,7 +350,7 @@ func TestNoClockPasses(t *testing.T) {
 	h2 := newHarness(t)
 	h2.StubHostCall("torana_cache_pricing", pricingStub())
 	h2.StubHostCall("env.now", func(string) (string, error) {
-		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub"), nil
 	})
 	if res2 := h2.BeforeRequest(reqWith(t, h2)); res2.Err == nil {
 		t.Fatal("contract clock refusal must error the hook")
@@ -458,7 +458,7 @@ func TestDecisionPersistRefusals(t *testing.T) {
 	h.SetNow(1_000_000)
 	h.SeedState("activity/conv-1", mustJSON(t, activity{LastSeenMillis: 999_000, LongestGapMillis: 2_000_000, Turns: 2}))
 	h.StubHostCall("env.state_set", func(string) (string, error) {
-		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no store"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no store"), nil
 	})
 	res := h.BeforeRequest(reqWith(t, h))
 	if res.Err != nil || !res.PassedThrough {
@@ -540,8 +540,8 @@ func TestApplyMarkerMatchingMarkerPasses(t *testing.T) {
 		t.Fatalf("marker not applied: %s", carrierMarkerAt(t, req2, 1, 1))
 	}
 	// No carrier: the sentinel declines without mutation.
-	nomark := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}}}}
-	before := proto.Clone(nomark).(*pbv2.ChatRequest)
+	nomark := &pbv1.ChatRequest{Model: "m", Messages: []*pbv1.Message{{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "hi"}}}}}}}
+	before := proto.Clone(nomark).(*pbv1.ChatRequest)
 	changed, err = replaceMarker(nomark, map[string]any{"type": "ephemeral"})
 	if err != nil || changed {
 		t.Fatalf("no-carrier sentinel: changed=%v err=%v, want decline", changed, err)
@@ -676,7 +676,7 @@ func TestStoredDecisionClockClassification(t *testing.T) {
 	h := newHarness(t)
 	h.StubHostCall("torana_cache_pricing", pricingStub())
 	h.StubHostCall("env.now", func(string) (string, error) {
-		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no clock"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no clock"), nil
 	})
 	req := reqWith(t, h)
 	h.SeedState("decision/"+keyFor(t, req), mustJSON(t, decision{
@@ -691,7 +691,7 @@ func TestStoredDecisionClockClassification(t *testing.T) {
 	h2 := newHarness(t)
 	h2.StubHostCall("torana_cache_pricing", pricingStub())
 	h2.StubHostCall("env.now", func(string) (string, error) {
-		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub"), nil
 	})
 	req2 := reqWith(t, h2)
 	h2.SeedState("decision/"+keyFor(t, req2), mustJSON(t, decision{
@@ -713,7 +713,7 @@ func TestActivityPersistenceFailureClasses(t *testing.T) {
 	h.SetNow(1_000_000)
 	h.StubHostCall("env.state_set", func(args string) (string, error) {
 		if strings.Contains(args, "activity/") {
-			return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no store"), nil
+			return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no store"), nil
 		}
 		return sdktest.HostResultValue(nil), nil
 	})
@@ -767,40 +767,40 @@ func TestActivityPersistenceFailureClasses(t *testing.T) {
 func TestCarrierHookRows(t *testing.T) {
 	marker := map[string]any{"type": "ephemeral", "ttl": "1h"}
 	markerBytes := []byte(mustJSON(t, marker))
-	nestedReq := func() *pbv2.ChatRequest {
-		return &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{
-			{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "a"}}},
-			{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: &pbv2.RequestToolResultBlock{
+	nestedReq := func() *pbv1.ChatRequest {
+		return &pbv1.ChatRequest{Model: "m", Messages: []*pbv1.Message{{Role: "user", Blocks: []*pbv1.RequestBlock{
+			{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "a"}}},
+			{Kind: &pbv1.RequestBlock_ToolResult{ToolResult: &pbv1.RequestToolResultBlock{
 				ToolCallId: "c1",
-				Content: []*pbv2.ToolResultContentBlock{
-					{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: "r"}}},
-					{Kind: &pbv2.ToolResultContentBlock_CacheBreakpoint{CacheBreakpoint: &pbv2.ToolResultCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}},
+				Content: []*pbv1.ToolResultContentBlock{
+					{Kind: &pbv1.ToolResultContentBlock_Text{Text: &pbv1.ToolResultTextBlock{Text: "r"}}},
+					{Kind: &pbv1.ToolResultContentBlock_CacheBreakpoint{CacheBreakpoint: &pbv1.ToolResultCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}},
 				},
 			}}},
 		}}}}
 	}
 	rows := []struct {
 		name  string
-		req   *pbv2.ChatRequest
+		req   *pbv1.ChatRequest
 		mixed bool // earlier tool carrier must stay byte-identical
 		// expected mutates the independent expected request: ONLY the
 		// row-designated last carrier receives the exact marker bytes.
-		expected func(t *testing.T, e *pbv2.ChatRequest)
+		expected func(t *testing.T, e *pbv1.ChatRequest)
 	}{
 		{
 			"tool carrier",
-			func() *pbv2.ChatRequest {
-				return &pbv2.ChatRequest{Model: "m",
-					Tools:    []*pbv2.ToolDef{{Name: "read", Description: "d", ParametersJson: []byte(`{}`), CacheControlJson: []byte(`{"type":"ephemeral"}`)}},
-					Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}}},
+			func() *pbv1.ChatRequest {
+				return &pbv1.ChatRequest{Model: "m",
+					Tools:    []*pbv1.ToolDef{{Name: "read", Description: "d", ParametersJson: []byte(`{}`), CacheControlJson: []byte(`{"type":"ephemeral"}`)}},
+					Messages: []*pbv1.Message{{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "hi"}}}}}},
 				}
 			}(), false,
-			func(t *testing.T, e *pbv2.ChatRequest) { e.Tools[0].CacheControlJson = markerBytes },
+			func(t *testing.T, e *pbv1.ChatRequest) { e.Tools[0].CacheControlJson = markerBytes },
 		},
 		{
 			"outer carrier",
-			func() *pbv2.ChatRequest { return baseRequest() }(), false,
-			func(t *testing.T, e *pbv2.ChatRequest) {
+			func() *pbv1.ChatRequest { return baseRequest() }(), false,
+			func(t *testing.T, e *pbv1.ChatRequest) {
 				msgs := e.Messages[len(e.Messages)-1].Blocks
 				msgs[len(msgs)-1].GetCacheBreakpoint().MarkerJson = markerBytes
 			},
@@ -808,19 +808,19 @@ func TestCarrierHookRows(t *testing.T) {
 		{
 			"nested carrier",
 			nestedReq(), false,
-			func(t *testing.T, e *pbv2.ChatRequest) {
+			func(t *testing.T, e *pbv1.ChatRequest) {
 				tr := e.Messages[0].Blocks[1].GetToolResult()
 				tr.Content[len(tr.Content)-1].GetCacheBreakpoint().MarkerJson = markerBytes
 			},
 		},
 		{
 			"mixed tool + outer (last = outer)",
-			func() *pbv2.ChatRequest {
+			func() *pbv1.ChatRequest {
 				r := baseRequest()
-				r.Tools = []*pbv2.ToolDef{{Name: "read", Description: "d", ParametersJson: []byte(`{}`), CacheControlJson: []byte(`{"type":"ephemeral"}`)}}
+				r.Tools = []*pbv1.ToolDef{{Name: "read", Description: "d", ParametersJson: []byte(`{}`), CacheControlJson: []byte(`{"type":"ephemeral"}`)}}
 				return r
 			}(), true,
-			func(t *testing.T, e *pbv2.ChatRequest) {
+			func(t *testing.T, e *pbv1.ChatRequest) {
 				msgs := e.Messages[len(e.Messages)-1].Blocks
 				msgs[len(msgs)-1].GetCacheBreakpoint().MarkerJson = markerBytes
 				// The earlier tool carrier stays at the seed marker.
@@ -833,7 +833,7 @@ func TestCarrierHookRows(t *testing.T) {
 			// Inject metadata FIRST, then take the ONE immutable input
 			// baseline.
 			row.req.ToranaMetaJson = []byte(`{"_provider":"anthropic","_conversation_id":"conv-1"}`)
-			inputBaseline := proto.Clone(row.req).(*pbv2.ChatRequest)
+			inputBaseline := proto.Clone(row.req).(*pbv1.ChatRequest)
 
 			h := newHarness(t)
 			h.StubHostCall("torana_cache_pricing", pricingStub())
@@ -853,7 +853,7 @@ func TestCarrierHookRows(t *testing.T) {
 				t.Fatalf("sticky reapplication failed: err=%v", res.Err)
 			}
 			// 2+3: independent expected request; single structural equality.
-			expected := proto.Clone(inputBaseline).(*pbv2.ChatRequest)
+			expected := proto.Clone(inputBaseline).(*pbv1.ChatRequest)
 			row.expected(t, expected)
 			if !proto.Equal(res.Request, expected) {
 				t.Fatalf("result is not exactly the expected request\n got: %v\nwant: %v", res.Request, expected)
@@ -876,7 +876,7 @@ func TestCarrierHookRows(t *testing.T) {
 				TierTTL:         3600,
 				DecidedAtMillis: 900_000,
 			}))
-			replay := proto.Clone(res.Request).(*pbv2.ChatRequest)
+			replay := proto.Clone(res.Request).(*pbv1.ChatRequest)
 			res2 := h.BeforeRequest(replay)
 			if res2.Err != nil || !res2.PassedThrough {
 				t.Fatalf("byte-identical replay must pass through, err=%v", res2.Err)
@@ -897,11 +897,11 @@ func TestCarrierHookRows(t *testing.T) {
 // NO host calls beyond the mode read (env.plugin_config), and the request
 // is byte/structurally unchanged.
 func TestDeclineProofsZeroCallsNoMutation(t *testing.T) {
-	invalid := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{{Role: "user", Blocks: nil}}}
-	noMarker := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}}}}
+	invalid := &pbv1.ChatRequest{Model: "m", Messages: []*pbv1.Message{{Role: "user", Blocks: nil}}}
+	noMarker := &pbv1.ChatRequest{Model: "m", Messages: []*pbv1.Message{{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "hi"}}}}}}}
 	rows := []struct {
 		name string
-		req  *pbv2.ChatRequest
+		req  *pbv1.ChatRequest
 	}{
 		{"invalid out-of-domain", invalid},
 		{"no marker", noMarker},
@@ -910,7 +910,7 @@ func TestDeclineProofsZeroCallsNoMutation(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			h := newHarness(t)
 			h.StubHostCall("torana_cache_pricing", pricingStub())
-			before := proto.Clone(row.req).(*pbv2.ChatRequest)
+			before := proto.Clone(row.req).(*pbv1.ChatRequest)
 			res := h.BeforeRequest(row.req)
 			if res.Err != nil || !res.PassedThrough {
 				t.Fatalf("must pass unchanged, err=%v", res.Err)

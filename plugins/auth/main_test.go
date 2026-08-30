@@ -9,7 +9,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"github.com/torana-edge/torana-plugin-sdk/sdktest"
 )
 
@@ -176,14 +176,14 @@ func newHarness(t *testing.T) *sdktest.Harness {
 	return sdktest.New(t)
 }
 
-func reqWithHeaders(headers map[string]string) *pbv2.ChatRequest {
+func reqWithHeaders(headers map[string]string) *pbv1.ChatRequest {
 	meta := map[string]any{"_request_headers": map[string]any{}}
 	hm := meta["_request_headers"].(map[string]any)
 	for k, v := range headers {
 		hm[k] = v
 	}
 	raw, _ := json.Marshal(meta)
-	return &pbv2.ChatRequest{ToranaMetaJson: raw}
+	return &pbv1.ChatRequest{ToranaMetaJson: raw}
 }
 
 // stubVerify installs a verify_virtual_key backend. respond receives the
@@ -221,7 +221,7 @@ func identityCalls(t *testing.T, h *sdktest.Harness) []string {
 		if c.Command != "env.set_identity" {
 			continue
 		}
-		var a pbv2.SetIdentityArgs
+		var a pbv1.SetIdentityArgs
 		if err := proto.Unmarshal([]byte(c.Args), &a); err != nil {
 			t.Fatalf("set_identity args: %v", err)
 		}
@@ -422,9 +422,9 @@ func TestMalformedFrameIsHookError(t *testing.T) {
 // TestHostErrorTable — NOT_CONFIGURED/UNAVAILABLE are advisory (no verdict,
 // pass); every other code is a contract failure (hook error).
 func TestHostErrorTable(t *testing.T) {
-	advisory := map[string]pbv2.ErrorCode{
-		"NOT_CONFIGURED": pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED,
-		"UNAVAILABLE":    pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE,
+	advisory := map[string]pbv1.ErrorCode{
+		"NOT_CONFIGURED": pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED,
+		"UNAVAILABLE":    pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE,
 	}
 	for name, code := range advisory {
 		t.Run(name+" advisory", func(t *testing.T) {
@@ -441,11 +441,11 @@ func TestHostErrorTable(t *testing.T) {
 			}
 		})
 	}
-	contract := map[string]pbv2.ErrorCode{
-		"NOT_FOUND":         pbv2.ErrorCode_ERROR_CODE_NOT_FOUND,
-		"PERMISSION_DENIED": pbv2.ErrorCode_ERROR_CODE_PERMISSION_DENIED,
-		"INVALID_ARGUMENT":  pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT,
-		"INTERNAL":          pbv2.ErrorCode_ERROR_CODE_INTERNAL,
+	contract := map[string]pbv1.ErrorCode{
+		"NOT_FOUND":         pbv1.ErrorCode_ERROR_CODE_NOT_FOUND,
+		"PERMISSION_DENIED": pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED,
+		"INVALID_ARGUMENT":  pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT,
+		"INTERNAL":          pbv1.ErrorCode_ERROR_CODE_INTERNAL,
 	}
 	for name, code := range contract {
 		t.Run(name+" contract", func(t *testing.T) {
@@ -567,7 +567,7 @@ func TestNoUnauthorizedCalls(t *testing.T) {
 func TestHostErrorMessageNeverLeaks(t *testing.T) {
 	h := newHarness(t)
 	h.StubHostCall("verify_virtual_key", func(args string) (string, error) {
-		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_INTERNAL,
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_INTERNAL,
 			"upstream denied token=sk-torana-secret123 for tenant acme"), nil
 	})
 	res := h.BeforeRequest(reqWithHeaders(map[string]string{"Authorization": "Bearer sk-torana-secret123"}))
@@ -606,7 +606,7 @@ func TestFailureModeScope(t *testing.T) {
 // surface; garbage in it is a defect, not a silent pass.
 func TestMalformedToranaMetaIsHookError(t *testing.T) {
 	h := newHarness(t)
-	res := h.BeforeRequest(&pbv2.ChatRequest{ToranaMetaJson: []byte(`{not json`)})
+	res := h.BeforeRequest(&pbv1.ChatRequest{ToranaMetaJson: []byte(`{not json`)})
 	if res.Err == nil {
 		t.Fatal("malformed ToranaMetaJson must be a hook error")
 	}

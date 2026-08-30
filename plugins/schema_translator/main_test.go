@@ -9,7 +9,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"github.com/torana-edge/torana-plugin-sdk/sdktest"
 )
 
@@ -519,8 +519,8 @@ func newHarness(t *testing.T) *sdktest.Harness {
 	return sdktest.New(t)
 }
 
-func reqWithTools(raw string) *pbv2.ChatRequest {
-	return &pbv2.ChatRequest{Tools: []*pbv2.ToolDef{{
+func reqWithTools(raw string) *pbv1.ChatRequest {
+	return &pbv1.ChatRequest{Tools: []*pbv1.ToolDef{{
 		Name:           "read",
 		ParametersJson: []byte(raw),
 	}}}
@@ -535,7 +535,7 @@ func publishedEnvelope(t *testing.T, h *sdktest.Harness) string {
 		if c.Command != "env.meta_set" {
 			continue
 		}
-		var a pbv2.MetaSetArgs
+		var a pbv1.MetaSetArgs
 		if err := proto.Unmarshal([]byte(c.Args), &a); err != nil {
 			t.Fatalf("meta_set args not a MetaSetArgs: %v", err)
 		}
@@ -557,7 +557,7 @@ func publishedEnvelope(t *testing.T, h *sdktest.Harness) string {
 // envelope (a conforming response cannot contain a tool call for it).
 func TestBeforeRequestNoToolsPublishesNothing(t *testing.T) {
 	h := newHarness(t)
-	res := h.BeforeRequest(&pbv2.ChatRequest{Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}}}})
+	res := h.BeforeRequest(&pbv1.ChatRequest{Messages: []*pbv1.Message{{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "hi"}}}}}}})
 	if !res.PassedThrough || res.Err != nil {
 		t.Fatalf("expected pass-through, got err=%v", res.Err)
 	}
@@ -624,7 +624,7 @@ func TestBeforeRequestUnchangedStillPublishesEmptyEnvelope(t *testing.T) {
 func TestAdvisoryPublicationFailureReturnsOriginalUnchanged(t *testing.T) {
 	h := newHarness(t)
 	h.StubHostCall("env.meta_set", func(args string) (string, error) {
-		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "state dir missing"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "state dir missing"), nil
 	})
 	req := reqWithTools(`{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}}}}`)
 	res := h.BeforeRequest(req)
@@ -681,17 +681,17 @@ func TestReplacedRequestImpliesPresentValidEnvelope(t *testing.T) {
 func TestDuplicateToolNamesAreAllUntranslated(t *testing.T) {
 	cases := []struct {
 		name string
-		req  *pbv2.ChatRequest
+		req  *pbv1.ChatRequest
 	}{
-		{"same schema, both orders", &pbv2.ChatRequest{Tools: []*pbv2.ToolDef{
+		{"same schema, both orders", &pbv1.ChatRequest{Tools: []*pbv1.ToolDef{
 			{Name: "dup", ParametersJson: []byte(`{"type":"object","properties":{"x":{"type":"object"}}}`)},
 			{Name: "dup", ParametersJson: []byte(`{"type":"object","properties":{"x":{"type":"object"}}}`)},
 		}}},
-		{"different schemas", &pbv2.ChatRequest{Tools: []*pbv2.ToolDef{
+		{"different schemas", &pbv1.ChatRequest{Tools: []*pbv1.ToolDef{
 			{Name: "dup", ParametersJson: []byte(`{"type":"object","properties":{"x":{"type":"object"}}}`)},
 			{Name: "dup", ParametersJson: []byte(`{"type":"object","properties":{"y":{"type":"object","additionalProperties":{"type":"string"}}}}`)},
 		}}},
-		{"reversed order", &pbv2.ChatRequest{Tools: []*pbv2.ToolDef{
+		{"reversed order", &pbv1.ChatRequest{Tools: []*pbv1.ToolDef{
 			{Name: "dup", ParametersJson: []byte(`{"type":"object","properties":{"y":{"type":"object","additionalProperties":{"type":"string"}}}}`)},
 			{Name: "dup", ParametersJson: []byte(`{"type":"object","properties":{"x":{"type":"object"}}}`)},
 		}}},
@@ -731,16 +731,16 @@ func TestDuplicateToolNamesAreAllUntranslated(t *testing.T) {
 
 func streamBlock(t *testing.T, h *sdktest.Harness, index int32, id, name, sig, args string) sdktest.StreamResult {
 	t.Helper()
-	h.StreamChunk(&pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
-		ContentBlockStart: &pbv2.ContentBlockStart{Index: index, Block: &pbv2.ContentBlockStart_ToolCall{
-			ToolCall: &pbv2.ToolCallRef{Id: id, Name: name, Signature: sig},
+	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+		ContentBlockStart: &pbv1.ContentBlockStart{Index: index, Block: &pbv1.ContentBlockStart_ToolCall{
+			ToolCall: &pbv1.ToolCallRef{Id: id, Name: name, Signature: sig},
 		}},
 	}})
-	h.StreamChunk(&pbv2.StreamEvent{Event: &pbv2.StreamEvent_ToolCallDelta{
-		ToolCallDelta: &pbv2.ToolCallDelta{Index: index, ArgumentsDelta: args},
+	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
+		ToolCallDelta: &pbv1.ToolCallDelta{Index: index, ArgumentsDelta: args},
 	}})
-	return h.StreamChunk(&pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
-		ContentBlockStop: &pbv2.ContentBlockStop{Index: index},
+	return h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+		ContentBlockStop: &pbv1.ContentBlockStop{Index: index},
 	}})
 }
 
@@ -806,7 +806,7 @@ func TestStreamReversesRecordedTool(t *testing.T) {
 // terminate.
 func TestStreamTerminalOnMissingRegistry(t *testing.T) {
 	h := newHarness(t)
-	h.BeforeRequest(&pbv2.ChatRequest{Messages: []*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "hi"}}}}}}})
+	h.BeforeRequest(&pbv1.ChatRequest{Messages: []*pbv1.Message{{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "hi"}}}}}}})
 	res := streamBlock(t, h, 0, "call_1", "read", "", `{"path":"a.go"}`)
 	if res.Err == nil {
 		t.Fatal("a tool call without any published envelope must terminate")
@@ -819,7 +819,7 @@ func TestStreamTerminalOnMissingRegistry(t *testing.T) {
 func TestStreamTerminalOnAdvisoryRegistryRead(t *testing.T) {
 	h := newHarness(t)
 	h.StubHostCall("env.meta_get", func(args string) (string, error) {
-		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, "backing store down"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "backing store down"), nil
 	})
 	res := streamBlock(t, h, 0, "call_1", "read", "", `{"path":"a.go"}`)
 	if res.Err == nil {
@@ -836,7 +836,7 @@ func TestStreamTerminalOnDeletedRegistry(t *testing.T) {
 	// instance state): overwrite the key with nothing via a stub that reports
 	// NOT_FOUND.
 	h.StubHostCall("env.meta_get", func(args string) (string, error) {
-		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_NOT_FOUND, "no such key"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_NOT_FOUND, "no such key"), nil
 	})
 	res := streamBlock(t, h, 0, "call_1", "read", "", `{"env":[{"key":"A","value":"1"}]}`)
 	if res.Err == nil {
@@ -849,7 +849,7 @@ func TestStreamTerminalOnDeletedRegistry(t *testing.T) {
 func TestStreamTerminalOnCorruptRegistry(t *testing.T) {
 	h := newHarness(t)
 	h.StubHostCall("env.meta_get", func(args string) (string, error) {
-		var a pbv2.MetaGetArgs
+		var a pbv1.MetaGetArgs
 		if err := proto.Unmarshal([]byte(args), &a); err != nil {
 			t.Fatalf("meta_get args: %v", err)
 		}
@@ -883,36 +883,36 @@ func TestStreamFragmentedAndConcurrentBlocks(t *testing.T) {
 	h := newHarness(t)
 	h.BeforeRequest(reqWithTools(`{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}}}}`))
 
-	h.StreamChunk(&pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
-		ContentBlockStart: &pbv2.ContentBlockStart{Index: 0, Block: &pbv2.ContentBlockStart_ToolCall{
-			ToolCall: &pbv2.ToolCallRef{Id: "call_0", Name: "read", Signature: "s0"},
+	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+		ContentBlockStart: &pbv1.ContentBlockStart{Index: 0, Block: &pbv1.ContentBlockStart_ToolCall{
+			ToolCall: &pbv1.ToolCallRef{Id: "call_0", Name: "read", Signature: "s0"},
 		}},
 	}})
-	h.StreamChunk(&pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
-		ContentBlockStart: &pbv2.ContentBlockStart{Index: 1, Block: &pbv2.ContentBlockStart_ToolCall{
-			ToolCall: &pbv2.ToolCallRef{Id: "call_1", Name: "read", Signature: "s1"},
+	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+		ContentBlockStart: &pbv1.ContentBlockStart{Index: 1, Block: &pbv1.ContentBlockStart_ToolCall{
+			ToolCall: &pbv1.ToolCallRef{Id: "call_1", Name: "read", Signature: "s1"},
 		}},
 	}})
-	h.StreamChunk(&pbv2.StreamEvent{Event: &pbv2.StreamEvent_ToolCallDelta{
-		ToolCallDelta: &pbv2.ToolCallDelta{Index: 0, ArgumentsDelta: `{"env":[{"key":"A",`},
+	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
+		ToolCallDelta: &pbv1.ToolCallDelta{Index: 0, ArgumentsDelta: `{"env":[{"key":"A",`},
 	}})
-	h.StreamChunk(&pbv2.StreamEvent{Event: &pbv2.StreamEvent_ToolCallDelta{
-		ToolCallDelta: &pbv2.ToolCallDelta{Index: 1, ArgumentsDelta: `{"env":[{"key":"B",`},
+	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
+		ToolCallDelta: &pbv1.ToolCallDelta{Index: 1, ArgumentsDelta: `{"env":[{"key":"B",`},
 	}})
-	h.StreamChunk(&pbv2.StreamEvent{Event: &pbv2.StreamEvent_ToolCallDelta{
-		ToolCallDelta: &pbv2.ToolCallDelta{Index: 0, ArgumentsDelta: `"value":"1"}]}`},
+	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
+		ToolCallDelta: &pbv1.ToolCallDelta{Index: 0, ArgumentsDelta: `"value":"1"}]}`},
 	}})
-	h.StreamChunk(&pbv2.StreamEvent{Event: &pbv2.StreamEvent_ToolCallDelta{
-		ToolCallDelta: &pbv2.ToolCallDelta{Index: 1, ArgumentsDelta: `"value":"2"}]}`},
+	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
+		ToolCallDelta: &pbv1.ToolCallDelta{Index: 1, ArgumentsDelta: `"value":"2"}]}`},
 	}})
-	res0 := h.StreamChunk(&pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
-		ContentBlockStop: &pbv2.ContentBlockStop{Index: 0},
+	res0 := h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+		ContentBlockStop: &pbv1.ContentBlockStop{Index: 0},
 	}})
 	if got := emittedArgs(t, res0); got != `{"env":{"A":"1"}}` {
 		t.Fatalf("block 0 reversed args = %q", got)
 	}
-	res1 := h.StreamChunk(&pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
-		ContentBlockStop: &pbv2.ContentBlockStop{Index: 1},
+	res1 := h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+		ContentBlockStop: &pbv1.ContentBlockStop{Index: 1},
 	}})
 	if got := emittedArgs(t, res1); got != `{"env":{"B":"2"}}` {
 		t.Fatalf("block 1 reversed args = %q", got)
@@ -924,8 +924,8 @@ func TestStreamFragmentedAndConcurrentBlocks(t *testing.T) {
 func TestStreamErrorEventPassesThrough(t *testing.T) {
 	h := newHarness(t)
 	h.BeforeRequest(reqWithTools(`{"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false}`))
-	res := h.StreamChunk(&pbv2.StreamEvent{Event: &pbv2.StreamEvent_Error{
-		Error: &pbv2.StreamError{Message: "upstream aborted"},
+	res := h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_Error{
+		Error: &pbv1.StreamError{Message: "upstream aborted"},
 	}})
 	if res.Err != nil {
 		t.Fatalf("mid-block error must pass through, got err=%v", res.Err)
@@ -996,7 +996,7 @@ func TestEnvLogNotUsed(t *testing.T) {
 // the host/customer fields (description, strict, cache_control_json) survive,
 // and an unrelated tool remains COMPLETELY unchanged — raw bytes included.
 func TestToolDefPreservationOnReplacement(t *testing.T) {
-	req := &pbv2.ChatRequest{Tools: []*pbv2.ToolDef{
+	req := &pbv1.ChatRequest{Tools: []*pbv1.ToolDef{
 		{
 			Name:             "convert",
 			Description:      "converts things",
@@ -1249,7 +1249,7 @@ func TestNonObjectSchemasDoNotPanic(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)
-			res := h.BeforeRequest(&pbv2.ChatRequest{Tools: []*pbv2.ToolDef{{Name: "t", ParametersJson: []byte(params)}}})
+			res := h.BeforeRequest(&pbv1.ChatRequest{Tools: []*pbv1.ToolDef{{Name: "t", ParametersJson: []byte(params)}}})
 			if !res.PassedThrough || res.Err != nil {
 				t.Fatalf("expected pass-through, err=%v", res.Err)
 			}
@@ -1260,7 +1260,7 @@ func TestNonObjectSchemasDoNotPanic(t *testing.T) {
 	}
 	t.Run("nil tool entry", func(t *testing.T) {
 		h := newHarness(t)
-		res := h.BeforeRequest(&pbv2.ChatRequest{Tools: []*pbv2.ToolDef{
+		res := h.BeforeRequest(&pbv1.ChatRequest{Tools: []*pbv1.ToolDef{
 			nil,
 			{Name: "ok", ParametersJson: []byte(`{"additionalProperties":false,"properties":{"p":{"type":"string"}},"type":"object"}`)},
 		}})
@@ -1525,7 +1525,7 @@ func TestTextuallyInvalidSchemasAreCarriedUnchanged(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)
-			req := &pbv2.ChatRequest{Tools: []*pbv2.ToolDef{{Name: "t", ParametersJson: []byte(params)}}}
+			req := &pbv1.ChatRequest{Tools: []*pbv1.ToolDef{{Name: "t", ParametersJson: []byte(params)}}}
 			res := h.BeforeRequest(req)
 			if !res.PassedThrough || res.Err != nil {
 				t.Fatalf("expected pass-through, err=%v", res.Err)

@@ -54,7 +54,7 @@ import (
 	"strings"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -169,8 +169,8 @@ func isAdvisory(err error) bool {
 	}
 	var refusal *sdk.HostCallRefusalError
 	if errors.As(err, &refusal) {
-		return refusal.Code == pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED ||
-			refusal.Code == pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE
+		return refusal.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED ||
+			refusal.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE
 	}
 	return false
 }
@@ -179,7 +179,7 @@ func init() {
 	// Request path: remember the cached prefix of any conversation the operator
 	// opted in. This hook only observes and stores — it never modifies the
 	// request, so it cannot affect the prefix it is trying to preserve.
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv2.ChatRequest) (sdk.RequestResult, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
 		cfg := loadConfig()
 		if !cfg.any() {
 			return sdk.PassRequest(), nil
@@ -192,7 +192,7 @@ func init() {
 		// The SDK-owned projection is the identity oracle (I1 parity with the
 		// host cache key): an out-of-domain request declines with NO entry
 		// (I3), and no marker means no explicitly cached prefix to refresh.
-		prefix, hasBreakpoint, err := pbv2.RequestObservablePrefix(req)
+		prefix, hasBreakpoint, err := pbv1.RequestObservablePrefix(req)
 		if err != nil {
 			return sdk.PassRequest(), nil
 		}
@@ -261,14 +261,14 @@ func init() {
 
 	// Tick path: refresh whatever is still worth refreshing, under the
 	// write-ahead spend reservation (see refreshOne).
-	sdk.OnTick(func(ctx context.Context, tick *pbv2.TickRequest) (sdk.TickResult, error) {
+	sdk.OnTick(func(ctx context.Context, tick *pbv1.TickRequest) (sdk.TickResult, error) {
 		cfg := loadConfig()
 		keys, herr, err := sdk.StateKeys()
 		if err != nil {
 			return sdk.TickResult{}, err
 		}
 		if herr != nil {
-			if herr.Code == pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED || herr.Code == pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE {
+			if herr.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED || herr.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE {
 				return sdk.TickIdle(), nil
 			}
 			return sdk.TickResult{}, fmt.Errorf("cache_warmer: state_keys refused: %s", herr.Message)
@@ -294,7 +294,7 @@ func init() {
 				return sdk.TickResult{}, err
 			case herr != nil && sdk.IsNotFound(herr):
 				continue
-			case herr != nil && (herr.Code == pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED || herr.Code == pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE):
+			case herr != nil && (herr.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED || herr.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE):
 				continue
 			case herr != nil:
 				return sdk.TickResult{}, fmt.Errorf("cache_warmer: state_get %s refused: %s", key, herr.Message)
@@ -383,7 +383,7 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 	}
 	// SDK replacement domain + marker presence (the projection is the same
 	// identity oracle the request path used).
-	prefix, hasBreakpoint, err := pbv2.RequestObservablePrefix(req)
+	prefix, hasBreakpoint, err := pbv1.RequestObservablePrefix(req)
 	if err != nil {
 		entry.Stopped = "stored prefix is out of domain"
 		persistStop(key, entry)
@@ -560,7 +560,7 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 // can be sent on its own, and the provider rejects the turn without a tool
 // result. The check inspects only the final message's explicit blocks; it is
 // NOT a general body traversal.
-func endsWithUnansweredToolCall(req *pbv2.ChatRequest) bool {
+func endsWithUnansweredToolCall(req *pbv1.ChatRequest) bool {
 	if len(req.Messages) == 0 {
 		return false
 	}
@@ -580,8 +580,8 @@ func endsWithUnansweredToolCall(req *pbv2.ChatRequest) bool {
 // with stream=false and torana_meta_json cleared, preserving every
 // provider-visible field and ordered block exactly. The hook input is never
 // mutated.
-func sanitizeReplay(req *pbv2.ChatRequest) *pbv2.ChatRequest {
-	out := proto.Clone(req).(*pbv2.ChatRequest)
+func sanitizeReplay(req *pbv1.ChatRequest) *pbv1.ChatRequest {
+	out := proto.Clone(req).(*pbv1.ChatRequest)
 	out.Stream = false
 	out.ToranaMetaJson = nil
 	return out
@@ -601,7 +601,7 @@ type hostMeta struct {
 	Path           string `json:"_path"`
 }
 
-func readHostMeta(req *pbv2.ChatRequest) hostMeta {
+func readHostMeta(req *pbv1.ChatRequest) hostMeta {
 	var meta hostMeta
 	if len(req.ToranaMetaJson) == 0 {
 		return meta

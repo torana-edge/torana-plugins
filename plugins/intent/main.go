@@ -36,7 +36,7 @@ import (
 	"sync"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -96,7 +96,7 @@ func resetConfigForTest() {
 
 func init() {
 	// ── Request side: teach the "i" convention ──────────────────────
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv2.ChatRequest) (sdk.RequestResult, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
 		if len(req.Tools) == 0 {
 			return sdk.PassRequest(), nil
 		}
@@ -206,7 +206,7 @@ func handleToolCall(call sdk.ToolCall) (sdk.ToolCallAction, error) {
 	// whether to strip.
 	hadI := ""
 	if call.Name != "" {
-		var herr *pbv2.HostError
+		var herr *pbv1.HostError
 		var err error
 		hadI, herr, err = sdk.MetaGet("hadI:" + call.Name)
 		if err != nil || (herr != nil && !sdk.IsNotFound(herr)) {
@@ -253,7 +253,7 @@ func handleToolCall(call sdk.ToolCall) (sdk.ToolCallAction, error) {
 // are both unusable (the fill path, which is never cached); any other refusal
 // or a malformed reply is a contract/configuration defect and returns an
 // error so failure_mode applies and the host records the failure.
-func rehydrateHistoryIntents(req *pbv2.ChatRequest) (bool, error) {
+func rehydrateHistoryIntents(req *pbv1.ChatRequest) (bool, error) {
 	loadConfig()
 	restored, filled, present := 0, 0, 0
 	modified := false
@@ -403,7 +403,7 @@ func contentKey(name string, args map[string]any) string {
 // Schema injection
 // ==========================================================================
 
-func injectIntentSchema(req *pbv2.ChatRequest) (bool, error) {
+func injectIntentSchema(req *pbv1.ChatRequest) (bool, error) {
 	modified := false
 	for _, tool := range req.Tools {
 		if len(tool.ParametersJson) == 0 {
@@ -515,7 +515,7 @@ const addendum = "\n\nEvery tool call has an \"i\" field: the underlying questio
 	"  read_file(path=\"src/pricing.ts\", i=\"Which table maps locale to currency, to find why EU shows USD\")\n" +
 	"Example of a BAD value: i=\"reading pricing.ts\" (action description — discarded)."
 
-func injectSystemPrompt(req *pbv2.ChatRequest) (bool, error) {
+func injectSystemPrompt(req *pbv1.ChatRequest) (bool, error) {
 	for _, msg := range req.Messages {
 		if msg.Role != "system" {
 			continue
@@ -540,10 +540,10 @@ func injectSystemPrompt(req *pbv2.ChatRequest) (bool, error) {
 		}
 		return true, nil
 	}
-	req.Messages = append([]*pbv2.Message{{
+	req.Messages = append([]*pbv1.Message{{
 		Role: "system",
-		Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{
-			Text: &pbv2.RequestTextBlock{Text: "[SYSTEM]" + addendum},
+		Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{
+			Text: &pbv1.RequestTextBlock{Text: "[SYSTEM]" + addendum},
 		}}},
 	}}, req.Messages...)
 	return true, nil

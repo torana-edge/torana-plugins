@@ -9,7 +9,7 @@ import (
 	"unicode/utf8"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"github.com/torana-edge/torana-plugin-sdk/sdktest"
 	"google.golang.org/protobuf/proto"
 )
@@ -204,17 +204,17 @@ func keywordContent() string {
 
 // toolMsg builds an ordered tool-role message with ONE tool-result block
 // carrying a single text arm.
-func toolMsg(id, name, content string) *pbv2.Message {
-	return &pbv2.Message{Role: "tool", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: &pbv2.RequestToolResultBlock{
+func toolMsg(id, name, content string) *pbv1.Message {
+	return &pbv1.Message{Role: "tool", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolResult{ToolResult: &pbv1.RequestToolResultBlock{
 		ToolCallId: id,
 		ToolName:   name,
-		Content:    []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: content}}}},
+		Content:    []*pbv1.ToolResultContentBlock{{Kind: &pbv1.ToolResultContentBlock_Text{Text: &pbv1.ToolResultTextBlock{Text: content}}}},
 	}}}}}
 }
 
 // toolText returns the first text arm of the first tool-result block in
 // message mi.
-func toolText(t *testing.T, req *pbv2.ChatRequest, mi int) string {
+func toolText(t *testing.T, req *pbv1.ChatRequest, mi int) string {
 	t.Helper()
 	for _, b := range req.Messages[mi].Blocks {
 		if tr := b.GetToolResult(); tr != nil {
@@ -229,15 +229,15 @@ func toolText(t *testing.T, req *pbv2.ChatRequest, mi int) string {
 	return ""
 }
 
-func bigToolRequest(content string) *pbv2.ChatRequest {
-	return &pbv2.ChatRequest{
-		Messages: []*pbv2.Message{
-			{Role: "system", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "You are a coding agent."}}}}},
-			{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "find the bug"}}}}},
-			{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "call_1", Name: "read", ArgumentsJson: []byte(`{"path":"server.go"}`)}}}}},
+func bigToolRequest(content string) *pbv1.ChatRequest {
+	return &pbv1.ChatRequest{
+		Messages: []*pbv1.Message{
+			{Role: "system", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "You are a coding agent."}}}}},
+			{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "find the bug"}}}}},
+			{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "call_1", Name: "read", ArgumentsJson: []byte(`{"path":"server.go"}`)}}}}},
 			toolMsg("call_1", "read", content),
-			{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "now fix it"}}}}},
-			{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "the fix is in server.go"}}}}},
+			{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "now fix it"}}}}},
+			{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "the fix is in server.go"}}}}},
 		},
 	}
 }
@@ -353,7 +353,7 @@ func TestDeterministicFirstPassAppliesAndCachesThenReuses(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(deterministicCfg)
 	original := bigToolRequest(keywordContent())
-	first := h.BeforeRequest(proto.Clone(original).(*pbv2.ChatRequest))
+	first := h.BeforeRequest(proto.Clone(original).(*pbv1.ChatRequest))
 	if first.Err != nil || first.Request == nil {
 		t.Fatalf("expected a replacement on turn 1, err=%v", first.Err)
 	}
@@ -365,7 +365,7 @@ func TestDeterministicFirstPassAppliesAndCachesThenReuses(t *testing.T) {
 	}
 
 	before := countCommand(h, "env.cache_set")
-	second := h.BeforeRequest(proto.Clone(original).(*pbv2.ChatRequest))
+	second := h.BeforeRequest(proto.Clone(original).(*pbv1.ChatRequest))
 	if second.Err != nil || second.Request == nil {
 		t.Fatalf("expected a replacement on turn 2, err=%v", second.Err)
 	}
@@ -635,7 +635,7 @@ func TestBestEffortWritesAndSavings(t *testing.T) {
 	h.SeedCache("intent:call_1", "find the bug in server")
 	h.DenyPermission("env.cache_set")
 	h.StubHostCall("torana_record_savings", func(string) (string, error) {
-		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub"), nil
 	})
 	res := h.BeforeRequest(bigToolRequest(keywordContent()))
 	if res.Err != nil {
@@ -886,14 +886,14 @@ func TestTruncationNoticeExactEquality(t *testing.T) {
 // per-candidate call cardinalities.
 func TestKeywordOrderedSeamRows(t *testing.T) {
 	content := keywordContent()
-	result := func(id, text string) *pbv2.RequestBlock {
-		return &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: &pbv2.RequestToolResultBlock{
+	result := func(id, text string) *pbv1.RequestBlock {
+		return &pbv1.RequestBlock{Kind: &pbv1.RequestBlock_ToolResult{ToolResult: &pbv1.RequestToolResultBlock{
 			ToolCallId: id, ToolName: "read",
-			Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: text}}}},
+			Content: []*pbv1.ToolResultContentBlock{{Kind: &pbv1.ToolResultContentBlock_Text{Text: &pbv1.ToolResultTextBlock{Text: text}}}},
 		}}}
 	}
-	assistantAfter := func() *pbv2.Message {
-		return &pbv2.Message{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "the fix is in server.go"}}}}}
+	assistantAfter := func() *pbv1.Message {
+		return &pbv1.Message{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "the fix is in server.go"}}}}}
 	}
 
 	// User-role result: the gate must not require role "tool".
@@ -901,8 +901,8 @@ func TestKeywordOrderedSeamRows(t *testing.T) {
 		h := newHarness(t)
 		h.SetConfig(keywordCfg)
 		h.SeedCache("intent:c1", "find the bug in server")
-		req := &pbv2.ChatRequest{Messages: []*pbv2.Message{
-			{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "u"}}}, result("c1", content)}},
+		req := &pbv1.ChatRequest{Messages: []*pbv1.Message{
+			{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "u"}}}, result("c1", content)}},
 			assistantAfter(),
 		}}
 		res := h.BeforeRequest(req)
@@ -930,8 +930,8 @@ func TestKeywordOrderedSeamRows(t *testing.T) {
 		h.SetConfig(keywordCfg)
 		h.SeedCache("intent:c1", "find the bug in server")
 		h.SeedCache("intent:c2", "find the bug in server")
-		req := &pbv2.ChatRequest{Messages: []*pbv2.Message{
-			{Role: "user", Blocks: []*pbv2.RequestBlock{result("c1", content), result("c2", content)}},
+		req := &pbv1.ChatRequest{Messages: []*pbv1.Message{
+			{Role: "user", Blocks: []*pbv1.RequestBlock{result("c1", content), result("c2", content)}},
 			assistantAfter(),
 		}}
 		res := h.BeforeRequest(req)
@@ -1015,23 +1015,23 @@ func TestKeywordOrderedSeamRows(t *testing.T) {
 	// (a real cache-breakpoint arm), the explicit-empty row is a scalar below
 	// the minimum threshold — inert with the same zero-spend multiset.
 	t.Run("unsupported shapes exact multiset", func(t *testing.T) {
-		unknown := &pbv2.ToolResultContentBlock{Kind: &pbv2.ToolResultContentBlock_Unknown{Unknown: &pbv2.ToolResultUnknownBlock{Kind: "provider_blob", PayloadJson: []byte(`{"x":1}`)}}}
-		marker := &pbv2.ToolResultContentBlock{Kind: &pbv2.ToolResultContentBlock_CacheBreakpoint{CacheBreakpoint: &pbv2.ToolResultCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}}
-		rows := map[string]*pbv2.RequestToolResultBlock{
-			"marker-only":    {ToolCallId: "c1", ToolName: "read", Content: []*pbv2.ToolResultContentBlock{marker}},
-			"multiple text":  {ToolCallId: "c1", ToolName: "read", Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: "a"}}}, {Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: "b"}}}}},
-			"unknown arm":    {ToolCallId: "c1", ToolName: "read", Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: content}}}, unknown}},
-			"explicit empty": {ToolCallId: "c1", ToolName: "read", Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: ""}}}}},
+		unknown := &pbv1.ToolResultContentBlock{Kind: &pbv1.ToolResultContentBlock_Unknown{Unknown: &pbv1.ToolResultUnknownBlock{Kind: "provider_blob", PayloadJson: []byte(`{"x":1}`)}}}
+		marker := &pbv1.ToolResultContentBlock{Kind: &pbv1.ToolResultContentBlock_CacheBreakpoint{CacheBreakpoint: &pbv1.ToolResultCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}}
+		rows := map[string]*pbv1.RequestToolResultBlock{
+			"marker-only":    {ToolCallId: "c1", ToolName: "read", Content: []*pbv1.ToolResultContentBlock{marker}},
+			"multiple text":  {ToolCallId: "c1", ToolName: "read", Content: []*pbv1.ToolResultContentBlock{{Kind: &pbv1.ToolResultContentBlock_Text{Text: &pbv1.ToolResultTextBlock{Text: "a"}}}, {Kind: &pbv1.ToolResultContentBlock_Text{Text: &pbv1.ToolResultTextBlock{Text: "b"}}}}},
+			"unknown arm":    {ToolCallId: "c1", ToolName: "read", Content: []*pbv1.ToolResultContentBlock{{Kind: &pbv1.ToolResultContentBlock_Text{Text: &pbv1.ToolResultTextBlock{Text: content}}}, unknown}},
+			"explicit empty": {ToolCallId: "c1", ToolName: "read", Content: []*pbv1.ToolResultContentBlock{{Kind: &pbv1.ToolResultContentBlock_Text{Text: &pbv1.ToolResultTextBlock{Text: ""}}}}},
 		}
 		for name, tr := range rows {
 			t.Run(name, func(t *testing.T) {
 				h := newHarness(t)
 				h.SetConfig(keywordCfg)
-				req := &pbv2.ChatRequest{Messages: []*pbv2.Message{
-					{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: tr}}}},
+				req := &pbv1.ChatRequest{Messages: []*pbv1.Message{
+					{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolResult{ToolResult: tr}}}},
 					assistantAfter(),
 				}}
-				before := proto.Clone(req).(*pbv2.ChatRequest)
+				before := proto.Clone(req).(*pbv1.ChatRequest)
 				res := h.BeforeRequest(req)
 				if res.Err != nil || !res.PassedThrough {
 					t.Fatalf("must pass unchanged, err=%v", res.Err)

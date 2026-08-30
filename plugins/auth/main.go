@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -92,7 +92,7 @@ const (
 )
 
 func init() {
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv2.ChatRequest) (sdk.RequestResult, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
 		headers, err := requestHeaders(req)
 		if err != nil {
 			return sdk.RequestResult{}, err
@@ -128,7 +128,7 @@ func init() {
 // invalid JSON — is a protocol defect, and the decode is lossless
 // (decodeJSONObject) so no header byte is normalized before the token
 // grammar sees it.
-func requestHeaders(req *pbv2.ChatRequest) (map[string]any, error) {
+func requestHeaders(req *pbv1.ChatRequest) (map[string]any, error) {
 	if len(req.ToranaMetaJson) == 0 {
 		return nil, nil
 	}
@@ -253,7 +253,7 @@ func verifyVirtualKey(token string) (string, verifyOutcome, error) {
 	}
 	if herr != nil {
 		switch herr.Code {
-		case pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE:
+		case pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE:
 			// The verifier is unwired or temporarily unavailable: advisory.
 			// No identity is possible — this plugin is the only source.
 			return "", verifyNoIdentity, nil

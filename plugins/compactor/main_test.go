@@ -8,7 +8,7 @@ import (
 	"unicode/utf8"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"github.com/torana-edge/torana-plugin-sdk/sdktest"
 	"google.golang.org/protobuf/proto"
 )
@@ -28,24 +28,24 @@ func newHarness(t *testing.T) *sdktest.Harness {
 
 // toolMsg builds an ordered tool-role message carrying ONE tool-result block
 // with a single text arm (the scalar-compatible shape the plugins act on).
-func toolMsg(id, name, content string) *pbv2.Message {
-	return &pbv2.Message{Role: "tool", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: &pbv2.RequestToolResultBlock{
+func toolMsg(id, name, content string) *pbv1.Message {
+	return &pbv1.Message{Role: "tool", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolResult{ToolResult: &pbv1.RequestToolResultBlock{
 		ToolCallId: id,
 		ToolName:   name,
-		Content:    []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: content}}}},
+		Content:    []*pbv1.ToolResultContentBlock{{Kind: &pbv1.ToolResultContentBlock_Text{Text: &pbv1.ToolResultTextBlock{Text: content}}}},
 	}}}}}
 }
 
 // toolText returns the text of the FIRST text arm of the FIRST tool-result
 // block in message mi (the fixtures carry exactly one result per message).
-func resultBlock(id string, content string) *pbv2.RequestBlock {
-	return &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: &pbv2.RequestToolResultBlock{
+func resultBlock(id string, content string) *pbv1.RequestBlock {
+	return &pbv1.RequestBlock{Kind: &pbv1.RequestBlock_ToolResult{ToolResult: &pbv1.RequestToolResultBlock{
 		ToolCallId: id, ToolName: "read",
-		Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: content}}}},
+		Content: []*pbv1.ToolResultContentBlock{{Kind: &pbv1.ToolResultContentBlock_Text{Text: &pbv1.ToolResultTextBlock{Text: content}}}},
 	}}}
 }
 
-func toolText(t *testing.T, req *pbv2.ChatRequest, mi int) string {
+func toolText(t *testing.T, req *pbv1.ChatRequest, mi int) string {
 	t.Helper()
 	for _, b := range req.Messages[mi].Blocks {
 		if tr := b.GetToolResult(); tr != nil {
@@ -63,18 +63,18 @@ func toolText(t *testing.T, req *pbv2.ChatRequest, mi int) string {
 // bigToolRequest builds the cache-compliance shape the real host exercises:
 // a large tool result with a prior assistant turn (satisfying the model-mode
 // consumption gate) and a replayed tool call for name/args lookup.
-func bigToolRequest(content string) *pbv2.ChatRequest {
-	return &pbv2.ChatRequest{
-		Messages: []*pbv2.Message{
-			{Role: "system", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "You are a coding agent."}}}}},
-			{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "find the bug"}}}}},
-			{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "call_1", Name: "read", ArgumentsJson: []byte(`{"path":"server.go"}`)}}}}},
+func bigToolRequest(content string) *pbv1.ChatRequest {
+	return &pbv1.ChatRequest{
+		Messages: []*pbv1.Message{
+			{Role: "system", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "You are a coding agent."}}}}},
+			{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "find the bug"}}}}},
+			{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "call_1", Name: "read", ArgumentsJson: []byte(`{"path":"server.go"}`)}}}}},
 			toolMsg("call_1", "read", content),
-			{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "now fix it"}}}}},
+			{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "now fix it"}}}}},
 			// One exact consumption after the result: the model-mode gate
 			// requires it (a model summary is never allowed before the result
 			// has been consumed once).
-			{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "the fix is in server.go"}}}}},
+			{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "the fix is in server.go"}}}}},
 		},
 	}
 }
@@ -178,17 +178,17 @@ func TestTruncateForPromptMultibyteRuneSafety(t *testing.T) {
 }
 
 // TestModelBatchReportUsesAdjustedTailOnce re-pins the economics math against
-// the v2 wire: proto.Size over a pbv2 ChatRequest. Measured 2026-08-04 on the
+// the v2 wire: proto.Size over a pbv1 ChatRequest. Measured 2026-08-04 on the
 // ORDERED fixture (tool-role message with a tool-result block):
 // rewrite span 5060 bytes -> 1270 estimated tokens.
 func TestModelBatchReportUsesAdjustedTailOnce(t *testing.T) {
 	original := strings.Repeat("x", 100_000)
 	replacement := strings.Repeat("y", 5_000)
 	result := toolMsg("large", "read", original)
-	req := &pbv2.ChatRequest{Messages: []*pbv2.Message{
-		{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "prefix outside the rewrite span"}}}}},
+	req := &pbv1.ChatRequest{Messages: []*pbv1.Message{
+		{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "prefix outside the rewrite span"}}}}},
 		result,
-		{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "near-tail response"}}}}},
+		{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "near-tail response"}}}}},
 	}}
 	oldExpected := expectedApplications
 	expectedApplications = 5
@@ -280,7 +280,7 @@ func TestDeterministicFirstPassAppliesAndCachesThenReuses(t *testing.T) {
 	// message pointers it was handed), so the comparison needs a pristine
 	// clone of the ORIGINAL.
 	original := bigToolRequest(bigContent())
-	req := proto.Clone(original).(*pbv2.ChatRequest)
+	req := proto.Clone(original).(*pbv1.ChatRequest)
 
 	first := h.BeforeRequest(req)
 	if first.Err != nil || first.Request == nil {
@@ -298,7 +298,7 @@ func TestDeterministicFirstPassAppliesAndCachesThenReuses(t *testing.T) {
 	// IsDeterministicToolReplacement before cache lookup; a fresh harness
 	// would lose the cache written by turn 1.
 	before := countCommand(h, "env.cache_set")
-	second := h.BeforeRequest(proto.Clone(original).(*pbv2.ChatRequest))
+	second := h.BeforeRequest(proto.Clone(original).(*pbv1.ChatRequest))
 	if second.Err != nil || second.Request == nil {
 		t.Fatalf("expected a replacement on turn 2, err=%v", second.Err)
 	}
@@ -330,7 +330,7 @@ func TestDeterministicConsumptionGate(t *testing.T) {
 	original := bigToolRequest(bigContent())
 	h2 := newHarness(t)
 	h2.SetConfig(cfg)
-	res2 := h2.BeforeRequest(proto.Clone(original).(*pbv2.ChatRequest))
+	res2 := h2.BeforeRequest(proto.Clone(original).(*pbv1.ChatRequest))
 	if res2.Err != nil || res2.Request == nil {
 		t.Fatalf("expected replacement after a consumption, err=%v", res2.Err)
 	}
@@ -391,9 +391,9 @@ func TestModelPathAppliesWithV2OffloadShape(t *testing.T) {
 // advisory: the candidate is skipped, the batch may still apply others, and
 // the same call is never retried.
 func TestOffloadAdvisoryRefusalSkipsWithoutRetry(t *testing.T) {
-	for _, code := range []pbv2.ErrorCode{
-		pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED,
-		pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE,
+	for _, code := range []pbv1.ErrorCode{
+		pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED,
+		pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE,
 	} {
 		t.Run(code.String(), func(t *testing.T) {
 			h := newHarness(t)
@@ -420,10 +420,10 @@ func TestOffloadAdvisoryRefusalSkipsWithoutRetry(t *testing.T) {
 // TestOffloadContractRefusalErrors — INVALID_ARGUMENT/PERMISSION_DENIED are
 // contract defects: the hook errors so failure_mode applies.
 func TestOffloadContractRefusalErrors(t *testing.T) {
-	for _, code := range []pbv2.ErrorCode{
-		pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT,
-		pbv2.ErrorCode_ERROR_CODE_PERMISSION_DENIED,
-		pbv2.ErrorCode_ERROR_CODE_INTERNAL,
+	for _, code := range []pbv1.ErrorCode{
+		pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT,
+		pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED,
+		pbv1.ErrorCode_ERROR_CODE_INTERNAL,
 	} {
 		t.Run(code.String(), func(t *testing.T) {
 			h := newHarness(t)
@@ -531,7 +531,7 @@ func TestUncachedBatchEvaluatesTwice(t *testing.T) {
 
 	req := bigToolRequest(bigContent())
 	req.Messages = append(req.Messages, toolMsg("call_2", "read", strings.Repeat("second big output\n", 200)))
-	req.Messages = append(req.Messages, &pbv2.Message{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "x"}}}}})
+	req.Messages = append(req.Messages, &pbv1.Message{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "x"}}}}})
 	res := h.BeforeRequest(req)
 	if res.Err != nil || res.Request == nil {
 		t.Fatalf("expected the batch to apply, err=%v", res.Err)
@@ -620,7 +620,7 @@ func TestProviderModelInconsistencyRejectsBatch(t *testing.T) {
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	req := bigToolRequest(bigContent())
 	req.Messages = append(req.Messages, toolMsg("call_2", "read", strings.Repeat("second big output\n", 200)))
-	req.Messages = append(req.Messages, &pbv2.Message{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "x"}}}}})
+	req.Messages = append(req.Messages, &pbv1.Message{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "x"}}}}})
 	res := h.BeforeRequest(req)
 	if res.Err != nil {
 		t.Fatal(res.Err)
@@ -810,7 +810,7 @@ func TestSavingsReportRefusalDoesNotChangeReplacement(t *testing.T) {
 	h.StubHostCall("torana_offload_completion", offloadStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	h.StubHostCall("torana_record_savings", func(string) (string, error) {
-		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub refusal"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub refusal"), nil
 	})
 	res := h.BeforeRequest(bigToolRequest(bigContent()))
 	if res.Err != nil {
@@ -935,7 +935,7 @@ func TestDeterminismOverIdenticalRequests(t *testing.T) {
 	}
 }
 
-func mustJSON(t *testing.T, req *pbv2.ChatRequest) []byte {
+func mustJSON(t *testing.T, req *pbv1.ChatRequest) []byte {
 	t.Helper()
 	b, err := json.Marshal(req)
 	if err != nil {
@@ -1045,9 +1045,9 @@ func TestDeterministicCacheMalformedReplyErrors(t *testing.T) {
 // economic gate declines the batch; the preflight fails so no offload spend
 // happens, and evaluate is called exactly once.
 func TestEvaluateAdvisoryRefusalDeclinesWithoutRetry(t *testing.T) {
-	for _, code := range []pbv2.ErrorCode{
-		pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED,
-		pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE,
+	for _, code := range []pbv1.ErrorCode{
+		pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED,
+		pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE,
 	} {
 		t.Run(code.String(), func(t *testing.T) {
 			h := newHarness(t)
@@ -1082,7 +1082,7 @@ func TestEvaluateContractRefusalErrors(t *testing.T) {
 	h.SeedCache("intent:call_1", "find the bug")
 	h.StubHostCall("torana_offload_completion", offloadStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", func(string) (string, error) {
-		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "stub"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "stub"), nil
 	})
 	res := h.BeforeRequest(bigToolRequest(bigContent()))
 	if res.Err == nil {
@@ -1131,7 +1131,7 @@ func TestRealEvaluationRefusalAfterPreflight(t *testing.T) {
 		if seq == 1 {
 			return sdktest.HostResultValue([]byte(`{"apply":true}`)), nil
 		}
-		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "stub"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "stub"), nil
 	})
 	res := h.BeforeRequest(bigToolRequest(bigContent()))
 	if res.Err == nil {
@@ -1215,19 +1215,19 @@ func TestDeterministicNonShorterCacheRecomputes(t *testing.T) {
 //   - a mixed [text, tool_result, text] message: the surrounding text
 //     survives byte-exact while the result is compacted.
 func TestOrderedSeamCarrierRows(t *testing.T) {
-	text := func(s string) *pbv2.RequestBlock {
-		return &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: s}}}
+	text := func(s string) *pbv1.RequestBlock {
+		return &pbv1.RequestBlock{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: s}}}
 	}
-	result := func(id string, content string) *pbv2.RequestBlock {
-		return &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: &pbv2.RequestToolResultBlock{
+	result := func(id string, content string) *pbv1.RequestBlock {
+		return &pbv1.RequestBlock{Kind: &pbv1.RequestBlock_ToolResult{ToolResult: &pbv1.RequestToolResultBlock{
 			ToolCallId: id, ToolName: "read",
-			Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: content}}}},
+			Content: []*pbv1.ToolResultContentBlock{{Kind: &pbv1.ToolResultContentBlock_Text{Text: &pbv1.ToolResultTextBlock{Text: content}}}},
 		}}}
 	}
 	content := strings.Repeat("line of tool output that is long enough to be compaction-eligible\n", 200)
 	summary := "short summary"
-	assistant := func() *pbv2.Message {
-		return &pbv2.Message{Role: "assistant", Blocks: []*pbv2.RequestBlock{text("consumed")}}
+	assistant := func() *pbv1.Message {
+		return &pbv1.Message{Role: "assistant", Blocks: []*pbv1.RequestBlock{text("consumed")}}
 	}
 
 	// User-role result: the gate must not require role "tool".
@@ -1238,8 +1238,8 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 		h.StubHostCall("torana_offload_completion", offloadStub(summary))
 		h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 		h.SeedCache("intent:c1", "find the bug")
-		req := &pbv2.ChatRequest{Messages: []*pbv2.Message{
-			{Role: "user", Blocks: []*pbv2.RequestBlock{text("u"), result("c1", content)}},
+		req := &pbv1.ChatRequest{Messages: []*pbv1.Message{
+			{Role: "user", Blocks: []*pbv1.RequestBlock{text("u"), result("c1", content)}},
 			assistant(),
 		}}
 		req.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
@@ -1269,8 +1269,8 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 		h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 		h.SeedCache("intent:c1", "find the bug")
 		h.SeedCache("intent:c2", "find the bug")
-		req := &pbv2.ChatRequest{Messages: []*pbv2.Message{
-			{Role: "user", Blocks: []*pbv2.RequestBlock{result("c1", content), result("c2", content)}},
+		req := &pbv1.ChatRequest{Messages: []*pbv1.Message{
+			{Role: "user", Blocks: []*pbv1.RequestBlock{result("c1", content), result("c2", content)}},
 			assistant(),
 		}}
 		req.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
@@ -1364,13 +1364,13 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 	// content is below the minimum threshold — inert with the same zero-spend
 	// multiset.
 	t.Run("unsupported shapes exact multiset", func(t *testing.T) {
-		unknown := &pbv2.ToolResultContentBlock{Kind: &pbv2.ToolResultContentBlock_Unknown{Unknown: &pbv2.ToolResultUnknownBlock{Kind: "provider_blob", PayloadJson: []byte(`{"x":1}`)}}}
-		marker := &pbv2.ToolResultContentBlock{Kind: &pbv2.ToolResultContentBlock_CacheBreakpoint{CacheBreakpoint: &pbv2.ToolResultCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}}
-		rows := map[string]*pbv2.RequestToolResultBlock{
-			"marker-only":    {ToolCallId: "c1", ToolName: "read", Content: []*pbv2.ToolResultContentBlock{marker}},
-			"multiple text":  {ToolCallId: "c1", ToolName: "read", Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: "a"}}}, {Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: "b"}}}}},
-			"unknown arm":    {ToolCallId: "c1", ToolName: "read", Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: content}}}, unknown}},
-			"explicit empty": {ToolCallId: "c1", ToolName: "read", Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: ""}}}}},
+		unknown := &pbv1.ToolResultContentBlock{Kind: &pbv1.ToolResultContentBlock_Unknown{Unknown: &pbv1.ToolResultUnknownBlock{Kind: "provider_blob", PayloadJson: []byte(`{"x":1}`)}}}
+		marker := &pbv1.ToolResultContentBlock{Kind: &pbv1.ToolResultContentBlock_CacheBreakpoint{CacheBreakpoint: &pbv1.ToolResultCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}}
+		rows := map[string]*pbv1.RequestToolResultBlock{
+			"marker-only":    {ToolCallId: "c1", ToolName: "read", Content: []*pbv1.ToolResultContentBlock{marker}},
+			"multiple text":  {ToolCallId: "c1", ToolName: "read", Content: []*pbv1.ToolResultContentBlock{{Kind: &pbv1.ToolResultContentBlock_Text{Text: &pbv1.ToolResultTextBlock{Text: "a"}}}, {Kind: &pbv1.ToolResultContentBlock_Text{Text: &pbv1.ToolResultTextBlock{Text: "b"}}}}},
+			"unknown arm":    {ToolCallId: "c1", ToolName: "read", Content: []*pbv1.ToolResultContentBlock{{Kind: &pbv1.ToolResultContentBlock_Text{Text: &pbv1.ToolResultTextBlock{Text: content}}}, unknown}},
+			"explicit empty": {ToolCallId: "c1", ToolName: "read", Content: []*pbv1.ToolResultContentBlock{{Kind: &pbv1.ToolResultContentBlock_Text{Text: &pbv1.ToolResultTextBlock{Text: ""}}}}},
 		}
 		for name, tr := range rows {
 			t.Run(name, func(t *testing.T) {
@@ -1378,12 +1378,12 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 				h.SetConfig(modelConfig)
 				h.StubHostCall("torana_cache_pricing", func(string) (string, error) { return sdktest.HostResultValue([]byte(`{"status":"ok"}`)), nil })
 				h.StubHostCall("torana_offload_completion", offloadStub(summary))
-				req := &pbv2.ChatRequest{Messages: []*pbv2.Message{
-					{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: tr}}}},
+				req := &pbv1.ChatRequest{Messages: []*pbv1.Message{
+					{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolResult{ToolResult: tr}}}},
 					assistant(),
 				}}
 				req.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
-				before := proto.Clone(req).(*pbv2.ChatRequest)
+				before := proto.Clone(req).(*pbv1.ChatRequest)
 				res := h.BeforeRequest(req)
 				if res.Err != nil || !res.PassedThrough {
 					t.Fatalf("must pass unchanged, err=%v", res.Err)
@@ -1412,13 +1412,13 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 // candidate result's content never enters the context); empty and
 // non-qualifying messages are skipped WITHOUT consuming a slot.
 func TestOrderedSeamContextExtraction(t *testing.T) {
-	text := func(s string) *pbv2.RequestBlock {
-		return &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: s}}}
+	text := func(s string) *pbv1.RequestBlock {
+		return &pbv1.RequestBlock{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: s}}}
 	}
-	resultBlock := func(id, content string) *pbv2.RequestBlock {
-		return &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: &pbv2.RequestToolResultBlock{
+	resultBlock := func(id, content string) *pbv1.RequestBlock {
+		return &pbv1.RequestBlock{Kind: &pbv1.RequestBlock_ToolResult{ToolResult: &pbv1.RequestToolResultBlock{
 			ToolCallId: id, ToolName: "read",
-			Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: content}}}},
+			Content: []*pbv1.ToolResultContentBlock{{Kind: &pbv1.ToolResultContentBlock_Text{Text: &pbv1.ToolResultTextBlock{Text: content}}}},
 		}}}
 	}
 
@@ -1426,14 +1426,14 @@ func TestOrderedSeamContextExtraction(t *testing.T) {
 	// window keeps the LAST FIVE non-empty in order, skipping the empties
 	// and system rows, and the mixed message contributes its surrounding
 	// text only.
-	msgs := []*pbv2.Message{
-		{Role: "system", Blocks: []*pbv2.RequestBlock{text("sys")}},
-		{Role: "user", Blocks: []*pbv2.RequestBlock{text("first user"), resultBlock("c1", "RESULT-CONTENT-NOT-IN-CONTEXT"), text("second user")}},
-		{Role: "assistant", Blocks: []*pbv2.RequestBlock{text("assistant reply")}},
-		{Role: "user", Blocks: []*pbv2.RequestBlock{text("")}},
-		{Role: "user", Blocks: []*pbv2.RequestBlock{text("third user")}},
-		{Role: "assistant", Blocks: []*pbv2.RequestBlock{text("fourth assistant")}},
-		{Role: "user", Blocks: []*pbv2.RequestBlock{text("fifth user")}},
+	msgs := []*pbv1.Message{
+		{Role: "system", Blocks: []*pbv1.RequestBlock{text("sys")}},
+		{Role: "user", Blocks: []*pbv1.RequestBlock{text("first user"), resultBlock("c1", "RESULT-CONTENT-NOT-IN-CONTEXT"), text("second user")}},
+		{Role: "assistant", Blocks: []*pbv1.RequestBlock{text("assistant reply")}},
+		{Role: "user", Blocks: []*pbv1.RequestBlock{text("")}},
+		{Role: "user", Blocks: []*pbv1.RequestBlock{text("third user")}},
+		{Role: "assistant", Blocks: []*pbv1.RequestBlock{text("fourth assistant")}},
+		{Role: "user", Blocks: []*pbv1.RequestBlock{text("fifth user")}},
 	}
 	want := "user: first usersecond user\nassistant: assistant reply\nuser: third user\nassistant: fourth assistant\nuser: fifth user"
 	if got := extractConversationContext(msgs); got != want {
@@ -1441,14 +1441,14 @@ func TestOrderedSeamContextExtraction(t *testing.T) {
 	}
 
 	// A seventh qualifying message pushes the OLDEST out of the window.
-	msgs2 := append(msgs, &pbv2.Message{Role: "assistant", Blocks: []*pbv2.RequestBlock{text("sixth assistant")}})
+	msgs2 := append(msgs, &pbv1.Message{Role: "assistant", Blocks: []*pbv1.RequestBlock{text("sixth assistant")}})
 	want2 := "assistant: assistant reply\nuser: third user\nassistant: fourth assistant\nuser: fifth user\nassistant: sixth assistant"
 	if got := extractConversationContext(msgs2); got != want2 {
 		t.Fatalf("window slide: context = %q, want %q", got, want2)
 	}
 
 	// The empty context sentinel.
-	if got := extractConversationContext([]*pbv2.Message{{Role: "system", Blocks: []*pbv2.RequestBlock{text("sys")}}}); got != "no prior conversation context available" {
+	if got := extractConversationContext([]*pbv1.Message{{Role: "system", Blocks: []*pbv1.RequestBlock{text("sys")}}}); got != "no prior conversation context available" {
 		t.Fatalf("empty context = %q", got)
 	}
 
@@ -1456,7 +1456,7 @@ func TestOrderedSeamContextExtraction(t *testing.T) {
 	// force the boundary back to the last whole rune (498 bytes = 166 界),
 	// plus "user: " and "...".
 	long := strings.Repeat("界", 200) // 600 source bytes, 3-byte runes
-	capped := extractConversationContext([]*pbv2.Message{{Role: "user", Blocks: []*pbv2.RequestBlock{text(long)}}})
+	capped := extractConversationContext([]*pbv1.Message{{Role: "user", Blocks: []*pbv1.RequestBlock{text(long)}}})
 	wantCapped := "user: " + strings.Repeat("界", 166) + "..."
 	if capped != wantCapped {
 		t.Fatalf("capped = %q (len %d), want %q (len %d)", capped, len(capped), wantCapped, len(wantCapped))

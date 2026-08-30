@@ -9,7 +9,7 @@ import (
 	"unicode/utf8"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"github.com/torana-edge/torana-plugin-sdk/sdktest"
 )
 
@@ -25,26 +25,26 @@ func newHarness(t *testing.T) *sdktest.Harness {
 
 // toolMsg builds a tool-role message whose tool-result block carries the
 // given ordered content arms.
-func toolMsg(id, name string, arms ...*pbv2.ToolResultContentBlock) *pbv2.Message {
-	return &pbv2.Message{Role: "tool", Blocks: []*pbv2.RequestBlock{{
-		Kind: &pbv2.RequestBlock_ToolResult{ToolResult: &pbv2.RequestToolResultBlock{
+func toolMsg(id, name string, arms ...*pbv1.ToolResultContentBlock) *pbv1.Message {
+	return &pbv1.Message{Role: "tool", Blocks: []*pbv1.RequestBlock{{
+		Kind: &pbv1.RequestBlock_ToolResult{ToolResult: &pbv1.RequestToolResultBlock{
 			ToolCallId: id, ToolName: name, Content: arms,
 		}},
 	}}}
 }
 
-func textArm(s string) *pbv2.ToolResultContentBlock {
-	return &pbv2.ToolResultContentBlock{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: s}}}
+func textArm(s string) *pbv1.ToolResultContentBlock {
+	return &pbv1.ToolResultContentBlock{Kind: &pbv1.ToolResultContentBlock_Text{Text: &pbv1.ToolResultTextBlock{Text: s}}}
 }
 
 // unknownArm is the ordered analog of the flat image part: a
 // provider-visible arm the text scanner cannot inspect.
-func unknownArm() *pbv2.ToolResultContentBlock {
-	return &pbv2.ToolResultContentBlock{Kind: &pbv2.ToolResultContentBlock_Unknown{Unknown: &pbv2.ToolResultUnknownBlock{Kind: "image", PayloadJson: []byte(`{"source":{"type":"base64","data":"x"}}`)}}}
+func unknownArm() *pbv1.ToolResultContentBlock {
+	return &pbv1.ToolResultContentBlock{Kind: &pbv1.ToolResultContentBlock_Unknown{Unknown: &pbv1.ToolResultUnknownBlock{Kind: "image", PayloadJson: []byte(`{"source":{"type":"base64","data":"x"}}`)}}}
 }
 
-func markerArm() *pbv2.ToolResultContentBlock {
-	return &pbv2.ToolResultContentBlock{Kind: &pbv2.ToolResultContentBlock_CacheBreakpoint{CacheBreakpoint: &pbv2.ToolResultCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}}
+func markerArm() *pbv1.ToolResultContentBlock {
+	return &pbv1.ToolResultContentBlock{Kind: &pbv1.ToolResultContentBlock_CacheBreakpoint{CacheBreakpoint: &pbv1.ToolResultCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}}
 }
 
 func offloadStub(completion string) func(string) (string, error) {
@@ -68,8 +68,8 @@ func countCommand(h *sdktest.Harness, cmd string) int {
 	return n
 }
 
-func reqWith(msgs ...*pbv2.Message) *pbv2.ChatRequest {
-	return &pbv2.ChatRequest{Messages: msgs}
+func reqWith(msgs ...*pbv1.Message) *pbv1.ChatRequest {
+	return &pbv1.ChatRequest{Messages: msgs}
 }
 
 // assertBlocked asserts EXACTLY one block verdict with status 422, the given
@@ -101,26 +101,26 @@ func assertBlocked(t *testing.T, h *sdktest.Harness, code string, secrets ...str
 func TestExtractScannableTable(t *testing.T) {
 	cases := []struct {
 		name     string
-		arms     []*pbv2.ToolResultContentBlock
+		arms     []*pbv1.ToolResultContentBlock
 		wantText string
 		complete bool
 	}{
-		{"single text arm", []*pbv2.ToolResultContentBlock{textArm("line one\nline two")}, "line one\nline two", true},
-		{"two text arms", []*pbv2.ToolResultContentBlock{textArm("part a"), textArm("part b")}, "part a\npart b", true},
-		{"multiple text arms stable lines", []*pbv2.ToolResultContentBlock{textArm("first"), textArm("second")}, "first\nsecond", true},
+		{"single text arm", []*pbv1.ToolResultContentBlock{textArm("line one\nline two")}, "line one\nline two", true},
+		{"two text arms", []*pbv1.ToolResultContentBlock{textArm("part a"), textArm("part b")}, "part a\npart b", true},
+		{"multiple text arms stable lines", []*pbv1.ToolResultContentBlock{textArm("first"), textArm("second")}, "first\nsecond", true},
 		{"valid empty collection", nil, "", true},
-		{"explicit empty text arm", []*pbv2.ToolResultContentBlock{textArm("")}, "", true},
-		{"unknown arm", []*pbv2.ToolResultContentBlock{unknownArm()}, "", false},
-		{"unknown after text retains text", []*pbv2.ToolResultContentBlock{textArm("kept"), unknownArm()}, "kept", false},
-		{"text after unknown retained", []*pbv2.ToolResultContentBlock{unknownArm(), textArm("kept")}, "kept", false},
-		{"leading empty text arm", []*pbv2.ToolResultContentBlock{textArm(""), textArm("x")}, "\nx", true},
-		{"middle empty text arm", []*pbv2.ToolResultContentBlock{textArm("a"), textArm(""), textArm("b")}, "a\n\nb", true},
-		{"consecutive empty text arms", []*pbv2.ToolResultContentBlock{textArm(""), textArm(""), textArm("x")}, "\n\nx", true},
-		{"empty arm before unknown", []*pbv2.ToolResultContentBlock{textArm(""), unknownArm(), textArm("x")}, "\nx", false},
+		{"explicit empty text arm", []*pbv1.ToolResultContentBlock{textArm("")}, "", true},
+		{"unknown arm", []*pbv1.ToolResultContentBlock{unknownArm()}, "", false},
+		{"unknown after text retains text", []*pbv1.ToolResultContentBlock{textArm("kept"), unknownArm()}, "kept", false},
+		{"text after unknown retained", []*pbv1.ToolResultContentBlock{unknownArm(), textArm("kept")}, "kept", false},
+		{"leading empty text arm", []*pbv1.ToolResultContentBlock{textArm(""), textArm("x")}, "\nx", true},
+		{"middle empty text arm", []*pbv1.ToolResultContentBlock{textArm("a"), textArm(""), textArm("b")}, "a\n\nb", true},
+		{"consecutive empty text arms", []*pbv1.ToolResultContentBlock{textArm(""), textArm(""), textArm("x")}, "\n\nx", true},
+		{"empty arm before unknown", []*pbv1.ToolResultContentBlock{textArm(""), unknownArm(), textArm("x")}, "\nx", false},
 		// Cache-marker arms are the plugin's own carriers: skipped without
 		// affecting completeness (never provider content).
-		{"marker arm skipped", []*pbv2.ToolResultContentBlock{textArm("a"), markerArm(), textArm("b")}, "a\nb", true},
-		{"marker-only is a valid empty result", []*pbv2.ToolResultContentBlock{markerArm()}, "", true},
+		{"marker arm skipped", []*pbv1.ToolResultContentBlock{textArm("a"), markerArm(), textArm("b")}, "a\nb", true},
+		{"marker-only is a valid empty result", []*pbv1.ToolResultContentBlock{markerArm()}, "", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -232,11 +232,11 @@ func TestCacheKeyFramingIsUnambiguous(t *testing.T) {
 // tool-result blocks are candidates (no role gate), so a user-role result
 // carrying PII must block exactly like a tool-role one.
 func TestUserRoleResultIsACandidate(t *testing.T) {
-	msg := &pbv2.Message{Role: "user", Blocks: []*pbv2.RequestBlock{
-		{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "u"}}},
-		{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: &pbv2.RequestToolResultBlock{
+	msg := &pbv1.Message{Role: "user", Blocks: []*pbv1.RequestBlock{
+		{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "u"}}},
+		{Kind: &pbv1.RequestBlock_ToolResult{ToolResult: &pbv1.RequestToolResultBlock{
 			ToolCallId: "c1", ToolName: "read",
-			Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: "contact someone@example.com"}}}},
+			Content: []*pbv1.ToolResultContentBlock{{Kind: &pbv1.ToolResultContentBlock_Text{Text: &pbv1.ToolResultTextBlock{Text: "contact someone@example.com"}}}},
 		}}},
 	}}
 	h := newHarness(t)
@@ -282,33 +282,33 @@ func TestRegexCategoriesBlock(t *testing.T) {
 // duplicates.
 func TestDuplicateToolCallIDsAmbiguous(t *testing.T) {
 	email := "contact someone@example.com"
-	for name, mk := range map[string]func() *pbv2.ChatRequest{
-		"read then excluded": func() *pbv2.ChatRequest {
-			return &pbv2.ChatRequest{Messages: []*pbv2.Message{
-				{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "same", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
-				{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "same", Name: "excluded", ArgumentsJson: []byte(`{}`)}}}}},
+	for name, mk := range map[string]func() *pbv1.ChatRequest{
+		"read then excluded": func() *pbv1.ChatRequest {
+			return &pbv1.ChatRequest{Messages: []*pbv1.Message{
+				{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "same", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
+				{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "same", Name: "excluded", ArgumentsJson: []byte(`{}`)}}}}},
 				toolMsg("same", "", textArm(email)),
 			}}
 		},
-		"excluded then read": func() *pbv2.ChatRequest {
-			return &pbv2.ChatRequest{Messages: []*pbv2.Message{
-				{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "same", Name: "excluded", ArgumentsJson: []byte(`{}`)}}}}},
-				{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "same", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
+		"excluded then read": func() *pbv1.ChatRequest {
+			return &pbv1.ChatRequest{Messages: []*pbv1.Message{
+				{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "same", Name: "excluded", ArgumentsJson: []byte(`{}`)}}}}},
+				{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "same", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
 				toolMsg("same", "", textArm(email)),
 			}}
 		},
-		"same-name duplicates": func() *pbv2.ChatRequest {
-			return &pbv2.ChatRequest{Messages: []*pbv2.Message{
-				{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "same", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
-				{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "same", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
+		"same-name duplicates": func() *pbv1.ChatRequest {
+			return &pbv1.ChatRequest{Messages: []*pbv1.Message{
+				{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "same", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
+				{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "same", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
 				toolMsg("same", "", textArm(email)),
 			}}
 		},
-		"reuse in a later message": func() *pbv2.ChatRequest {
-			return &pbv2.ChatRequest{Messages: []*pbv2.Message{
-				{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "same", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
-				{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "same", Name: "excluded", ArgumentsJson: []byte(`{}`)}}}}},
-				{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "later"}}}}},
+		"reuse in a later message": func() *pbv1.ChatRequest {
+			return &pbv1.ChatRequest{Messages: []*pbv1.Message{
+				{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "same", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
+				{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "same", Name: "excluded", ArgumentsJson: []byte(`{}`)}}}}},
+				{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "later"}}}}},
 				toolMsg("same", "", textArm(email)),
 			}}
 		},
@@ -329,9 +329,9 @@ func TestDuplicateToolCallIDsAmbiguous(t *testing.T) {
 	// An explicit tool-result name remains authoritative.
 	h := newHarness(t)
 	h.SetConfig(`{"tools":["read"]}`)
-	req := &pbv2.ChatRequest{Messages: []*pbv2.Message{
-		{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "same", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
-		{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "same", Name: "excluded", ArgumentsJson: []byte(`{}`)}}}}},
+	req := &pbv1.ChatRequest{Messages: []*pbv1.Message{
+		{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "same", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
+		{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "same", Name: "excluded", ArgumentsJson: []byte(`{}`)}}}}},
 		toolMsg("same", "read", textArm("contact someone@example.com")),
 	}}
 	res := h.BeforeRequest(req)
@@ -380,7 +380,7 @@ func TestCleanCacheSkipsRescan(t *testing.T) {
 func TestCacheRefusalClasses(t *testing.T) {
 	h := newHarness(t)
 	h.StubHostCall("env.cache_get", func(string) (string, error) {
-		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no cache"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no cache"), nil
 	})
 	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("no pii here"))))
 	if res.Err != nil || !res.PassedThrough {
@@ -562,9 +562,9 @@ func TestToolLabelSafety(t *testing.T) {
 // failure governed by on_error; contract refusals and malformed frames error
 // the hook regardless of on_error.
 func TestModelScanRefusalClasses(t *testing.T) {
-	for _, code := range []pbv2.ErrorCode{
-		pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED,
-		pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE,
+	for _, code := range []pbv1.ErrorCode{
+		pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED,
+		pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE,
 	} {
 		t.Run("advisory/"+code.String(), func(t *testing.T) {
 			h := newHarness(t)
@@ -584,7 +584,7 @@ func TestModelScanRefusalClasses(t *testing.T) {
 		h := newHarness(t)
 		h.SetConfig(`{"provider":"local","model":"qwen","on_error":"allow"}`)
 		h.StubHostCall("torana_offload_completion", func(string) (string, error) {
-			return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, "stub"), nil
+			return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "stub"), nil
 		})
 		res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("text"))))
 		if res.Err != nil || !res.PassedThrough {
@@ -595,10 +595,10 @@ func TestModelScanRefusalClasses(t *testing.T) {
 		}
 	})
 
-	for _, code := range []pbv2.ErrorCode{
-		pbv2.ErrorCode_ERROR_CODE_PERMISSION_DENIED,
-		pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT,
-		pbv2.ErrorCode_ERROR_CODE_INTERNAL,
+	for _, code := range []pbv1.ErrorCode{
+		pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED,
+		pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT,
+		pbv1.ErrorCode_ERROR_CODE_INTERNAL,
 	} {
 		t.Run("contract/"+code.String(), func(t *testing.T) {
 			for _, onError := range []string{"block", "allow"} {

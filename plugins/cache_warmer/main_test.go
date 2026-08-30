@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"github.com/torana-edge/torana-plugin-sdk/sdktest"
 	"google.golang.org/protobuf/proto"
 )
@@ -31,15 +31,15 @@ const warmerCfg = `{"conversations":"conv-1","warm_for_minutes":45}`
 // warmRequest is a valid ordered-ABI request carrying a cache-breakpoint
 // carrier (the last marker on the system message), exactly as the request
 // path observes one.
-func warmRequest() *pbv2.ChatRequest {
-	return &pbv2.ChatRequest{
+func warmRequest() *pbv1.ChatRequest {
+	return &pbv1.ChatRequest{
 		Model: "claude-sonnet-4",
-		Messages: []*pbv2.Message{
-			{Role: "system", Blocks: []*pbv2.RequestBlock{
-				{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "you are a coding agent"}}},
-				{Kind: &pbv2.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pbv2.RequestCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}},
+		Messages: []*pbv1.Message{
+			{Role: "system", Blocks: []*pbv1.RequestBlock{
+				{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "you are a coding agent"}}},
+				{Kind: &pbv1.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pbv1.RequestCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}},
 			}},
-			{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "find the bug"}}}}},
+			{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "find the bug"}}}}},
 		},
 	}
 }
@@ -59,7 +59,7 @@ func warmPrefix(t *testing.T) string {
 // via the production helper (write and replay must agree).
 func warmFingerprint(t *testing.T) string {
 	t.Helper()
-	prefix, _, err := pbv2.RequestObservablePrefix(warmRequest())
+	prefix, _, err := pbv1.RequestObservablePrefix(warmRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,17 +68,17 @@ func warmFingerprint(t *testing.T) string {
 
 // textMsg builds an ordered message: text block, plus the cache-breakpoint
 // carrier when marker is true.
-func textMsg(role, text string, marker bool) *pbv2.Message {
-	blocks := []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: text}}}}
+func textMsg(role, text string, marker bool) *pbv1.Message {
+	blocks := []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: text}}}}
 	if marker {
-		blocks = append(blocks, &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pbv2.RequestCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}})
+		blocks = append(blocks, &pbv1.RequestBlock{Kind: &pbv1.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pbv1.RequestCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}})
 	}
-	return &pbv2.Message{Role: role, Blocks: blocks}
+	return &pbv1.Message{Role: role, Blocks: blocks}
 }
 
 // uReq is a minimal opted-in request (user message with a marker + meta).
-func uReq() *pbv2.ChatRequest {
-	req := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{textMsg("user", "u", true)}}
+func uReq() *pbv1.ChatRequest {
+	req := &pbv1.ChatRequest{Model: "m", Messages: []*pbv1.Message{textMsg("user", "u", true)}}
 	req.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
 	return req
 }
@@ -155,7 +155,7 @@ func seedEntry(t *testing.T, h *sdktest.Harness, entry warmEntry) {
 }
 
 func tickAt(h *sdktest.Harness, now int64) {
-	h.Tick(&pbv2.TickRequest{UnixMillis: now})
+	h.Tick(&pbv1.TickRequest{UnixMillis: now})
 }
 
 // ==========================================================================
@@ -168,9 +168,9 @@ func TestRequestPathStoresOptedInEntryAndPassesThrough(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(warmerCfg)
 	h.SetNow(100_000)
-	req := &pbv2.ChatRequest{
+	req := &pbv1.ChatRequest{
 		Model:          "claude-sonnet-4",
-		Messages:       []*pbv2.Message{textMsg("system", "s", true), textMsg("user", "u", false)},
+		Messages:       []*pbv1.Message{textMsg("system", "s", true), textMsg("user", "u", false)},
 		ToranaMetaJson: []byte(`{"_provider":"anthropic","_conversation_id":"conv-1","_path":"/v1/messages"}`),
 	}
 	res := h.BeforeRequest(req)
@@ -199,17 +199,17 @@ func TestRequestPathStoresOptedInEntryAndPassesThrough(t *testing.T) {
 // TestRequestPathStoresNothingWhenIneligible — non-opted-in, no meta, no
 // breakpoint, and an unavailable clock all store nothing.
 func TestRequestPathStoresNothingWhenIneligible(t *testing.T) {
-	for name, setup := range map[string]func(*sdktest.Harness) *pbv2.ChatRequest{
-		"non-opted-in": func(h *sdktest.Harness) *pbv2.ChatRequest {
-			req := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{textMsg("user", "u", true)}}
+	for name, setup := range map[string]func(*sdktest.Harness) *pbv1.ChatRequest{
+		"non-opted-in": func(h *sdktest.Harness) *pbv1.ChatRequest {
+			req := &pbv1.ChatRequest{Model: "m", Messages: []*pbv1.Message{textMsg("user", "u", true)}}
 			req.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"other","_path":"/x"}`)
 			return req
 		},
-		"no meta": func(h *sdktest.Harness) *pbv2.ChatRequest {
-			return &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{textMsg("user", "u", true)}}
+		"no meta": func(h *sdktest.Harness) *pbv1.ChatRequest {
+			return &pbv1.ChatRequest{Model: "m", Messages: []*pbv1.Message{textMsg("user", "u", true)}}
 		},
-		"no breakpoint": func(h *sdktest.Harness) *pbv2.ChatRequest {
-			req := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{textMsg("user", "u", false)}}
+		"no breakpoint": func(h *sdktest.Harness) *pbv1.ChatRequest {
+			req := &pbv1.ChatRequest{Model: "m", Messages: []*pbv1.Message{textMsg("user", "u", false)}}
 			req.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
 			return req
 		},
@@ -232,9 +232,9 @@ func TestRequestPathStoresNothingWhenIneligible(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(warmerCfg)
 	h.StubHostCall("env.now", func(string) (string, error) {
-		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no clock"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no clock"), nil
 	})
-	req := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{textMsg("user", "u", true)}}
+	req := &pbv1.ChatRequest{Model: "m", Messages: []*pbv1.Message{textMsg("user", "u", true)}}
 	req.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
 	res := h.BeforeRequest(req)
 	if res.Err != nil || !res.PassedThrough {
@@ -251,8 +251,8 @@ func TestRequestPathDeterminism(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(warmerCfg)
 	h.SetNow(100_000)
-	build := func() *pbv2.ChatRequest {
-		req := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{textMsg("user", "u", true)}}
+	build := func() *pbv1.ChatRequest {
+		req := &pbv1.ChatRequest{Model: "m", Messages: []*pbv1.Message{textMsg("user", "u", true)}}
 		req.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
 		return req
 	}
@@ -374,7 +374,7 @@ func TestTickAdvisorySendRefusalStopsNoRetry(t *testing.T) {
 	h.SetConfig(warmerCfg)
 	h.StubHostCall("torana_cache_pricing", pricingStub())
 	h.StubHostCall("torana_send_request", func(string) (string, error) {
-		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, "transient"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "transient"), nil
 	})
 	seedEntry(t, h, warmEntrySeed(t))
 	tickAt(h, 300_000)
@@ -386,7 +386,7 @@ func TestTickAdvisorySendRefusalStopsNoRetry(t *testing.T) {
 	h2.SetConfig(warmerCfg)
 	h2.StubHostCall("torana_cache_pricing", pricingStub())
 	h2.StubHostCall("torana_send_request", func(string) (string, error) {
-		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, "transient"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "transient"), nil
 	})
 	h2.SeedState("warm/conv-1", raw)
 	tickAt(h2, 300_000)
@@ -402,10 +402,10 @@ func TestTickContractSendRefusalErrors(t *testing.T) {
 	h.SetConfig(warmerCfg)
 	h.StubHostCall("torana_cache_pricing", pricingStub())
 	h.StubHostCall("torana_send_request", func(string) (string, error) {
-		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub"), nil
 	})
 	seedEntry(t, h, warmEntrySeed(t))
-	if res := h.Tick(&pbv2.TickRequest{UnixMillis: 300_000}); res.Err == nil {
+	if res := h.Tick(&pbv1.TickRequest{UnixMillis: 300_000}); res.Err == nil {
 		t.Fatal("a contract egress refusal must error the tick")
 	}
 }
@@ -416,7 +416,7 @@ func TestTickPricingAdvisoryStopsContractErrors(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(warmerCfg)
 	h.StubHostCall("torana_cache_pricing", func(string) (string, error) {
-		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no pricing"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no pricing"), nil
 	})
 	seedEntry(t, h, warmEntrySeed(t))
 	tickAt(h, 300_000)
@@ -433,10 +433,10 @@ func TestTickPricingAdvisoryStopsContractErrors(t *testing.T) {
 	h2 := newHarness(t)
 	h2.SetConfig(warmerCfg)
 	h2.StubHostCall("torana_cache_pricing", func(string) (string, error) {
-		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub"), nil
 	})
 	seedEntry(t, h2, warmEntrySeed(t))
-	if res := h2.Tick(&pbv2.TickRequest{UnixMillis: 300_000}); res.Err == nil {
+	if res := h2.Tick(&pbv1.TickRequest{UnixMillis: 300_000}); res.Err == nil {
 		t.Fatal("a contract pricing refusal must error the tick")
 	}
 }
@@ -502,20 +502,20 @@ func TestTickNoSpendGates(t *testing.T) {
 // missing breakpoint each stop with zero sends.
 func TestTickEntryValidationStopsWithZeroSends(t *testing.T) {
 	badPrefix := func() string {
-		req := &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{textMsg("user", "u", true)}}
+		req := &pbv1.ChatRequest{Model: "m", Messages: []*pbv1.Message{textMsg("user", "u", true)}}
 		enc, _ := sdk.EncodeRequest(req)
 		return enc
 	}
 	midToolPrefix := func() string {
-		req := &pbv2.ChatRequest{Model: "claude-sonnet-4", Messages: []*pbv2.Message{
+		req := &pbv1.ChatRequest{Model: "claude-sonnet-4", Messages: []*pbv1.Message{
 			textMsg("system", "s", true),
-			{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "c1", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
+			{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "c1", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
 		}}
 		enc, _ := sdk.EncodeRequest(req)
 		return enc
 	}
 	noBreakpointPrefix := func() string {
-		req := &pbv2.ChatRequest{Model: "claude-sonnet-4", Messages: []*pbv2.Message{textMsg("user", "u", false)}}
+		req := &pbv1.ChatRequest{Model: "claude-sonnet-4", Messages: []*pbv1.Message{textMsg("user", "u", false)}}
 		enc, _ := sdk.EncodeRequest(req)
 		return enc
 	}
@@ -586,7 +586,7 @@ func TestTickEntryValidationStopsWithZeroSends(t *testing.T) {
 				t.Fatalf("env.state_set calls = %d, want exactly 1 (stop-reason persistence only)", len(stateSets))
 			}
 			// The typed host call carries protobuf-encoded StateSetArgs.
-			var setArgs pbv2.StateSetArgs
+			var setArgs pbv1.StateSetArgs
 			if err := proto.Unmarshal([]byte(stateSets[0]), &setArgs); err != nil {
 				t.Fatalf("state_set args not a StateSetArgs proto: %v", err)
 			}
@@ -625,7 +625,7 @@ func TestTickReservationWriteFailureMeansZeroSends(t *testing.T) {
 	h.StubHostCall("torana_cache_pricing", pricingStub())
 	h.StubHostCall("torana_send_request", hitStub())
 	h.StubHostCall("env.state_set", func(string) (string, error) {
-		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no store"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no store"), nil
 	})
 	seedEntry(t, h, warmEntrySeed(t))
 	tickAt(h, 300_000)
@@ -638,10 +638,10 @@ func TestTickReservationWriteFailureMeansZeroSends(t *testing.T) {
 	h2.StubHostCall("torana_cache_pricing", pricingStub())
 	h2.StubHostCall("torana_send_request", hitStub())
 	h2.StubHostCall("env.state_set", func(string) (string, error) {
-		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub"), nil
 	})
 	seedEntry(t, h2, warmEntrySeed(t))
-	if res := h2.Tick(&pbv2.TickRequest{UnixMillis: 300_000}); res.Err == nil {
+	if res := h2.Tick(&pbv1.TickRequest{UnixMillis: 300_000}); res.Err == nil {
 		t.Fatal("a contract reservation failure must error the tick")
 	}
 	if n := countCommand(h2, "torana_send_request"); n != 0 {
@@ -663,7 +663,7 @@ func TestTickFinalizeWriteFailureKeepsPending(t *testing.T) {
 		if sets == 1 {
 			return sdktest.HostResultValue(nil), nil // reservation succeeds
 		}
-		return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no store"), nil // finalize fails
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no store"), nil // finalize fails
 	})
 	seedEntry(t, h, warmEntrySeed(t))
 	tickAt(h, 300_000)
@@ -731,13 +731,13 @@ func TestTickStateReadFailureClasses(t *testing.T) {
 		return "not a frame", nil
 	})
 	seedEntry(t, h, warmEntrySeed(t))
-	if res := h.Tick(&pbv2.TickRequest{UnixMillis: 300_000}); res.Err == nil {
+	if res := h.Tick(&pbv1.TickRequest{UnixMillis: 300_000}); res.Err == nil {
 		t.Fatal("a malformed state frame must error the tick")
 	}
 
 	h2 := newHarness(t)
 	h2.SetConfig(warmerCfg)
-	if res := h2.Tick(&pbv2.TickRequest{UnixMillis: 300_000}); res.Err != nil {
+	if res := h2.Tick(&pbv1.TickRequest{UnixMillis: 300_000}); res.Err != nil {
 		t.Fatalf("no entries: tick must be idle, err=%v", res.Err)
 	}
 }
@@ -918,13 +918,13 @@ func TestRequestPathSanitizedReplayAndFingerprint(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(warmerCfg)
 	h.SetNow(100_000)
-	req := &pbv2.ChatRequest{
+	req := &pbv1.ChatRequest{
 		Model:          "claude-sonnet-4",
 		Stream:         true,
-		Messages:       []*pbv2.Message{textMsg("system", "s", true), textMsg("user", "u", false)},
+		Messages:       []*pbv1.Message{textMsg("system", "s", true), textMsg("user", "u", false)},
 		ToranaMetaJson: []byte(`{"_provider":"anthropic","_conversation_id":"conv-1","_path":"/v1/messages","_request_headers":"x"}`),
 	}
-	before := proto.Clone(req).(*pbv2.ChatRequest)
+	before := proto.Clone(req).(*pbv1.ChatRequest)
 	res := h.BeforeRequest(req)
 	if res.Err != nil || !res.PassedThrough {
 		t.Fatalf("must pass through, err=%v", res.Err)
@@ -949,7 +949,7 @@ func TestRequestPathSanitizedReplayAndFingerprint(t *testing.T) {
 	// INDEPENDENT expected: a direct clone with the two fields cleared by
 	// hand — never the production sanitizeReplay (the oracle must not share
 	// mutation code with the implementation).
-	expected := proto.Clone(req).(*pbv2.ChatRequest)
+	expected := proto.Clone(req).(*pbv1.ChatRequest)
 	expected.Stream = false
 	expected.ToranaMetaJson = nil
 	if !proto.Equal(decoded, expected) {
@@ -963,7 +963,7 @@ func TestRequestPathSanitizedReplayAndFingerprint(t *testing.T) {
 	}
 	// Fingerprint: the production helper over the projection of the ORIGINAL
 	// request (stream/meta excluded by the projection itself).
-	prefix, _, err := pbv2.RequestObservablePrefix(req)
+	prefix, _, err := pbv1.RequestObservablePrefix(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -980,18 +980,18 @@ func TestRequestPathExactCallMultisets(t *testing.T) {
 	outOfDomain := uReq()
 	outOfDomain.Messages[0].Blocks = outOfDomain.Messages[0].Blocks[:0]
 	noMarker := uReq()
-	noMarker.Messages = []*pbv2.Message{textMsg("user", "u", false)}
-	terminalSuffix := &pbv2.ChatRequest{
+	noMarker.Messages = []*pbv1.Message{textMsg("user", "u", false)}
+	terminalSuffix := &pbv1.ChatRequest{
 		Model: "m",
-		Messages: []*pbv2.Message{
+		Messages: []*pbv1.Message{
 			textMsg("user", "u", true),
-			{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "c1", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
+			{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "c1", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
 		},
 	}
 	terminalSuffix.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
 	for _, row := range []struct {
 		name string
-		req  *pbv2.ChatRequest
+		req  *pbv1.ChatRequest
 	}{
 		{"out of domain", outOfDomain},
 		{"no marker", noMarker},
@@ -1001,7 +1001,7 @@ func TestRequestPathExactCallMultisets(t *testing.T) {
 			h := newHarness(t)
 			h.SetConfig(warmerCfg)
 			h.SetNow(100_000)
-			before := proto.Clone(row.req).(*pbv2.ChatRequest)
+			before := proto.Clone(row.req).(*pbv1.ChatRequest)
 			res := h.BeforeRequest(row.req)
 			if res.Err != nil || !res.PassedThrough {
 				t.Fatalf("must pass, err=%v", res.Err)
@@ -1028,27 +1028,27 @@ func TestRequestPathExactCallMultisets(t *testing.T) {
 // one call, multiple calls, text+call in both block orders are terminal; a
 // later tool-result/user turn is the control (not terminal).
 func TestEndsWithUnansweredToolCallOrdered(t *testing.T) {
-	toolUse := func(id string) *pbv2.RequestBlock {
-		return &pbv2.RequestBlock{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: id, Name: "read", ArgumentsJson: []byte(`{}`)}}}
+	toolUse := func(id string) *pbv1.RequestBlock {
+		return &pbv1.RequestBlock{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: id, Name: "read", ArgumentsJson: []byte(`{}`)}}}
 	}
 	rows := []struct {
 		name string
-		req  *pbv2.ChatRequest
+		req  *pbv1.ChatRequest
 		want bool
 	}{
-		{"one call", &pbv2.ChatRequest{Messages: []*pbv2.Message{{Role: "assistant", Blocks: []*pbv2.RequestBlock{toolUse("c1")}}}}, true},
-		{"multiple calls", &pbv2.ChatRequest{Messages: []*pbv2.Message{{Role: "assistant", Blocks: []*pbv2.RequestBlock{toolUse("c1"), toolUse("c2")}}}}, true},
-		{"text then call", &pbv2.ChatRequest{Messages: []*pbv2.Message{{Role: "assistant", Blocks: []*pbv2.RequestBlock{textMsg("assistant", "t", false).Blocks[0], toolUse("c1")}}}}, true},
-		{"call then text", &pbv2.ChatRequest{Messages: []*pbv2.Message{{Role: "assistant", Blocks: []*pbv2.RequestBlock{toolUse("c1"), textMsg("assistant", "t", false).Blocks[0]}}}}, true},
-		{"control: later tool-result turn", &pbv2.ChatRequest{Messages: []*pbv2.Message{
-			{Role: "assistant", Blocks: []*pbv2.RequestBlock{toolUse("c1")}},
-			{Role: "tool", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: &pbv2.RequestToolResultBlock{ToolCallId: "c1", Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: "ok"}}}}}}}}},
+		{"one call", &pbv1.ChatRequest{Messages: []*pbv1.Message{{Role: "assistant", Blocks: []*pbv1.RequestBlock{toolUse("c1")}}}}, true},
+		{"multiple calls", &pbv1.ChatRequest{Messages: []*pbv1.Message{{Role: "assistant", Blocks: []*pbv1.RequestBlock{toolUse("c1"), toolUse("c2")}}}}, true},
+		{"text then call", &pbv1.ChatRequest{Messages: []*pbv1.Message{{Role: "assistant", Blocks: []*pbv1.RequestBlock{textMsg("assistant", "t", false).Blocks[0], toolUse("c1")}}}}, true},
+		{"call then text", &pbv1.ChatRequest{Messages: []*pbv1.Message{{Role: "assistant", Blocks: []*pbv1.RequestBlock{toolUse("c1"), textMsg("assistant", "t", false).Blocks[0]}}}}, true},
+		{"control: later tool-result turn", &pbv1.ChatRequest{Messages: []*pbv1.Message{
+			{Role: "assistant", Blocks: []*pbv1.RequestBlock{toolUse("c1")}},
+			{Role: "tool", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolResult{ToolResult: &pbv1.RequestToolResultBlock{ToolCallId: "c1", Content: []*pbv1.ToolResultContentBlock{{Kind: &pbv1.ToolResultContentBlock_Text{Text: &pbv1.ToolResultTextBlock{Text: "ok"}}}}}}}}},
 		}}, false},
-		{"control: later user turn", &pbv2.ChatRequest{Messages: []*pbv2.Message{
-			{Role: "assistant", Blocks: []*pbv2.RequestBlock{toolUse("c1")}},
+		{"control: later user turn", &pbv1.ChatRequest{Messages: []*pbv1.Message{
+			{Role: "assistant", Blocks: []*pbv1.RequestBlock{toolUse("c1")}},
 			textMsg("user", "continue", false),
 		}}, false},
-		{"control: no messages", &pbv2.ChatRequest{}, false},
+		{"control: no messages", &pbv1.ChatRequest{}, false},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -1067,9 +1067,9 @@ func TestRequestPathValidNonTerminalSuffix(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(warmerCfg)
 	h.SetNow(100_000)
-	withSuffix := &pbv2.ChatRequest{
+	withSuffix := &pbv1.ChatRequest{
 		Model:          "m",
-		Messages:       []*pbv2.Message{textMsg("user", "u", true), textMsg("user", "suffix", false)},
+		Messages:       []*pbv1.Message{textMsg("user", "u", true), textMsg("user", "suffix", false)},
 		ToranaMetaJson: []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`),
 	}
 	res := h.BeforeRequest(withSuffix)
@@ -1087,7 +1087,7 @@ func TestRequestPathValidNonTerminalSuffix(t *testing.T) {
 		t.Fatalf("the replay must include the valid suffix, got %d messages", len(decoded.Messages))
 	}
 	// Fingerprint equals the marker-only projection (identity did not move).
-	only, _, err := pbv2.RequestObservablePrefix(&pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{textMsg("user", "u", true)}})
+	only, _, err := pbv1.RequestObservablePrefix(&pbv1.ChatRequest{Model: "m", Messages: []*pbv1.Message{textMsg("user", "u", true)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1154,7 +1154,7 @@ func TestTickSeededPendingNeverRetries(t *testing.T) {
 // sendCall decodes the REAL torana_send_request host-call payload: the JSON
 // args with provider/path/timeout_ms and the base64 request_pb, protobuf-
 // decoded.
-func sendCall(t *testing.T, payload string) (provider, path string, timeoutMS int, req *pbv2.ChatRequest) {
+func sendCall(t *testing.T, payload string) (provider, path string, timeoutMS int, req *pbv1.ChatRequest) {
 	t.Helper()
 	var args struct {
 		Provider  string `json:"provider"`
@@ -1176,7 +1176,7 @@ func sendCall(t *testing.T, payload string) (provider, path string, timeoutMS in
 	if err != nil {
 		t.Fatalf("request_pb not base64: %v", err)
 	}
-	req = &pbv2.ChatRequest{}
+	req = &pbv1.ChatRequest{}
 	if err := proto.Unmarshal(raw, req); err != nil {
 		t.Fatalf("request_pb not a proto request: %v", err)
 	}
@@ -1188,8 +1188,8 @@ func sendCall(t *testing.T, payload string) (provider, path string, timeoutMS in
 // stops) plus tools and rich ordered blocks, with a valid non-terminal
 // suffix after the last marker — the exact-send pin must prove each of
 // these survives the round trip.
-func richWarmRequest() *pbv2.ChatRequest {
-	return &pbv2.ChatRequest{
+func richWarmRequest() *pbv1.ChatRequest {
+	return &pbv1.ChatRequest{
 		Model:                  "claude-sonnet-4",
 		MaxTokens:              proto.Int32(512),
 		Temperature:            proto.Float64(0.7),
@@ -1197,24 +1197,24 @@ func richWarmRequest() *pbv2.ChatRequest {
 		StopSequences:          []string{"END", "STOP"},
 		ProviderExtensionsJson: []byte(`{"custom":{"b":1,"a":2}}`),
 		SafetySettingsJson:     []byte(`[{"category":"A","threshold":"B"}]`),
-		Tools: []*pbv2.ToolDef{{
+		Tools: []*pbv1.ToolDef{{
 			Name: "read", Description: "d", ParametersJson: []byte(`{"type":"object"}`),
 		}},
-		Messages: []*pbv2.Message{
-			{Role: "system", Blocks: []*pbv2.RequestBlock{
-				{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "sys"}}},
-				{Kind: &pbv2.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pbv2.RequestCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}},
+		Messages: []*pbv1.Message{
+			{Role: "system", Blocks: []*pbv1.RequestBlock{
+				{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "sys"}}},
+				{Kind: &pbv1.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pbv1.RequestCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}},
 			}},
-			{Role: "user", Blocks: []*pbv2.RequestBlock{
-				{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "u"}}},
-				{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: &pbv2.RequestToolResultBlock{
+			{Role: "user", Blocks: []*pbv1.RequestBlock{
+				{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "u"}}},
+				{Kind: &pbv1.RequestBlock_ToolResult{ToolResult: &pbv1.RequestToolResultBlock{
 					ToolCallId: "c1",
-					Content: []*pbv2.ToolResultContentBlock{{
-						Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: "ok"}},
+					Content: []*pbv1.ToolResultContentBlock{{
+						Kind: &pbv1.ToolResultContentBlock_Text{Text: &pbv1.ToolResultTextBlock{Text: "ok"}},
 					}},
 				}}},
 			}},
-			{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "suffix"}}}}},
+			{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "suffix"}}}}},
 		},
 	}
 }
@@ -1239,7 +1239,7 @@ func TestTickExactSendPayload(t *testing.T) {
 	// Seed a RICH entry: the fingerprint is built INDEPENDENTLY (literal
 	// approved domain over the SDK projection).
 	rich := richWarmRequest()
-	projection, _, err := pbv2.RequestObservablePrefix(rich)
+	projection, _, err := pbv1.RequestObservablePrefix(rich)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1266,7 +1266,7 @@ func TestTickExactSendPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected := proto.Clone(replay).(*pbv2.ChatRequest)
+	expected := proto.Clone(replay).(*pbv1.ChatRequest)
 	expected.MaxTokens = proto.Int32(1)
 	if !proto.Equal(sentReq, expected) {
 		t.Fatalf("sent request is not the sanitized replay with only max_tokens=1\n got: %v\nwant: %v", sentReq, expected)
@@ -1305,7 +1305,7 @@ func TestTickExactSendPayload(t *testing.T) {
 	}
 	// Revert proof (a): an expected with ANY extra field changed must fail
 	// the equality — the pin is not vacuous.
-	tampered := proto.Clone(expected).(*pbv2.ChatRequest)
+	tampered := proto.Clone(expected).(*pbv1.ChatRequest)
 	tampered.Temperature = proto.Float64(0.5)
 	if proto.Equal(sentReq, tampered) {
 		t.Fatal("revert proof: an extra outgoing field change went undetected")
@@ -1314,43 +1314,43 @@ func TestTickExactSendPayload(t *testing.T) {
 
 // carrierInputs builds the four carrier shapes (tool-only, outer, nested,
 // mixed tool+outer) as opted-in observation requests.
-func carrierInputs() map[string]*pbv2.ChatRequest {
-	trText := func(s string) *pbv2.ToolResultContentBlock {
-		return &pbv2.ToolResultContentBlock{Kind: &pbv2.ToolResultContentBlock_Text{Text: &pbv2.ToolResultTextBlock{Text: s}}}
+func carrierInputs() map[string]*pbv1.ChatRequest {
+	trText := func(s string) *pbv1.ToolResultContentBlock {
+		return &pbv1.ToolResultContentBlock{Kind: &pbv1.ToolResultContentBlock_Text{Text: &pbv1.ToolResultTextBlock{Text: s}}}
 	}
-	trMarker := func() *pbv2.ToolResultContentBlock {
-		return &pbv2.ToolResultContentBlock{Kind: &pbv2.ToolResultContentBlock_CacheBreakpoint{CacheBreakpoint: &pbv2.ToolResultCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}}
+	trMarker := func() *pbv1.ToolResultContentBlock {
+		return &pbv1.ToolResultContentBlock{Kind: &pbv1.ToolResultContentBlock_CacheBreakpoint{CacheBreakpoint: &pbv1.ToolResultCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}}
 	}
-	outer := func() *pbv2.ChatRequest {
-		return &pbv2.ChatRequest{Model: "m", Messages: []*pbv2.Message{
-			{Role: "user", Blocks: []*pbv2.RequestBlock{
-				{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "u"}}},
-				{Kind: &pbv2.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pbv2.RequestCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}},
+	outer := func() *pbv1.ChatRequest {
+		return &pbv1.ChatRequest{Model: "m", Messages: []*pbv1.Message{
+			{Role: "user", Blocks: []*pbv1.RequestBlock{
+				{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "u"}}},
+				{Kind: &pbv1.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pbv1.RequestCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}},
 			}},
 		}}
 	}
-	return map[string]*pbv2.ChatRequest{
-		"tool-only": func() *pbv2.ChatRequest {
+	return map[string]*pbv1.ChatRequest{
+		"tool-only": func() *pbv1.ChatRequest {
 			r := outer()
-			r.Tools = []*pbv2.ToolDef{{Name: "read", Description: "d", ParametersJson: []byte(`{}`), CacheControlJson: []byte(`{"type":"ephemeral"}`)}}
+			r.Tools = []*pbv1.ToolDef{{Name: "read", Description: "d", ParametersJson: []byte(`{}`), CacheControlJson: []byte(`{"type":"ephemeral"}`)}}
 			r.Messages[0].Blocks = r.Messages[0].Blocks[:1]
 			return r
 		}(),
 		"outer": outer(),
-		"nested": func() *pbv2.ChatRequest {
+		"nested": func() *pbv1.ChatRequest {
 			r := outer()
-			r.Messages[0].Blocks = []*pbv2.RequestBlock{
-				{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "u"}}},
-				{Kind: &pbv2.RequestBlock_ToolResult{ToolResult: &pbv2.RequestToolResultBlock{
+			r.Messages[0].Blocks = []*pbv1.RequestBlock{
+				{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "u"}}},
+				{Kind: &pbv1.RequestBlock_ToolResult{ToolResult: &pbv1.RequestToolResultBlock{
 					ToolCallId: "c1",
-					Content:    []*pbv2.ToolResultContentBlock{trText("r"), trMarker()},
+					Content:    []*pbv1.ToolResultContentBlock{trText("r"), trMarker()},
 				}}},
 			}
 			return r
 		}(),
-		"mixed tool+outer (last = outer)": func() *pbv2.ChatRequest {
+		"mixed tool+outer (last = outer)": func() *pbv1.ChatRequest {
 			r := outer()
-			r.Tools = []*pbv2.ToolDef{{Name: "read", Description: "d", ParametersJson: []byte(`{}`), CacheControlJson: []byte(`{"type":"ephemeral"}`)}}
+			r.Tools = []*pbv1.ToolDef{{Name: "read", Description: "d", ParametersJson: []byte(`{}`), CacheControlJson: []byte(`{"type":"ephemeral"}`)}}
 			return r
 		}(),
 	}
@@ -1371,9 +1371,9 @@ func TestRequestPathCarrierFingerprintMatrix(t *testing.T) {
 	// A real VALID non-terminal suffix after the last marker: the sanitized
 	// full replay and the SDK projection differ for the intended boundary
 	// reason (the suffix is replayable but not part of the cached prefix).
-	suffixInput := func() *pbv2.ChatRequest {
+	suffixInput := func() *pbv1.ChatRequest {
 		r := carrierInputs()["outer"]
-		r.Messages = append(r.Messages, &pbv2.Message{Role: "user", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{Text: &pbv2.RequestTextBlock{Text: "suffix"}}}}})
+		r.Messages = append(r.Messages, &pbv1.Message{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "suffix"}}}}})
 		return r
 	}()
 	inputs := carrierInputs()
@@ -1401,7 +1401,7 @@ func TestRequestPathCarrierFingerprintMatrix(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			expected := proto.Clone(req).(*pbv2.ChatRequest)
+			expected := proto.Clone(req).(*pbv1.ChatRequest)
 			expected.Stream = false
 			expected.ToranaMetaJson = nil
 			if !proto.Equal(decoded, expected) {
@@ -1409,7 +1409,7 @@ func TestRequestPathCarrierFingerprintMatrix(t *testing.T) {
 			}
 			// Fingerprint == the independent digest oracle over the SDK
 			// projection (never prefixFingerprint).
-			projection, _, err := pbv2.RequestObservablePrefix(req)
+			projection, _, err := pbv1.RequestObservablePrefix(req)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1426,7 +1426,7 @@ func TestRequestPathCarrierFingerprintMatrix(t *testing.T) {
 			// mixed shapes the sanitized full replay legitimately EQUALS the
 			// projection, so no divergence is demanded there.
 			diverges := name == "tool-only" || name == "outer with valid suffix"
-			sanitizedFull := proto.Clone(req).(*pbv2.ChatRequest)
+			sanitizedFull := proto.Clone(req).(*pbv1.ChatRequest)
 			sanitizedFull.Stream = false
 			sanitizedFull.ToranaMetaJson = nil
 			rawBytes, _ := proto.Marshal(sanitizedFull)
@@ -1451,7 +1451,7 @@ func TestRequestPathFingerprintSensitivity(t *testing.T) {
 	indepFingerprint := func(projection []byte) string {
 		return sdk.ContentAddressedCacheKey(domain, string(projection))
 	}
-	store := func(req *pbv2.ChatRequest) (warmEntry, *pbv2.ChatRequest) {
+	store := func(req *pbv1.ChatRequest) (warmEntry, *pbv1.ChatRequest) {
 		t.Helper()
 		// Preserve CALLER-PROVIDED valid opted-in metadata; inject the
 		// default only when absent (a caller-supplied payload must actually
@@ -1476,31 +1476,31 @@ func TestRequestPathFingerprintSensitivity(t *testing.T) {
 
 	// Before-boundary mutation, marker value, marker position, params,
 	// extensions, safety, stops: the fingerprint CHANGES.
-	mutations := map[string]func(*pbv2.ChatRequest){
-		"before-boundary text": func(r *pbv2.ChatRequest) { r.Messages[0].Blocks[0].GetText().Text = "changed" },
-		"marker value": func(r *pbv2.ChatRequest) {
+	mutations := map[string]func(*pbv1.ChatRequest){
+		"before-boundary text": func(r *pbv1.ChatRequest) { r.Messages[0].Blocks[0].GetText().Text = "changed" },
+		"marker value": func(r *pbv1.ChatRequest) {
 			r.Messages[0].Blocks[1].GetCacheBreakpoint().MarkerJson = []byte(`{"type":"standard"}`)
 		},
-		"marker position": func(r *pbv2.ChatRequest) {
+		"marker position": func(r *pbv1.ChatRequest) {
 			// ISOLATED: the same two blocks, only the marker moves from
 			// blocks[1] to blocks[0] — the boundary changes (the text drops
 			// out of the truncated prefix) with NO content added or removed.
-			r.Messages[0].Blocks = []*pbv2.RequestBlock{
+			r.Messages[0].Blocks = []*pbv1.RequestBlock{
 				r.Messages[0].Blocks[1],
 				r.Messages[0].Blocks[0],
 			}
 		},
-		"params":     func(r *pbv2.ChatRequest) { r.MaxTokens = proto.Int32(64) },
-		"extensions": func(r *pbv2.ChatRequest) { r.ProviderExtensionsJson = []byte(`{"x":1}`) },
-		"safety":     func(r *pbv2.ChatRequest) { r.SafetySettingsJson = []byte(`[]`) },
-		"stops":      func(r *pbv2.ChatRequest) { r.StopSequences = []string{"END"} },
+		"params":     func(r *pbv1.ChatRequest) { r.MaxTokens = proto.Int32(64) },
+		"extensions": func(r *pbv1.ChatRequest) { r.ProviderExtensionsJson = []byte(`{"x":1}`) },
+		"safety":     func(r *pbv1.ChatRequest) { r.SafetySettingsJson = []byte(`[]`) },
+		"stops":      func(r *pbv1.ChatRequest) { r.StopSequences = []string{"END"} },
 	}
 	for name, mutate := range mutations {
 		t.Run("changes/"+name, func(t *testing.T) {
-			req := proto.Clone(base).(*pbv2.ChatRequest)
+			req := proto.Clone(base).(*pbv1.ChatRequest)
 			mutate(req)
 			entry, _ := store(req)
-			projection, _, err := pbv2.RequestObservablePrefix(req)
+			projection, _, err := pbv1.RequestObservablePrefix(req)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1518,11 +1518,11 @@ func TestRequestPathFingerprintSensitivity(t *testing.T) {
 	// metadata payload is preserved by the store helper and actually
 	// dispatched, so the comparison exercises the metadata difference.
 	t.Run("stream and metadata neutral", func(t *testing.T) {
-		reqA := proto.Clone(base).(*pbv2.ChatRequest)
+		reqA := proto.Clone(base).(*pbv1.ChatRequest)
 		reqA.Stream = true
 		reqA.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x","_request_headers":"secret-a"}`)
 		entryA, decodedA := store(reqA)
-		reqB := proto.Clone(base).(*pbv2.ChatRequest)
+		reqB := proto.Clone(base).(*pbv1.ChatRequest)
 		reqB.Stream = true
 		reqB.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x","_request_headers":"secret-b"}`)
 		entryB, decodedB := store(reqB)
@@ -1532,7 +1532,7 @@ func TestRequestPathFingerprintSensitivity(t *testing.T) {
 		if entryA.PrefixFingerprint != baseEntry.PrefixFingerprint {
 			t.Fatal("stream/metadata changed the fingerprint")
 		}
-		for _, decoded := range []*pbv2.ChatRequest{decodedA, decodedB} {
+		for _, decoded := range []*pbv1.ChatRequest{decodedA, decodedB} {
 			if decoded.Stream {
 				t.Fatal("the sanitized replay kept stream=true")
 			}
@@ -1565,7 +1565,7 @@ func TestRequestPathTerminalSuffixPreservesEntry(t *testing.T) {
 	seed.PrefixFingerprint = func() string {
 		req := warmRequest()
 		req.Model = "claude-opus-4"
-		prefix, _, err := pbv2.RequestObservablePrefix(req)
+		prefix, _, err := pbv1.RequestObservablePrefix(req)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1574,11 +1574,11 @@ func TestRequestPathTerminalSuffixPreservesEntry(t *testing.T) {
 	seedBytes, _ := json.Marshal(seed)
 	h.SeedState("warm/conv-1", string(seedBytes))
 
-	terminal := &pbv2.ChatRequest{
+	terminal := &pbv1.ChatRequest{
 		Model: "m",
-		Messages: []*pbv2.Message{
+		Messages: []*pbv1.Message{
 			textMsg("user", "u", true),
-			{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{ToolUse: &pbv2.RequestToolUseBlock{Id: "c1", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
+			{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "c1", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
 		},
 	}
 	terminal.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
@@ -1619,7 +1619,7 @@ func TestTickActionsCountConfirmedCompletesOnly(t *testing.T) {
 		{"cache hit", hitStub(), 1, false},
 		{"cache rebuilt", rebuiltStub(), 1, false},
 		{"advisory send refusal", func(string) (string, error) {
-			return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, "transient"), nil
+			return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "transient"), nil
 		}, 0, false},
 		{"HTTP refusal", func(string) (string, error) {
 			return sdktest.HostResultValue([]byte(`{"http_status":401}`)), nil
@@ -1629,7 +1629,7 @@ func TestTickActionsCountConfirmedCompletesOnly(t *testing.T) {
 			return sdktest.HostResultValue([]byte(`not a domain body`)), nil
 		}, 0, true},
 		{"contract refusal", func(string) (string, error) {
-			return sdktest.HostResultError(pbv2.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "denied"), nil
+			return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "denied"), nil
 		}, 0, true},
 	}
 	for _, row := range rows {
@@ -1639,7 +1639,7 @@ func TestTickActionsCountConfirmedCompletesOnly(t *testing.T) {
 			h.StubHostCall("torana_cache_pricing", pricingStub())
 			h.StubHostCall("torana_send_request", row.send)
 			seedEntry(t, h, warmEntrySeed(t))
-			res := h.Tick(&pbv2.TickRequest{UnixMillis: 300_000})
+			res := h.Tick(&pbv1.TickRequest{UnixMillis: 300_000})
 			if row.wantErr {
 				if res.Err == nil {
 					t.Fatal("must error the tick without an emitted result")

@@ -33,7 +33,7 @@ import (
 	"unicode/utf8"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -106,7 +106,7 @@ func resetConfigForTest() {
 }
 
 func init() {
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv2.ChatRequest) (sdk.RequestResult, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
 		modified, err := compactToolResults(ctx, req)
 		if err != nil {
 			// failure_mode (pass) preserves the request; the host records the
@@ -124,7 +124,7 @@ func init() {
 // Tool result compaction
 // ==========================================================================
 
-func compactToolResults(ctx context.Context, req *pbv2.ChatRequest) (bool, error) {
+func compactToolResults(ctx context.Context, req *pbv1.ChatRequest) (bool, error) {
 	loadConfig()
 	modified := false
 	var modelWorks []modelWork
@@ -247,7 +247,7 @@ type tokenUsage struct {
 }
 
 type modelWork struct {
-	message  *pbv2.Message
+	message  *pbv1.Message
 	index    int    // message index (candidate identity + report tail)
 	block    int    // tool-result block index inside message
 	text     string // the scalar-compatible text
@@ -257,7 +257,7 @@ type modelWork struct {
 }
 
 type modelCandidate struct {
-	message       *pbv2.Message
+	message       *pbv1.Message
 	index         int
 	block         int
 	originalBytes int
@@ -283,7 +283,7 @@ type offloadResponse struct {
 // any uncached candidate, then the real post-offload report) and applies the
 // approved batch. Returns (applied, error); a contract-defect refusal errors
 // the hook, an advisory refusal declines the batch.
-func prepareAndApplyModelBatch(req *pbv2.ChatRequest, works []modelWork) (bool, error) {
+func prepareAndApplyModelBatch(req *pbv1.ChatRequest, works []modelWork) (bool, error) {
 	if len(works) == 0 || expectedApplications <= 0 {
 		return false, nil
 	}
@@ -327,7 +327,7 @@ func prepareAndApplyModelBatch(req *pbv2.ChatRequest, works []modelWork) (bool, 
 		}
 		if herr != nil {
 			switch herr.Code {
-			case pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE:
+			case pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE:
 				// Advisory: operator/transient. Skip this candidate; do NOT
 				// retry in the same request (duplicate spend).
 				continue
@@ -402,7 +402,7 @@ func optimisticModelCandidates(works []modelWork) ([]modelCandidate, bool) {
 	return candidates, hasUncached
 }
 
-func modelBatchReport(req *pbv2.ChatRequest, candidates []modelCandidate, includeOffload bool) (map[string]any, bool) {
+func modelBatchReport(req *pbv1.ChatRequest, candidates []modelCandidate, includeOffload bool) (map[string]any, bool) {
 	if len(candidates) == 0 {
 		return nil, false
 	}
@@ -437,7 +437,7 @@ func modelBatchReport(req *pbv2.ChatRequest, candidates []modelCandidate, includ
 		usage.InputIncludesCacheRead = usage.InputIncludesCacheRead || candidate.usage.InputIncludesCacheRead
 	}
 
-	tail := proto.Clone(req).(*pbv2.ChatRequest)
+	tail := proto.Clone(req).(*pbv1.ChatRequest)
 	tail.Messages = tail.Messages[earliest:]
 	rewriteBytes := proto.Size(tail) - originalBytes + finalBytes
 	report := map[string]any{
@@ -470,7 +470,7 @@ func evaluateModelReport(report map[string]any) (bool, error) {
 	}
 	if herr != nil {
 		switch herr.Code {
-		case pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE:
+		case pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE:
 			return false, nil
 		default:
 			return false, fmt.Errorf("compactor: evaluate_compaction refused: %s", herr.Message)
@@ -492,7 +492,7 @@ func estimateTokens(bytes int) int {
 	return (bytes + 3) / 4
 }
 
-func assistantMessageCountsAfter(messages []*pbv2.Message) []int {
+func assistantMessageCountsAfter(messages []*pbv1.Message) []int {
 	counts := make([]int, len(messages))
 	count := 0
 	for i := len(messages) - 1; i >= 0; i-- {
@@ -504,7 +504,7 @@ func assistantMessageCountsAfter(messages []*pbv2.Message) []int {
 	return counts
 }
 
-func applyDeterministicPolicy(msg *pbv2.Message, block int, text, toolName, toolArgs string, rule sdk.ToolPolicyRule) (bool, error) {
+func applyDeterministicPolicy(msg *pbv1.Message, block int, text, toolName, toolArgs string, rule sdk.ToolPolicyRule) (bool, error) {
 	cacheKey := sdk.ContentAddressedCacheKey(policyCompactionCache,
 		"v2", toolName, toolArgs, text, rule.Mode, rule.Rerun)
 	cached, herr, err := sdk.CacheGet(cacheKey)
@@ -552,7 +552,7 @@ func recordSavings(originalBytes, finalBytes int, source string) {
 	_, _, _ = sdk.HostCallExtension("torana_record_savings", payload)
 }
 
-func extractConversationContext(msgs []*pbv2.Message) string {
+func extractConversationContext(msgs []*pbv1.Message) string {
 	// Ordered port: the context is the last FIVE NON-EMPTY qualifying
 	// user/assistant messages, each capped at 500 SOURCE BYTES with the
 	// existing rune-safe boundary (truncHead). Text comes from the SDK's
