@@ -2,6 +2,6 @@ module github.com/torana-edge/torana-plugins/plugins/keyword_compactor
 
 go 1.25.0
 
-require github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260830203039-09f27a00a162
+require github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260830212027-1c1e1dd734e9
 
 require google.golang.org/protobuf v1.36.11
