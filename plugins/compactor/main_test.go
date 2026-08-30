@@ -81,7 +81,7 @@ func bigContent() string {
 // modelConfig enables the model path with an economic gate that must approve.
 const modelConfig = `{"tool_policies":[{"match":"read*","mode":"model"}],"expected_applications":6}`
 
-// offloadStub returns a v2-shaped success (NO status field) for the offload
+// offloadStub returns the typed success shape (NO status field) for the offload
 // host call.
 func offloadStub(completion string) func(args string) (string, error) {
 	return func(args string) (string, error) {
@@ -187,7 +187,7 @@ func TestTruncateForPromptMultibyteRuneSafety(t *testing.T) {
 }
 
 // TestModelBatchReportUsesAdjustedTailOnce re-pins the economics math against
-// the v2 wire: proto.Size over a pbv1 ChatRequest. Measured 2026-08-04 on the
+// the ordered wire: proto.Size over a pbv1 ChatRequest. Measured 2026-08-04 on the
 // ORDERED fixture (tool-role message with a tool-result block):
 // rewrite span 5060 bytes -> 1270 estimated tokens.
 func TestModelBatchReportUsesAdjustedTailOnce(t *testing.T) {
@@ -217,7 +217,7 @@ func TestModelBatchReportUsesAdjustedTailOnce(t *testing.T) {
 	// would collapse this to zero.
 	rewrite := report["estimated_rewrite_span_tokens"].(int)
 	if rewrite != 1_270 {
-		t.Fatalf("rewrite span estimate=%d, want 1270 (measured from the ordered v2 wire)", rewrite)
+		t.Fatalf("rewrite span estimate=%d, want 1270 (measured from the ordered wire)", rewrite)
 	}
 }
 
@@ -349,7 +349,7 @@ func TestDeterministicConsumptionGate(t *testing.T) {
 }
 
 // TestModelPathAppliesWithV2OffloadShape — the full model row: stubbed offload
-// with the v2 body (no status), economic gate approves; asserts the
+// with the typed body (no status), economic gate approves; asserts the
 // replacement, the cache write, the savings report, and the carried
 // provider/model/usage.
 func TestModelPathAppliesWithV2OffloadShape(t *testing.T) {
@@ -1136,7 +1136,7 @@ func TestDeterministicPresentEmptyReplacementRecomputes(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(cfg)
 	content := bigContent()
-	policyKey := sdk.ContentAddressedCacheKey(policyCompactionCache, "v2", "read", `{"path":"server.go"}`, content, "deterministic", "")
+	policyKey := sdk.ContentAddressedCacheKey(policyCompactionCache, "policy-v1", "read", `{"path":"server.go"}`, content, "deterministic", "")
 	h.SeedCache(policyKey, "") // present, empty
 	res := h.BeforeRequest(bigToolRequest(content))
 	if res.Err != nil || res.Request == nil {
@@ -1340,7 +1340,7 @@ func TestDeterministicNonShorterCacheRecomputes(t *testing.T) {
 	cfg := `{"tool_policies":[{"match":"read*","mode":"deterministic","first_pass":true}]}`
 	content := bigContent()
 	args := `{"path":"server.go"}`
-	key := sdk.ContentAddressedCacheKey(policyCompactionCache, "v2", "read", args, content, "deterministic", "")
+	key := sdk.ContentAddressedCacheKey(policyCompactionCache, "policy-v1", "read", args, content, "deterministic", "")
 	h := newHarness(t)
 	h.SetConfig(cfg)
 	h.SeedCache(key, content+"extra bytes making the cached value non-shorter")

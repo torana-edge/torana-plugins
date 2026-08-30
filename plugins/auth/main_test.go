@@ -645,7 +645,7 @@ func TestRequestIsNeverMutated(t *testing.T) {
 // Round-2 pins (lossless JSON / token boundaries)
 // ==========================================================================
 
-// TestValidVirtualKeyGrammar — the v2 virtual-key token is ASCII by contract:
+// TestValidVirtualKeyGrammar — the virtual-key token is ASCII by contract:
 // "sk-torana-" followed by at least one printable ASCII byte (0x21..0x7e).
 // Controls, whitespace, DEL, non-ASCII, and an empty suffix are not tokens —
 // so JSON transport of the token is lossless. Both header sources share this

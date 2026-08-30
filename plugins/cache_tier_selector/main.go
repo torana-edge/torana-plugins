@@ -31,7 +31,7 @@
 // save it, and would fail Torana's determinism test — which is the test that
 // exists to catch precisely this class of bug.
 //
-// # v2 semantics (ordered ABI, cache-tier reconciliation)
+// # Ordered cache-prefix semantics
 //
 //   - The only request mutation is the cache breakpoint marker, governed by
 //     the dedicated ir.cache_control.write grant — never content, role, tool

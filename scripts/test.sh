@@ -71,5 +71,5 @@ go run "$root/scripts/validate_manifests.go" "$root/plugins"
 "$root/scripts/test_build_without_sibling.sh"
 "$root/scripts/test_bundle_digest.sh"
 for module in "$root"/plugins/*; do
-  GOCACHE="$cache" go test "$module"
+  (cd "$module" && GOCACHE="$cache" go test ./...)
 done

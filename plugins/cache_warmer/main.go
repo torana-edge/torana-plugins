@@ -60,9 +60,9 @@ import (
 func main() {}
 
 // schemaVersion marks the durable entry format written by this plugin. Any
-// other version stops with zero sends. Version 3 requires the domain-separated
-// PrefixFingerprint and has no fallback decoder.
-const schemaVersion = 3
+// other version stops with zero sends. The format requires the
+// domain-separated PrefixFingerprint and has no fallback decoder.
+const schemaVersion = 1
 
 // warmEntry is everything needed to refresh one conversation, stored durably so
 // a restart does not lose track of what it was keeping alive.

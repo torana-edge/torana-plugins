@@ -4,7 +4,7 @@
 // detection. If PII is found the request is vetoed (env.block_request) with an
 // actionable, value-free error so the upstream model can adjust next turn.
 //
-// # v2 semantics (ordered body)
+// # Ordered-body semantics
 //
 //   - Every message's tool-result blocks are candidates (role-independent,
 //     position-addressed by the ordered seam). Structured content is
@@ -46,7 +46,7 @@ import (
 
 func main() {}
 
-const cleanCachePrefix = "pii_clean:v2"
+const cleanCachePrefix = "pii/clean"
 
 type piiConfig struct {
 	Provider     string   `json:"provider"`       // local-model provider (required to enable the model scan)
@@ -410,7 +410,7 @@ func modelScan(content, toolName string) ([]finding, error) {
 			return nil, fmt.Errorf("pii offload refused: %s", herr.Message)
 		}
 	}
-	// The v2 offload result carries NO status field; refusals arrive only in
+	// The typed offload result carries NO status field; refusals arrive only in
 	// the framed error arm. An undecodable value arm is a protocol defect.
 	var resp struct {
 		Completion string `json:"completion"`

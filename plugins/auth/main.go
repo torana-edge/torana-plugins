@@ -49,8 +49,8 @@ const maxVerifyMessageBytes = 1024
 // distinct by construction; the namespace keeps the two composition kinds
 // domain-separated.
 const (
-	identityNamespace    = "auth-identity-v2"
-	verifiedKeyNamespace = "auth-verified-key-v2"
+	identityNamespace    = "auth-identity"
+	verifiedKeyNamespace = "auth-verified-key"
 )
 
 // VerifyResponse is the strictly validated response to verify_virtual_key.
@@ -150,7 +150,7 @@ func requestHeaders(req *pbv1.ChatRequest) (map[string]any, error) {
 }
 
 // validVirtualKey is the ONE virtual-key validator shared by both header
-// sources. The v2 token grammar is explicitly ASCII: the prefix "sk-torana-"
+// sources. The token grammar is explicitly ASCII: the prefix "sk-torana-"
 // followed by at least one printable ASCII byte (0x21..0x7e), with no
 // controls, whitespace, DEL, non-ASCII, or empty suffix. ASCII is the
 // normative token grammar for a simple, interoperable, byte-stable

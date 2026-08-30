@@ -8,7 +8,7 @@ Each plugin requests capabilities in `plugin.json`; users approve those
 requests for the exact installed artifact. A request in a manifest is never a
 grant.
 
-All ten official plugins use ABI v2 and pin the same SDK revision. Their
+All eleven official plugins use Torana's ABI v1 and pin the same SDK revision. Their
 manifest ABI, hook, permission, and upstream contracts are checked as one
 executable release inventory.
 
@@ -43,6 +43,7 @@ This repository is only the first-party set — see
 
 ## Official plugins
 
+- `usage_logger` — the recommended first plugin: writes content-free request, latency, and token usage to a private rotating JSONL file.
 - `auth` — virtual-key and request-header identity normalization.
 - `cache_tier_selector` — buys the cheapest prompt-cache lifetime per conversation.
 - `cache_warmer` — keeps a chosen conversation's cache alive across an idle gap.

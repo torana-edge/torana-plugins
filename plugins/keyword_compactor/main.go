@@ -12,7 +12,7 @@
 // cache namespaces are disjoint (keyword_compactor/* vs compactor/*), so no
 // cross-plugin collision.
 //
-// v2 semantics (typed host calls, same rules as compactor):
+// Typed host-call semantics (same rules as compactor):
 //   - cache reads distinguish absent (NOT_FOUND) from present-empty; a
 //     present-empty or NON-SHORTER cached value is unusable and recomputed
 //     locally (these are local deterministic computations — trusting a
@@ -332,7 +332,7 @@ func assistantMessageCountsAfter(messages []*pbv1.Message) []int {
 // recomputed locally (the replacement is a pure function of the inputs).
 func applyDeterministicPolicy(msg *pbv1.Message, block int, text, toolName, toolArgs string, rule sdk.ToolPolicyRule) (bool, error) {
 	cacheKey := sdk.ContentAddressedCacheKey(policyCompactionCache,
-		"v2", toolName, toolArgs, text, rule.Mode, rule.Rerun)
+		"policy-v1", toolName, toolArgs, text, rule.Mode, rule.Rerun)
 	cached, herr, err := sdk.CacheGet(cacheKey)
 	if err != nil {
 		return false, fmt.Errorf("keyword_compactor: policy cache_get: %w", err)

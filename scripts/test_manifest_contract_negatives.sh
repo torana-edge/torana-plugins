@@ -137,4 +137,4 @@ open(f, 'a').write('\n')
 PYEOF
 expect fail "a duplicate conflict" "$tmp/duplicate-conflict"
 
-echo "manifest contract negatives: all ten cases pass"
+echo "manifest contract negatives: all ten adversarial cases pass"

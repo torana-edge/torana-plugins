@@ -2,6 +2,6 @@ module github.com/torana-edge/torana-plugins/plugins/pii
 
 go 1.25.0
 
-require github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260830201047-ead510f04a0e
+require github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260830203039-09f27a00a162
 
 require google.golang.org/protobuf v1.36.11 // indirect

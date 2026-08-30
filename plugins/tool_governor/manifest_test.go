@@ -25,7 +25,7 @@ func TestManifestPermissionSetExact(t *testing.T) {
 	if err := json.Unmarshal(raw, &manifest); err != nil {
 		t.Fatal(err)
 	}
-	if manifest.ABI != "v2" || manifest.FailureMode != "block" {
+	if manifest.ABI != "v1" || manifest.FailureMode != "block" {
 		t.Fatalf("abi/failure_mode = %q/%q", manifest.ABI, manifest.FailureMode)
 	}
 	if len(manifest.Hooks) != 1 || manifest.Hooks[0].Name != "run_before_request" {

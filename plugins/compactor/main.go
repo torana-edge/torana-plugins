@@ -11,7 +11,7 @@
 // call) — pick ONE per deployment; both can consume the same optional intent
 // cache.
 //
-// v2 semantics (typed host calls):
+// Typed host-call semantics:
 //   - cache reads distinguish absent (NOT_FOUND) from present-empty; neither
 //     is a usable model-authored intent, so both emit the miss metric and use
 //     the bounded local fallback;
@@ -562,7 +562,7 @@ func assistantMessageCountsAfter(messages []*pbv1.Message) []int {
 
 func applyDeterministicPolicy(msg *pbv1.Message, block int, text, toolName, toolArgs string, rule sdk.ToolPolicyRule) (bool, error) {
 	cacheKey := sdk.ContentAddressedCacheKey(policyCompactionCache,
-		"v2", toolName, toolArgs, text, rule.Mode, rule.Rerun)
+		"policy-v1", toolName, toolArgs, text, rule.Mode, rule.Rerun)
 	cached, herr, err := sdk.CacheGet(cacheKey)
 	if err != nil {
 		return false, fmt.Errorf("compactor: policy cache_get: %w", err)

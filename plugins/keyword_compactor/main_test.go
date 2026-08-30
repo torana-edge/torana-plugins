@@ -423,7 +423,7 @@ func TestDeterministicUnusableCachesRecompute(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)
 			h.SetConfig(deterministicCfg)
-			key := sdk.ContentAddressedCacheKey(policyCompactionCache, "v2", "read", args, content, "deterministic", "")
+			key := sdk.ContentAddressedCacheKey(policyCompactionCache, "policy-v1", "read", args, content, "deterministic", "")
 			h.SeedCache(key, seed)
 			res := h.BeforeRequest(bigToolRequest(content))
 			if res.Err != nil || res.Request == nil {

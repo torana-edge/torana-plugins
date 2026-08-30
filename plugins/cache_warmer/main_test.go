@@ -523,7 +523,7 @@ func TestTickEntryValidationStopsWithZeroSends(t *testing.T) {
 		name string
 		mut  func(*warmEntry)
 	}{
-		{"unsupported schema", func(e *warmEntry) { e.SchemaVersion = 1 }},
+		{"unsupported schema", func(e *warmEntry) { e.SchemaVersion = 2 }},
 		{"unreadable prefix", func(e *warmEntry) { e.PrefixPB = "not base64 protobuf" }},
 		{"mid tool call", func(e *warmEntry) { e.PrefixPB = midToolPrefix() }},
 		{"model mismatch", func(e *warmEntry) { e.PrefixPB = badPrefix() }},
@@ -544,7 +544,6 @@ func TestTickEntryValidationStopsWithZeroSends(t *testing.T) {
 			enc, _ := sdk.EncodeRequest(bad)
 			e.PrefixPB = enc
 		}},
-		{"v2 schema", func(e *warmEntry) { e.SchemaVersion = 2 }},
 		{"missing provider", func(e *warmEntry) { e.Provider = "" }},
 		{"missing path", func(e *warmEntry) { e.Path = "" }},
 		{"negative accounting", func(e *warmEntry) { e.RefreshesSpent = -1 }},
@@ -834,7 +833,7 @@ func TestTickInvalidEntryZeroPricingZeroSends(t *testing.T) {
 		key  string
 		mut  func(*warmEntry)
 	}{
-		{"unsupported schema", "warm/conv-1", func(e *warmEntry) { e.SchemaVersion = 1 }},
+		{"unsupported schema", "warm/conv-1", func(e *warmEntry) { e.SchemaVersion = 2 }},
 		{"key not exactly bound", badKey("conv-1"), func(e *warmEntry) {}},
 		{"missing provider", "warm/conv-1", func(e *warmEntry) { e.Provider = "" }},
 		{"negative last refresh", "warm/conv-1", func(e *warmEntry) { e.LastRefreshMillis = -1 }},
