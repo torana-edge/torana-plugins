@@ -18,6 +18,7 @@
     {
       "path": "usage.jsonl",
       "operations": ["append"],
+      "required": true,
       "max_bytes": 16777216,
       "retained_files": 5
     }
