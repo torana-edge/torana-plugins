@@ -19,6 +19,15 @@ func TestManifestPermissionSetExact(t *testing.T) {
 		Permissions []struct {
 			Name string `json:"name"`
 		} `json:"permissions"`
+		ModelServices []struct {
+			Name              string `json:"name"`
+			Required          bool   `json:"required"`
+			TimeoutMS         int    `json:"timeout_ms"`
+			MaxTokens         int    `json:"max_tokens"`
+			MaxInputBytes     int    `json:"max_input_bytes"`
+			MaxCallsPerMinute int    `json:"max_calls_per_minute"`
+			MaxTokensPerHour  int    `json:"max_tokens_per_hour"`
+		} `json:"model_services"`
 	}
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatal(err)
@@ -37,7 +46,7 @@ func TestManifestPermissionSetExact(t *testing.T) {
 		"env.block_request",
 		"env.cache_get",
 		"env.cache_set",
-		"env.host_call.torana_offload_completion",
+		"env.model_complete",
 		"env.plugin_config",
 	}
 	if len(got) != len(want) {
@@ -47,5 +56,14 @@ func TestManifestPermissionSetExact(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("permissions = %v, want %v", got, want)
 		}
+	}
+	if len(m.ModelServices) != 1 {
+		t.Fatalf("model services = %+v, want exactly scanner", m.ModelServices)
+	}
+	scanner := m.ModelServices[0]
+	if scanner.Name != "scanner" || !scanner.Required || scanner.TimeoutMS != 30000 ||
+		scanner.MaxTokens != 512 || scanner.MaxInputBytes != 1048576 ||
+		scanner.MaxCallsPerMinute != 60 || scanner.MaxTokensPerHour != 100000 {
+		t.Fatalf("scanner model-service contract = %+v", scanner)
 	}
 }

@@ -1,6 +1,6 @@
 // pii scans tool results (grep/bash/etc. output) before they are forwarded to
 // the cloud upstream. A deterministic regex pre-filter catches high-precision
-// categories; anything else is sent to a configured LOCAL model for contextual
+// categories; anything else is sent to an operator-bound model for contextual
 // detection. If PII is found the request is vetoed (env.block_request) with an
 // actionable, value-free error so the upstream model can adjust next turn.
 //
@@ -22,9 +22,9 @@
 //     and never reaches upstream.
 //   - max_scan_bytes is a BYTE budget with rune-safe boundary repair (the
 //     old "chars" name was a lie); zero is unbounded.
-//   - provider and model are a PAIR: both absent = regex-only; both present =
-//     regex + model scan; exactly one present is an invalid scanner
-//     configuration driven through on_error with NO offload call.
+//   - The model destination is the required "scanner" resource declared by
+//     the manifest. Provider, URL, model, credentials, and budgets never enter
+//     plugin configuration or guest memory.
 //   - Cache reads follow the approved classes: NOT_FOUND and present-empty
 //     rescan; advisory refusals rescan; contract refusals and malformed
 //     frames error the hook. Cache writes are best-effort.
@@ -49,8 +49,6 @@ func main() {}
 const cleanCachePrefix = "pii/clean"
 
 type piiConfig struct {
-	Provider     string   `json:"provider"`       // local-model provider (required to enable the model scan)
-	Model        string   `json:"model"`          // model name for the scan
 	Tools        []string `json:"tools"`          // tool-name allowlist; empty or ["*"] = all tool results
 	OnError      string   `json:"on_error"`       // "block" (default, fail-closed) | "allow" (fail-open)
 	MaxScanBytes int      `json:"max_scan_bytes"` // cap on model-scan input bytes; 0 = unbounded
@@ -86,15 +84,8 @@ func resetConfigForTest() {
 	cfg = piiConfig{}
 }
 
-// scannerPairValid reports whether the provider/model configuration is a
-// coherent pair: both absent (regex-only) or both present. Exactly one
-// present is an invalid scanner configuration.
-func (c piiConfig) scannerPairValid() bool {
-	return (c.Provider == "") == (c.Model == "")
-}
-
 // High-precision patterns — deterministic, no model call, exact line numbers,
-// and they still catch obvious PII when the local model is unavailable.
+// and they still catch obvious PII when the scanner service is unavailable.
 var piiPatterns = []struct {
 	name            string
 	requiredLiteral string
@@ -190,7 +181,7 @@ func init() {
 
 				// The deterministic scan runs FIRST over ALL retained text: a PII
 				// fact Torana already detected blocks as pii_detected even when
-				// the extraction is incomplete or the provider/model pair is
+				// the extraction is incomplete or the bound scanner service is
 				// misconfigured — on_error governs the UNAVAILABLE contextual
 				// scan, never a deterministic finding already made.
 				if f := regexScan(ex.text); len(f) > 0 {
@@ -266,8 +257,8 @@ func failClosed() bool { return cfg.OnError != "allow" }
 // caller.
 const maxReportedFindings = 20
 
-// scannerFailure marks a SCANNER failure — advisory refusals, an invalid
-// provider/model pair, or an unparseable model verdict — which the plugin's
+// scannerFailure marks a SCANNER failure — advisory refusals or an
+// unparseable model verdict — which the plugin's
 // own on_error policy governs. Anything else (contract refusals, malformed
 // frames, protocol defects) is a plain error and errors the hook regardless
 // of on_error.
@@ -278,15 +269,11 @@ func (e *scannerFailure) Error() string { return e.msg }
 func piiCleanCacheKey(view sdk.ToolResultView, toolName string) string {
 	policy, _ := json.Marshal(struct {
 		Version      int      `json:"version"`
-		Provider     string   `json:"provider"`
-		Model        string   `json:"model"`
 		Tools        []string `json:"tools"`
 		OnError      string   `json:"on_error"`
 		MaxScanBytes int      `json:"max_scan_bytes"`
 	}{
-		Version:      3,
-		Provider:     cfg.Provider,
-		Model:        cfg.Model,
+		Version:      4,
 		Tools:        cfg.Tools,
 		OnError:      cfg.OnError,
 		MaxScanBytes: cfg.MaxScanBytes,
@@ -314,20 +301,10 @@ func toolAllowed(name string) bool {
 	return name == ""
 }
 
-// scan runs the local-model path. The deterministic pre-filter already ran
-// over the retained text in the hook (before completeness and pair checks),
-// so a deterministic finding can never be demoted by on_error or a
-// misconfigured pair.
+// scan runs the bound-model path. The deterministic pre-filter already ran
+// over the retained text in the hook, so a deterministic finding can never
+// be demoted by on_error.
 func scan(content, toolName string) ([]finding, error) {
-	if !cfg.scannerPairValid() {
-		// Exactly one of provider/model: an invalid scanner configuration,
-		// driven through on_error — with NO offload call.
-		return nil, &scannerFailure{"pii scanner configuration invalid: set both provider and model, or neither"}
-	}
-	if cfg.Provider == "" {
-		// No local model configured: regex-only mode. Nothing more to check.
-		return nil, nil
-	}
 	return modelScan(content, toolName)
 }
 
@@ -388,13 +365,17 @@ func modelScan(content, toolName string) ([]finding, error) {
 		scanContent = truncHead(scanContent, cfg.MaxScanBytes)
 		truncated = true
 	}
-	payload, _ := json.Marshal(map[string]any{
-		"provider":      cfg.Provider,
-		"model":         cfg.Model,
-		"system_prompt": piiSystemPrompt,
-		"user_prompt":   "Tool: " + toolName + "\n\nOutput to scan:\n" + scanContent,
+	maxTokens := uint32(512)
+	temperature := 0.0
+	res, herr, err := sdk.ModelComplete(&pbv1.ModelCompleteArgs{
+		Service: "scanner",
+		Messages: []*pbv1.ModelMessage{
+			{Role: "system", Content: piiSystemPrompt},
+			{Role: "user", Content: "Tool: " + toolName + "\n\nOutput to scan:\n" + scanContent},
+		},
+		MaxTokens:   &maxTokens,
+		Temperature: &temperature,
 	})
-	res, herr, err := sdk.HostCallExtension("torana_offload_completion", payload)
 	if err != nil {
 		// Malformed frame / transport / protocol defect: hook error.
 		return nil, err
@@ -407,17 +388,11 @@ func modelScan(content, toolName string) ([]finding, error) {
 		case pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE:
 			return nil, &scannerFailure{"pii scan failed: " + herr.Message}
 		default:
-			return nil, fmt.Errorf("pii offload refused: %s", herr.Message)
+			return nil, fmt.Errorf("pii model service refused: %s", herr.Message)
 		}
 	}
-	// The typed offload result carries NO status field; refusals arrive only in
+	// The typed model result carries NO status field; refusals arrive only in
 	// the framed error arm. An undecodable value arm is a protocol defect.
-	var resp struct {
-		Completion string `json:"completion"`
-	}
-	if json.Unmarshal(res, &resp) != nil {
-		return nil, fmt.Errorf("pii scan: unparseable offload reply")
-	}
 	// The verdict SHAPE is validated explicitly: pii must be present,
 	// non-null, and boolean; findings must be a documented array (or absent).
 	// Malformed or contradictory shapes are scanner failures governed by
@@ -426,7 +401,7 @@ func modelScan(content, toolName string) ([]finding, error) {
 		PII      json.RawMessage `json:"pii"`
 		Findings json.RawMessage `json:"findings"`
 	}
-	if json.Unmarshal([]byte(extractJSON(resp.Completion)), &verdict) != nil {
+	if json.Unmarshal([]byte(extractJSON(res.Content)), &verdict) != nil {
 		return nil, &scannerFailure{"pii scan: unparseable verdict"}
 	}
 	if len(verdict.PII) == 0 || string(verdict.PII) == "null" {

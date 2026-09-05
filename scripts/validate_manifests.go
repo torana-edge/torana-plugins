@@ -56,6 +56,22 @@ type manifest struct {
 		MaxResponseBytes  int64    `json:"max_response_bytes"`
 		MaxCallsPerMinute int      `json:"max_calls_per_minute"`
 	} `json:"http_endpoints"`
+	ModelServices []struct {
+		Name              string `json:"name"`
+		Description       string `json:"description"`
+		Required          bool   `json:"required"`
+		TimeoutMS         int    `json:"timeout_ms"`
+		MaxCallsPerMinute int    `json:"max_calls_per_minute"`
+		MaxTokens         uint32 `json:"max_tokens"`
+		MaxInputBytes     int64  `json:"max_input_bytes"`
+		MaxTokensPerHour  int64  `json:"max_tokens_per_hour"`
+	} `json:"model_services"`
+	PricingResources []struct {
+		Name            string `json:"name"`
+		Description     string `json:"description"`
+		ForModelService string `json:"for_model_service"`
+		Required        bool   `json:"required"`
+	} `json:"pricing_resources"`
 }
 
 var semver = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$`)
@@ -105,7 +121,6 @@ var knownPermissions = map[string]bool{
 	"env.host_call.torana_db_query":            true,
 	"env.host_call.torana_evaluate_compaction": true,
 	"env.host_call.torana_kms_decrypt":         true,
-	"env.host_call.torana_offload_completion":  true,
 	"env.host_call.torana_plugin_counter":      true,
 	"env.host_call.torana_record_savings":      true,
 	"env.host_call.torana_send_request":        true,
@@ -113,6 +128,7 @@ var knownPermissions = map[string]bool{
 	"env.log":                                  true, "env.meta_get": true, "env.meta_set": true,
 	"env.now": true, "env.original_request": true, "env.original_response": true,
 	"env.plugin_config": true, "env.request_headers": true,
+	"env.model_complete": true, "env.model_pricing": true,
 	"env.respond_request": true, "env.route_request": true, "env.serve_http": true, "env.set_identity": true,
 	"env.state_get": true, "env.state_keys": true, "env.state_set": true,
 	"env.credential_get": true, "env.file_append": true, "env.file_delete": true,
@@ -143,7 +159,7 @@ var pluginContracts = map[string]pluginContract{
 	"cache_warmer": {hooks: []string{"run_before_request", "run_on_tick"},
 		permissions: []string{"env.background_tick", "env.host_call.torana_cache_pricing", "env.host_call.torana_send_request", "env.now", "env.plugin_config", "env.state_get", "env.state_keys", "env.state_set"}},
 	"compactor": {hooks: []string{"run_before_request"},
-		permissions:   []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.host_call.torana_evaluate_compaction", "env.host_call.torana_offload_completion", "env.host_call.torana_record_savings", "env.plugin_config", "env.shared_cache_get", "ir.tool_results.write"},
+		permissions:   []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.host_call.torana_evaluate_compaction", "env.host_call.torana_record_savings", "env.model_complete", "env.model_pricing", "env.plugin_config", "env.shared_cache_get", "ir.tool_results.write"},
 		conflictsWith: []string{"torana/keyword_compactor"}},
 	"intent": {hooks: []string{"run_before_request", "run_on_stream_chunk"},
 		permissions: []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.log", "env.meta_get", "env.meta_set", "env.plugin_config", "env.shared_cache_set", "ir.cache_control.write", "ir.messages.write.assistant", "ir.messages.write.developer", "ir.messages.write.other", "ir.messages.write.system", "ir.messages.write.tool", "ir.messages.write.user", "ir.stream.write", "ir.tool_results.write", "ir.tools.write"}},
@@ -153,7 +169,7 @@ var pluginContracts = map[string]pluginContract{
 	"otel": {hooks: []string{"run_before_request", "run_after_response", "run_on_http_request"},
 		permissions: []string{"env.emit_metric", "env.serve_http"}},
 	"pii": {hooks: []string{"run_before_request"},
-		permissions: []string{"env.block_request", "env.cache_get", "env.cache_set", "env.host_call.torana_offload_completion", "env.plugin_config"}},
+		permissions: []string{"env.block_request", "env.cache_get", "env.cache_set", "env.model_complete", "env.plugin_config"}},
 	"schema_translator": {hooks: []string{"run_before_request", "run_on_stream_chunk"},
 		permissions: []string{"env.meta_get", "env.meta_set", "ir.messages.write.assistant", "ir.stream.write", "ir.tools.write"}},
 	"tool_governor": {hooks: []string{"run_before_request"},
@@ -253,6 +269,7 @@ func main() {
 		validateFileDeclarations(entry.Name(), m)
 		validateCredentialDeclarations(entry.Name(), m)
 		validateHTTPEndpointDeclarations(entry.Name(), m)
+		validateModelResources(entry.Name(), m)
 		for _, requiredID := range m.RequiresUpstream {
 			if strings.TrimSpace(requiredID) == "" || requiredID == m.ID || seen["requires:"+requiredID] {
 				panic(fmt.Sprintf("%s: invalid or duplicate requires_upstream %q", entry.Name(), requiredID))
@@ -403,6 +420,34 @@ func validateHTTPEndpointDeclarations(pluginName string, m manifest) {
 			}
 			methods[method] = true
 		}
+	}
+}
+
+func validateModelResources(pluginName string, m manifest) {
+	permissions := permissionSet(m)
+	services := map[string]bool{}
+	for _, service := range m.ModelServices {
+		if !permissions["env.model_complete"] {
+			panic(fmt.Sprintf("%s: model service %q requires env.model_complete", pluginName, service.Name))
+		}
+		if strings.TrimSpace(service.Name) == "" || strings.TrimSpace(service.Description) == "" || services[service.Name] ||
+			service.TimeoutMS <= 0 || service.MaxTokens == 0 || service.MaxInputBytes <= 0 || service.MaxCallsPerMinute <= 0 || service.MaxTokensPerHour <= 0 {
+			panic(fmt.Sprintf("%s: invalid or duplicate model service %q", pluginName, service.Name))
+		}
+		services[service.Name] = true
+	}
+	pricing := map[string]bool{}
+	for _, resource := range m.PricingResources {
+		if !permissions["env.model_pricing"] {
+			panic(fmt.Sprintf("%s: pricing resource %q requires env.model_pricing", pluginName, resource.Name))
+		}
+		if strings.TrimSpace(resource.Name) == "" || strings.TrimSpace(resource.Description) == "" || pricing[resource.Name] {
+			panic(fmt.Sprintf("%s: invalid or duplicate pricing resource %q", pluginName, resource.Name))
+		}
+		if resource.ForModelService != "" && !services[resource.ForModelService] {
+			panic(fmt.Sprintf("%s: pricing resource %q references undeclared model service %q", pluginName, resource.Name, resource.ForModelService))
+		}
+		pricing[resource.Name] = true
 	}
 }
 

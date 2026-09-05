@@ -38,8 +38,12 @@
       "description": "Apply model-generated replacements only when the batch has positive estimated net savings"
     },
     {
-      "name": "env.host_call.torana_offload_completion",
-      "description": "Delegate to cheap model for summarization"
+      "name": "env.model_complete",
+      "description": "Generate summaries through the operator-bound summarizer service"
+    },
+    {
+      "name": "env.model_pricing",
+      "description": "Resolve only the operator-bound target and summarizer pricing resources"
     },
     {
       "name": "env.host_call.torana_record_savings",
@@ -47,11 +51,36 @@
     },
     {
       "name": "env.plugin_config",
-      "description": "Read plugins.config.compactor (tool_policies, expected_applications, and max_offload_input_bytes)"
+      "description": "Read plugins.config.compactor (tool_policies, expected_applications, and max_summarizer_input_bytes)"
     },
     {
       "name": "ir.tool_results.write",
       "description": "Position-keyed tool-result text value changes (compaction replacements)"
+    }
+  ],
+  "model_services": [
+    {
+      "name": "summarizer",
+      "description": "Cheap model used to summarize large tool results",
+      "required": true,
+      "timeout_ms": 30000,
+      "max_tokens": 512,
+      "max_input_bytes": 1048576,
+      "max_calls_per_minute": 60,
+      "max_tokens_per_hour": 200000
+    }
+  ],
+  "pricing_resources": [
+    {
+      "name": "target",
+      "description": "Pricing for the currently routed request model",
+      "required": true
+    },
+    {
+      "name": "summarizer",
+      "description": "Pricing for the bound summarizer model service",
+      "required": true,
+      "for_model_service": "summarizer"
     }
   ]
 }

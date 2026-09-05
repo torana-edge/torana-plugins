@@ -1,5 +1,5 @@
 // The compactor shrinks large tool results by delegating extraction to a
-// cheap model (torana_offload_completion), guided by a cached intent when one
+// bound summarizer model service, guided by a cached intent when one
 // is available or by a bounded deterministic signal derived from the request
 // and tool call otherwise. Compacted results are cached by
 // tool_call_id, so later turns replaying the same result reuse the compact
@@ -47,29 +47,29 @@ const (
 	// env.state_*, which the host keys by module name — so two plugins using
 	// the same namespace string read and write each other's entries.
 	policyCompactionCache = "compactor/policy_compacted"
-	minOffloadChars       = 2000
+	minSummarizerChars    = 2000
 	derivedIntentPrefix   = "torana-derived-intent-v1:"
 	maxDerivedIntentBytes = 500
 )
 
-// maxOffloadInputBytes caps how many SOURCE bytes of a tool output are sent
+// maxSummarizerInputBytes caps how many SOURCE bytes of a tool output are sent
 // to the cheap summarizer. 0 (the default) means UNBOUNDED — the complete
 // tool output is sent. A positive value is opt-in via
 // plugins.config.compactor and retains head+tail within that many bytes (the
 // truncation marker is ADDITIONAL framing, not part of the budget). Loaded
 // once, lazily, from the plugin config.
 var (
-	cfgOnce              sync.Once
-	maxOffloadInputBytes int
-	toolPolicies         []sdk.ToolPolicyRule
-	expectedApplications int64
+	cfgOnce                 sync.Once
+	maxSummarizerInputBytes int
+	toolPolicies            []sdk.ToolPolicyRule
+	expectedApplications    int64
 )
 
 // config is the plugin's decoded configuration.
 type config struct {
-	MaxOffloadInputBytes int                  `json:"max_offload_input_bytes"`
-	ToolPolicies         []sdk.ToolPolicyRule `json:"tool_policies"`
-	ExpectedApplications int64                `json:"expected_applications"`
+	MaxSummarizerInputBytes int                  `json:"max_summarizer_input_bytes"`
+	ToolPolicies            []sdk.ToolPolicyRule `json:"tool_policies"`
+	ExpectedApplications    int64                `json:"expected_applications"`
 }
 
 // parseConfig is the pure config decoder; loadConfig installs its result into
@@ -81,8 +81,8 @@ func parseConfig(raw string) config {
 	if raw != "" {
 		_ = json.Unmarshal([]byte(raw), &c)
 	}
-	if c.MaxOffloadInputBytes < 0 {
-		c.MaxOffloadInputBytes = 0
+	if c.MaxSummarizerInputBytes < 0 {
+		c.MaxSummarizerInputBytes = 0
 	}
 	if c.ExpectedApplications < 0 {
 		c.ExpectedApplications = 0
@@ -93,7 +93,7 @@ func parseConfig(raw string) config {
 func loadConfig() {
 	cfgOnce.Do(func() {
 		c := parseConfig(sdk.PluginConfig())
-		maxOffloadInputBytes = c.MaxOffloadInputBytes
+		maxSummarizerInputBytes = c.MaxSummarizerInputBytes
 		toolPolicies = c.ToolPolicies
 		expectedApplications = c.ExpectedApplications
 	})
@@ -103,7 +103,7 @@ func loadConfig() {
 // fresh config. Production never calls it; the once-only loader is unchanged.
 func resetConfigForTest() {
 	cfgOnce = sync.Once{}
-	maxOffloadInputBytes = 0
+	maxSummarizerInputBytes = 0
 	toolPolicies = nil
 	expectedApplications = 0
 }
@@ -141,12 +141,12 @@ func compactToolResults(ctx context.Context, req *pbv1.ChatRequest) (bool, error
 		for _, view := range sdk.ToolResults(msg) {
 			// Scalar seam: exactly one text arm, zero unknown arms, any
 			// cache-marker arms. An unsupported shape declines the result
-			// UNCHANGED before any cache/offload/metric/savings call.
+			// UNCHANGED before any cache/summarizer/metric/savings call.
 			text, ok := sdk.ToolResultScalarText(view)
 			if !ok {
 				continue
 			}
-			if len(text) < minOffloadChars || sdk.IsDeterministicToolReplacement(text) {
+			if len(text) < minSummarizerChars || sdk.IsDeterministicToolReplacement(text) {
 				continue
 			}
 
@@ -226,7 +226,7 @@ func compactToolResults(ctx context.Context, req *pbv1.ChatRequest) (bool, error
 				return false, fmt.Errorf("compactor: cache_get model key refused: %s", herr.Message)
 			}
 			// A hit whose value is non-empty AND shorter than the original is
-			// reused without offload; a value >= the original leaves the result
+			// reused without summarizer; a value >= the original leaves the result
 			// untouched; a miss or present-empty value is recomputed.
 			if (herr != nil || cached == "") || len(cached) < len(text) {
 				modelWorks = append(modelWorks, modelWork{
@@ -260,7 +260,7 @@ type derivedIntentPayload struct {
 // deriveCompactionIntent is the bounded fallback for a missing/empty intent.
 // Only user text at or before the result can describe why the historical tool
 // call happened; later turns must not rewrite it. JSON framing makes arbitrary
-// newlines and labels in caller text unambiguous to the offload model.
+// newlines and labels in caller text unambiguous to the summarizer model.
 func deriveCompactionIntent(messages []*pbv1.Message, resultIndex, resultBlock int, toolName, toolArgs string) string {
 	userRequest := ""
 	if resultIndex >= len(messages) {
@@ -319,24 +319,12 @@ type modelCandidate struct {
 	originalBytes int
 	replacement   string
 	source        string
-	provider      string
-	model         string
 	usage         tokenUsage
 	cacheKey      string
 }
 
-// offloadResponse is the domain body of a successful offload. Additive JSON
-// fields (e.g. a legacy "status") are tolerated by the decoder and never
-// consulted: refusals arrive ONLY in the framed error arm.
-type offloadResponse struct {
-	Completion string     `json:"completion"`
-	Provider   string     `json:"provider"`
-	Model      string     `json:"model"`
-	Usage      tokenUsage `json:"usage"`
-}
-
 // prepareAndApplyModelBatch runs the economic gate (optimistic preflight for
-// any uncached candidate, then the real post-offload report) and applies the
+// any uncached candidate, then the real post-summarizer report) and applies the
 // approved batch. Returns (applied, error); a contract-defect refusal errors
 // the hook, an advisory refusal declines the batch.
 func prepareAndApplyModelBatch(req *pbv1.ChatRequest, works []modelWork) (bool, error) {
@@ -344,7 +332,7 @@ func prepareAndApplyModelBatch(req *pbv1.ChatRequest, works []modelWork) (bool, 
 		return false, nil
 	}
 
-	// Do not incur offload cost unless even a zero-cost, best-case replacement
+	// Do not incur summarizer cost unless even a zero-cost, best-case replacement
 	// would be economical. Cached candidates use their known final size; an
 	// uncached candidate optimistically assumes zero bytes.
 	optimistic, hasUncached := optimisticModelCandidates(works)
@@ -372,14 +360,18 @@ func prepareAndApplyModelBatch(req *pbv1.ChatRequest, works []modelWork) (bool, 
 			continue
 		}
 		ctxStr := extractConversationContext(req.Messages)
-		payload, _ := json.Marshal(map[string]any{
-			"system_prompt": "You are a tool output summarizer. Given a tool output and an extraction intent, return ONLY the relevant parts. Be concise. Do not add commentary.",
-			"user_prompt": fmt.Sprintf("Intent: %s\n\nConversation context:\n%s\n\nTool output:\n%s\n\nExtract only the parts relevant to the intent.",
-				work.intent, ctxStr, truncateForPrompt(work.text, maxOffloadInputBytes)),
+		maxTokens := uint32(512)
+		result, herr, err := sdk.ModelComplete(&pbv1.ModelCompleteArgs{
+			Service: "summarizer",
+			Messages: []*pbv1.ModelMessage{
+				{Role: "system", Content: "You are a tool output summarizer. Given a tool output and an extraction intent, return ONLY the relevant parts. Be concise. Do not add commentary."},
+				{Role: "user", Content: fmt.Sprintf("Intent: %s\n\nConversation context:\n%s\n\nTool output:\n%s\n\nExtract only the parts relevant to the intent.",
+					work.intent, ctxStr, truncateForPrompt(work.text, maxSummarizerInputBytes))},
+			},
+			MaxTokens: &maxTokens,
 		})
-		result, herr, err := sdk.HostCallExtension("torana_offload_completion", payload)
 		if err != nil {
-			return false, fmt.Errorf("compactor: offload: %w", err)
+			return false, fmt.Errorf("compactor: summarizer: %w", err)
 		}
 		if herr != nil {
 			switch herr.Code {
@@ -388,18 +380,20 @@ func prepareAndApplyModelBatch(req *pbv1.ChatRequest, works []modelWork) (bool, 
 				// retry in the same request (duplicate spend).
 				continue
 			default:
-				return false, fmt.Errorf("compactor: offload refused: %s", herr.Message)
+				return false, fmt.Errorf("compactor: summarizer refused: %s", herr.Message)
 			}
 		}
-		var response offloadResponse
-		if json.Unmarshal(result, &response) != nil || response.Completion == "" || len(response.Completion) >= len(work.text) {
-			// Malformed or unusable domain body: skip, like a transient
-			// failure — the host framed every refusal already.
+		if result == nil || result.Content == "" || len(result.Content) >= len(work.text) {
+			// An unusable completion is a candidate-local decline.
 			continue
 		}
+		usage := tokenUsage{}
+		if result.Usage != nil {
+			usage = tokenUsage{Reported: true, InputTokens: int64(result.Usage.InputTokens), OutputTokens: int64(result.Usage.OutputTokens), CacheReadTokens: int64(result.Usage.CacheReadTokens), CacheWriteTokens: int64(result.Usage.CacheWriteTokens)}
+		}
 		candidates = append(candidates, modelCandidate{
-			message: work.message, index: work.index, block: work.block, originalBytes: len(work.text), replacement: response.Completion,
-			source: "transformation", provider: response.Provider, model: response.Model, usage: response.Usage, cacheKey: work.cacheKey,
+			message: work.message, index: work.index, block: work.block, originalBytes: len(work.text), replacement: result.Content,
+			source: "transformation", usage: usage, cacheKey: work.cacheKey,
 		})
 	}
 	if len(candidates) == 0 {
@@ -446,8 +440,8 @@ func optimisticModelCandidates(works []modelWork) ([]modelCandidate, bool) {
 			hasUncached = true
 			// This candidate would create a new compact prefix. Even the
 			// zero-byte optimistic preflight must charge that cache rewrite;
-			// labeling it cache_reuse lets uneconomic summaries reach offload
-			// before the exact post-offload gate rejects them.
+			// labeling it cache_reuse lets uneconomic summaries reach summarizer
+			// before the exact post-summarizer gate rejects them.
 			source = "transformation"
 		}
 		candidates = append(candidates, modelCandidate{
@@ -458,14 +452,13 @@ func optimisticModelCandidates(works []modelWork) ([]modelCandidate, bool) {
 	return candidates, hasUncached
 }
 
-func modelBatchReport(req *pbv1.ChatRequest, candidates []modelCandidate, includeOffload bool) (map[string]any, bool) {
+func modelBatchReport(req *pbv1.ChatRequest, candidates []modelCandidate, includeSummarizer bool) (map[string]any, bool) {
 	if len(candidates) == 0 {
 		return nil, false
 	}
 	earliest := len(req.Messages)
 	originalBytes, finalBytes := 0, 0
 	source := "cache_reuse"
-	var provider, model string
 	usage := tokenUsage{Reported: true}
 	hasTransformation := false
 	for _, candidate := range candidates {
@@ -479,12 +472,6 @@ func modelBatchReport(req *pbv1.ChatRequest, candidates []modelCandidate, includ
 		}
 		hasTransformation = true
 		source = "transformation"
-		if provider == "" {
-			provider, model = candidate.provider, candidate.model
-		}
-		if provider != candidate.provider || model != candidate.model {
-			return nil, false
-		}
 		usage.Reported = usage.Reported && candidate.usage.Reported
 		usage.InputTokens += candidate.usage.InputTokens
 		usage.OutputTokens += candidate.usage.OutputTokens
@@ -505,12 +492,13 @@ func modelBatchReport(req *pbv1.ChatRequest, candidates []modelCandidate, includ
 		"candidate_count":               len(candidates),
 		"expected_applications":         expectedApplications,
 		"source":                        source,
+		"pricing_resource":              "target",
 	}
-	if includeOffload && hasTransformation {
-		if provider == "" || model == "" || !usage.Reported {
+	if includeSummarizer && hasTransformation {
+		if !usage.Reported {
 			return nil, false
 		}
-		report["offload"] = map[string]any{"provider": provider, "model": model, "usage": usage}
+		report["summarizer"] = map[string]any{"pricing_resource": "summarizer", "usage": usage}
 	}
 	return report, true
 }

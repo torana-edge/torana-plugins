@@ -16,7 +16,7 @@
 //
 // It exists as its own plugin so the compactors are independent consumers:
 // run "intent" plus EITHER keyword_compactor (deterministic, local) OR
-// compactor (cheap-model offload) — both read the same intent cache.
+// compactor (operator-bound model summarization) — both read the same intent cache.
 //
 // The response side runs on the SDK's StreamHandler: tool-call fragments are
 // buffered host-side (meta_append, under env.meta_set) and presented to

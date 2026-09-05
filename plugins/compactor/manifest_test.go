@@ -21,6 +21,15 @@ func TestManifestPermissionSetExact(t *testing.T) {
 		Permissions      []struct {
 			Name string `json:"name"`
 		} `json:"permissions"`
+		ModelServices []struct {
+			Name     string `json:"name"`
+			Required bool   `json:"required"`
+		} `json:"model_services"`
+		PricingResources []struct {
+			Name            string `json:"name"`
+			Required        bool   `json:"required"`
+			ForModelService string `json:"for_model_service"`
+		} `json:"pricing_resources"`
 	}
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatal(err)
@@ -46,8 +55,9 @@ func TestManifestPermissionSetExact(t *testing.T) {
 		"env.cache_set",
 		"env.emit_metric",
 		"env.host_call.torana_evaluate_compaction",
-		"env.host_call.torana_offload_completion",
 		"env.host_call.torana_record_savings",
+		"env.model_complete",
+		"env.model_pricing",
 		"env.plugin_config",
 		"env.shared_cache_get",
 		"ir.tool_results.write",
@@ -59,5 +69,21 @@ func TestManifestPermissionSetExact(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("permissions = %v, want %v", got, want)
 		}
+	}
+	if len(m.ModelServices) != 1 || m.ModelServices[0].Name != "summarizer" || !m.ModelServices[0].Required {
+		t.Fatalf("model services = %+v, want required summarizer", m.ModelServices)
+	}
+	if len(m.PricingResources) != 2 {
+		t.Fatalf("pricing resources = %+v, want target and summarizer", m.PricingResources)
+	}
+	resources := map[string]string{}
+	for _, resource := range m.PricingResources {
+		if !resource.Required {
+			t.Fatalf("pricing resource %q must be required", resource.Name)
+		}
+		resources[resource.Name] = resource.ForModelService
+	}
+	if resources["target"] != "" || resources["summarizer"] != "summarizer" || len(resources) != 2 {
+		t.Fatalf("pricing resource contract = %v", resources)
 	}
 }
