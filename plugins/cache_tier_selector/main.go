@@ -161,7 +161,7 @@ func init() {
 		}
 
 		meta := readHostMeta(req)
-		pricing, err := sdk.GetCachePricing(meta.Provider, req.Model)
+		policy, refusal, err := sdk.GetPromptCachePolicy("request-cache")
 		if err != nil {
 			// Authoritative read: advisory pricing declines (unknown
 			// economics — guessing spends the operator's money on a hunch);
@@ -171,8 +171,11 @@ func init() {
 			}
 			return sdk.RequestResult{}, err
 		}
-		if !pricing.Available() {
-			return sdk.PassRequest(), nil
+		if refusal != nil {
+			if refusal.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED || refusal.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE {
+				return sdk.PassRequest(), nil
+			}
+			return sdk.RequestResult{}, fmt.Errorf("cache_tier_selector: prompt cache policy refused: %s", refusal.Message)
 		}
 
 		// prefixKey came from the production decisionKey helper (parity
@@ -274,7 +277,7 @@ func init() {
 			}
 		}
 
-		marker, ttl := chooseTier(cfg, pricing, act, now)
+		marker, ttl := chooseTier(cfg, policy, act, now)
 		if marker == nil {
 			return sdk.PassRequest(), nil
 		}
@@ -308,14 +311,19 @@ func init() {
 
 // chooseTier returns the breakpoint marker to use, or nil to leave the request
 // untouched.
-func chooseTier(cfg config, pricing sdk.CachePricing, act activity, now int64) (map[string]any, int) {
+func chooseTier(cfg config, policy *pbv1.PromptCachePolicy, act activity, now int64) (map[string]any, int) {
 	// Without a declared long tier there is nothing to choose between.
-	if pricing.ShortestTTLSeconds <= 0 {
+	shortestTTL, ok := sdk.ShortestPromptCacheTTL(policy)
+	if !ok || shortestTTL == 0 {
 		return nil, 0
 	}
 
-	long, ok := pricing.LongestTier()
-	if !ok || long.Marker == nil {
+	long, ok := sdk.LongestPromptCacheTier(policy)
+	if !ok {
+		return nil, 0
+	}
+	var marker map[string]any
+	if err := json.Unmarshal(long.MarkerJson, &marker); err != nil || marker == nil {
 		return nil, 0
 	}
 
@@ -323,19 +331,19 @@ func chooseTier(cfg config, pricing sdk.CachePricing, act activity, now int64) (
 	case "short":
 		return nil, 0 // the harness default already selects the short tier
 	case "long":
-		return long.Marker, long.TTLSeconds
+		return marker, int(long.TtlSeconds)
 	}
 
 	// auto: buy the longer tier once this conversation has demonstrated it
 	// pauses for long enough to lose a short-tier entry.
 	threshold := int64(cfg.MinGapSecondsForLongTier) * 1000
 	if threshold <= 0 {
-		threshold = int64(float64(long.TTLSeconds) * 0.3 * 1000)
+		threshold = int64(float64(long.TtlSeconds) * 0.3 * 1000)
 	}
 	if threshold <= 0 || act.LongestGapMillis < threshold {
 		return nil, 0
 	}
-	return long.Marker, long.TTLSeconds
+	return marker, int(long.TtlSeconds)
 }
 
 // recordActivity updates and returns this conversation's gap history.

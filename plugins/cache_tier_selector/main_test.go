@@ -172,17 +172,15 @@ func newHarness(t *testing.T) *sdktest.Harness {
 // pricingStub returns a two-tier pricing envelope.
 func pricingStub() func(string) (string, error) {
 	return func(string) (string, error) {
-		return sdktest.HostResultValue([]byte(`{
-			"status":"ok",
-			"refresh_on_read":true,
-			"shortest_ttl_seconds":300,
-			"warm_interval_seconds":240,
-			"break_even_refreshes":11,
-			"tiers":[
-				{"ttl_seconds":300,"write_multiplier":1.25,"marker":{"type":"ephemeral"}},
-				{"ttl_seconds":3600,"write_multiplier":2.0,"marker":{"type":"ephemeral","ttl":"1h"}}
-			]
-		}`)), nil
+		read, write, shortMultiplier, longMultiplier := 0.1, 1.2, 1.25, 2.0
+		raw, _ := proto.Marshal(&pbv1.PromptCachePolicy{
+			CacheReadUsdPerMtok: &read, CacheWriteUsdPerMtok: &write, RefreshOnRead: true,
+			Tiers: []*pbv1.PromptCacheTier{
+				{TtlSeconds: 300, WriteMultiplier: &shortMultiplier, MarkerJson: []byte(`{"type":"ephemeral"}`)},
+				{TtlSeconds: 3600, WriteMultiplier: &longMultiplier, MarkerJson: []byte(`{"type":"ephemeral","ttl":"1h"}`)},
+			},
+		})
+		return sdktest.HostResultValue(raw), nil
 	}
 }
 
@@ -222,7 +220,7 @@ func TestModeOffIsInert(t *testing.T) {
 // TestNoBreakpointPasses — no marker, no decision to make.
 func TestNoBreakpointPasses(t *testing.T) {
 	h := newHarness(t)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	req := &pbv1.ChatRequest{Model: "m", Messages: []*pbv1.Message{{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "hi"}}}}}}}
 	req.ToranaMetaJson = []byte(`{"_provider":"anthropic"}`)
 	res := h.BeforeRequest(req)
@@ -231,7 +229,7 @@ func TestNoBreakpointPasses(t *testing.T) {
 	}
 	// Decline-before-state: the no-marker sentinel declines with NO pricing
 	// call and NO state access.
-	if n := countCommand(h, "torana_cache_pricing"); n != 0 {
+	if n := countCommand(h, "env.cache_policy"); n != 0 {
 		t.Fatalf("no-breakpoint request called pricing %d times", n)
 	}
 	if n := countCommand(h, "env.state_get"); n != 0 {
@@ -243,7 +241,7 @@ func TestNoBreakpointPasses(t *testing.T) {
 // contract defects surface.
 func TestPricingAdvisoryDeclinesContractErrors(t *testing.T) {
 	h := newHarness(t)
-	h.StubHostCall("torana_cache_pricing", func(string) (string, error) {
+	h.StubHostCall("env.cache_policy", func(string) (string, error) {
 		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no pricing"), nil
 	})
 	res := h.BeforeRequest(reqWith(t, h))
@@ -252,7 +250,7 @@ func TestPricingAdvisoryDeclinesContractErrors(t *testing.T) {
 	}
 
 	h2 := newHarness(t)
-	h2.StubHostCall("torana_cache_pricing", func(string) (string, error) {
+	h2.StubHostCall("env.cache_policy", func(string) (string, error) {
 		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub"), nil
 	})
 	res2 := h2.BeforeRequest(reqWith(t, h2))
@@ -266,7 +264,7 @@ func TestPricingAdvisoryDeclinesContractErrors(t *testing.T) {
 // two fresh clones produce byte-identical output.
 func TestStoredDecisionReappliedByteIdentically(t *testing.T) {
 	h := newHarness(t)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	h.SetNow(1_000_000)
 	req := reqWith(t, h)
 	key := "decision/" + keyFor(t, req)
@@ -309,7 +307,7 @@ func TestStoredDecisionReappliedByteIdentically(t *testing.T) {
 // deleted (StateDelete) and a new one is made.
 func TestExpiredDecisionDeletedAndRedecided(t *testing.T) {
 	h := newHarness(t)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	h.SetNow(5_000_000)
 	req := reqWith(t, h)
 	key := "decision/" + keyFor(t, req)
@@ -334,7 +332,7 @@ func TestExpiredDecisionDeletedAndRedecided(t *testing.T) {
 // TestNoClockPasses — without a clock there is no gap history.
 func TestNoClockPasses(t *testing.T) {
 	h := newHarness(t)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	h.StubHostCall("env.now", func(string) (string, error) {
 		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no clock"), nil
 	})
@@ -348,7 +346,7 @@ func TestNoClockPasses(t *testing.T) {
 
 	// Contract clock defect surfaces.
 	h2 := newHarness(t)
-	h2.StubHostCall("torana_cache_pricing", pricingStub())
+	h2.StubHostCall("env.cache_policy", pricingStub())
 	h2.StubHostCall("env.now", func(string) (string, error) {
 		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub"), nil
 	})
@@ -363,7 +361,7 @@ func TestNoClockPasses(t *testing.T) {
 func TestAutoModeThreshold(t *testing.T) {
 	// Short gap: no marker.
 	h := newHarness(t)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	h.SetNow(1_000_000)
 	h.SeedState("activity/conv-1", mustJSON(t, activity{LastSeenMillis: 999_000, LongestGapMillis: 1_000, Turns: 2}))
 	res := h.BeforeRequest(reqWith(t, h))
@@ -373,7 +371,7 @@ func TestAutoModeThreshold(t *testing.T) {
 
 	// Long gap: buys the long tier.
 	h2 := newHarness(t)
-	h2.StubHostCall("torana_cache_pricing", pricingStub())
+	h2.StubHostCall("env.cache_policy", pricingStub())
 	h2.SetNow(1_000_000)
 	h2.SeedState("activity/conv-1", mustJSON(t, activity{LastSeenMillis: 999_000, LongestGapMillis: 2_000_000, Turns: 2}))
 	res2 := h2.BeforeRequest(reqWith(t, h2))
@@ -400,7 +398,7 @@ func TestAutoModeThreshold(t *testing.T) {
 // (3600 * 0.3 = 1080s = 1_080_000ms): a gap of 1_000_000ms is below it.
 func TestAutoModeDefaultThreshold(t *testing.T) {
 	h := newHarness(t)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	h.SetNow(1_000_000)
 	h.SeedState("activity/conv-1", mustJSON(t, activity{LastSeenMillis: 999_000, LongestGapMillis: 1_000_000, Turns: 2}))
 	res := h.BeforeRequest(reqWith(t, h))
@@ -413,7 +411,7 @@ func TestAutoModeDefaultThreshold(t *testing.T) {
 func TestModesShortAndLong(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(`{"mode":"short"}`)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	h.SetNow(1_000_000)
 	h.SeedState("activity/conv-1", mustJSON(t, activity{LastSeenMillis: 999_000, LongestGapMillis: 2_000_000, Turns: 2}))
 	res := h.BeforeRequest(reqWith(t, h))
@@ -423,7 +421,7 @@ func TestModesShortAndLong(t *testing.T) {
 
 	h2 := newHarness(t)
 	h2.SetConfig(`{"mode":"long"}`)
-	h2.StubHostCall("torana_cache_pricing", pricingStub())
+	h2.StubHostCall("env.cache_policy", pricingStub())
 	res2 := h2.BeforeRequest(reqWith(t, h2))
 	if res2.Err != nil || res2.Request == nil {
 		t.Fatalf("mode long must apply the long marker, err=%v", res2.Err)
@@ -436,11 +434,9 @@ func TestModesShortAndLong(t *testing.T) {
 // TestSingleTierPasses — nothing to choose between.
 func TestSingleTierPasses(t *testing.T) {
 	h := newHarness(t)
-	h.StubHostCall("torana_cache_pricing", func(string) (string, error) {
-		return sdktest.HostResultValue([]byte(`{
-			"status":"ok","refresh_on_read":true,"shortest_ttl_seconds":300,
-			"tiers":[{"ttl_seconds":300,"marker":{"type":"ephemeral"}}]
-		}`)), nil
+	h.StubHostCall("env.cache_policy", func(string) (string, error) {
+		raw, _ := proto.Marshal(&pbv1.PromptCachePolicy{RefreshOnRead: true, Tiers: []*pbv1.PromptCacheTier{{TtlSeconds: 300, MarkerJson: []byte(`{"type":"ephemeral"}`)}}})
+		return sdktest.HostResultValue(raw), nil
 	})
 	h.SetNow(1_000_000)
 	h.SeedState("activity/conv-1", mustJSON(t, activity{LastSeenMillis: 999_000, LongestGapMillis: 2_000_000, Turns: 2}))
@@ -454,7 +450,7 @@ func TestSingleTierPasses(t *testing.T) {
 // contract: hook error.
 func TestDecisionPersistRefusals(t *testing.T) {
 	h := newHarness(t)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	h.SetNow(1_000_000)
 	h.SeedState("activity/conv-1", mustJSON(t, activity{LastSeenMillis: 999_000, LongestGapMillis: 2_000_000, Turns: 2}))
 	h.StubHostCall("env.state_set", func(string) (string, error) {
@@ -467,7 +463,7 @@ func TestDecisionPersistRefusals(t *testing.T) {
 
 	// Contract refusal on the decision persist: hook error.
 	h2 := newHarness(t)
-	h2.StubHostCall("torana_cache_pricing", pricingStub())
+	h2.StubHostCall("env.cache_policy", pricingStub())
 	h2.SetNow(1_000_000)
 	h2.SeedState("activity/conv-1", mustJSON(t, activity{LastSeenMillis: 999_000, LongestGapMillis: 2_000_000, Turns: 2}))
 	h2.DenyPermission("env.state_set")
@@ -480,7 +476,7 @@ func TestDecisionPersistRefusals(t *testing.T) {
 // and malformed frames error; NOT_FOUND takes the normal decide path.
 func TestStateReadRefusalsAndMalformed(t *testing.T) {
 	h := newHarness(t)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	h.SetNow(1_000_000)
 	h.DenyPermission("env.state_get")
 	res := h.BeforeRequest(reqWith(t, h))
@@ -489,7 +485,7 @@ func TestStateReadRefusalsAndMalformed(t *testing.T) {
 	}
 
 	h2 := newHarness(t)
-	h2.StubHostCall("torana_cache_pricing", pricingStub())
+	h2.StubHostCall("env.cache_policy", pricingStub())
 	h2.StubHostCall("env.state_get", func(string) (string, error) {
 		return "not a frame", nil
 	})
@@ -499,7 +495,7 @@ func TestStateReadRefusalsAndMalformed(t *testing.T) {
 
 	// NOT_FOUND (no stored decision): normal decide path.
 	h3 := newHarness(t)
-	h3.StubHostCall("torana_cache_pricing", pricingStub())
+	h3.StubHostCall("env.cache_policy", pricingStub())
 	h3.SetNow(1_000_000)
 	h3.SeedState("activity/conv-1", mustJSON(t, activity{LastSeenMillis: 999_000, LongestGapMillis: 2_000_000, Turns: 2}))
 	res3 := h3.BeforeRequest(reqWith(t, h3))
@@ -513,7 +509,7 @@ func TestStateReadRefusalsAndMalformed(t *testing.T) {
 // without being treated as absence.
 func TestCorruptDecisionIsKeyLocal(t *testing.T) {
 	h := newHarness(t)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	h.SetNow(1_000_000)
 	req := reqWith(t, h)
 	h.SeedState("decision/"+keyFor(t, req), "not json")
@@ -555,7 +551,7 @@ func TestApplyMarkerMatchingMarkerPasses(t *testing.T) {
 // most 100 per run, and the hourly marker gates repeats.
 func TestCleanupExpiredStateBounded(t *testing.T) {
 	h := newHarness(t)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	h.SetNow(3_000_000_000)
 	for i := 0; i < 5; i++ {
 		h.SeedState("decision/"+string(rune('a'+i)), mustJSON(t, decision{
@@ -575,7 +571,7 @@ func TestCleanupExpiredStateBounded(t *testing.T) {
 // declared extension).
 func TestNoUnauthorizedCalls(t *testing.T) {
 	h := newHarness(t)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	h.SetNow(1_000_000)
 	h.SeedState("activity/conv-1", mustJSON(t, activity{LastSeenMillis: 999_000, LongestGapMillis: 2_000_000, Turns: 2}))
 	h.BeforeRequest(reqWith(t, h))
@@ -587,7 +583,7 @@ func TestNoUnauthorizedCalls(t *testing.T) {
 		"env.state_delete":      true, // command; authorized by env.state_set
 		"env.state_keys":        true,
 		"env.now":               true,
-		"torana_cache_pricing":  true,
+		"env.cache_policy":      true,
 		"torana_plugin_counter": true,
 		"env.log":               true,
 	}
@@ -634,7 +630,7 @@ func TestSchemaDefaultsMatchRuntimeDefaults(t *testing.T) {
 // stored decision produce byte-identical output.
 func TestDeterminismOverIdenticalRequests(t *testing.T) {
 	h1 := newHarness(t)
-	h1.StubHostCall("torana_cache_pricing", pricingStub())
+	h1.StubHostCall("env.cache_policy", pricingStub())
 	h1.SetNow(1_000_000)
 	req := reqWith(t, h1)
 	h1.SeedState("decision/"+keyFor(t, req), mustJSON(t, decision{
@@ -642,7 +638,7 @@ func TestDeterminismOverIdenticalRequests(t *testing.T) {
 	}))
 	r1 := h1.BeforeRequest(req)
 	h2 := newHarness(t)
-	h2.StubHostCall("torana_cache_pricing", pricingStub())
+	h2.StubHostCall("env.cache_policy", pricingStub())
 	h2.SetNow(1_000_000)
 	req2 := reqWith(t, h2)
 	h2.SeedState("decision/"+keyFor(t, req2), mustJSON(t, decision{
@@ -674,7 +670,7 @@ func mustJSON(t *testing.T, v any) string {
 func TestStoredDecisionClockClassification(t *testing.T) {
 	// Advisory clock + stored decision: reapply, no error.
 	h := newHarness(t)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	h.StubHostCall("env.now", func(string) (string, error) {
 		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no clock"), nil
 	})
@@ -689,7 +685,7 @@ func TestStoredDecisionClockClassification(t *testing.T) {
 
 	// Contract clock + stored decision: hook error.
 	h2 := newHarness(t)
-	h2.StubHostCall("torana_cache_pricing", pricingStub())
+	h2.StubHostCall("env.cache_policy", pricingStub())
 	h2.StubHostCall("env.now", func(string) (string, error) {
 		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub"), nil
 	})
@@ -709,7 +705,7 @@ func TestActivityPersistenceFailureClasses(t *testing.T) {
 	// Advisory: pass.
 	h := newHarness(t)
 	h.SetConfig(`{"mode":"short"}`)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	h.SetNow(1_000_000)
 	h.StubHostCall("env.state_set", func(args string) (string, error) {
 		if strings.Contains(args, "activity/") {
@@ -725,7 +721,7 @@ func TestActivityPersistenceFailureClasses(t *testing.T) {
 	// Contract: hook error.
 	h2 := newHarness(t)
 	h2.SetConfig(`{"mode":"short"}`)
-	h2.StubHostCall("torana_cache_pricing", pricingStub())
+	h2.StubHostCall("env.cache_policy", pricingStub())
 	h2.SetNow(1_000_000)
 	h2.DenyPermission("env.state_set")
 	if res2 := h2.BeforeRequest(reqWith(t, h2)); res2.Err == nil {
@@ -735,7 +731,7 @@ func TestActivityPersistenceFailureClasses(t *testing.T) {
 	// Malformed frame: hook error (a plain protocol error, not a refusal).
 	h3 := newHarness(t)
 	h3.SetConfig(`{"mode":"short"}`)
-	h3.StubHostCall("torana_cache_pricing", pricingStub())
+	h3.StubHostCall("env.cache_policy", pricingStub())
 	h3.SetNow(1_000_000)
 	h3.StubHostCall("env.state_set", func(string) (string, error) {
 		return "not a frame", nil
@@ -836,7 +832,7 @@ func TestCarrierHookRows(t *testing.T) {
 			inputBaseline := proto.Clone(row.req).(*pbv1.ChatRequest)
 
 			h := newHarness(t)
-			h.StubHostCall("torana_cache_pricing", pricingStub())
+			h.StubHostCall("env.cache_policy", pricingStub())
 			h.SetNow(1_000_000)
 			key, has, err := decisionKey(row.req)
 			if err != nil || !has {
@@ -909,7 +905,7 @@ func TestDeclineProofsZeroCallsNoMutation(t *testing.T) {
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			h := newHarness(t)
-			h.StubHostCall("torana_cache_pricing", pricingStub())
+			h.StubHostCall("env.cache_policy", pricingStub())
 			before := proto.Clone(row.req).(*pbv1.ChatRequest)
 			res := h.BeforeRequest(row.req)
 			if res.Err != nil || !res.PassedThrough {

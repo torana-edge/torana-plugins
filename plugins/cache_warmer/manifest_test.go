@@ -32,7 +32,7 @@ func TestManifestPermissionSetExact(t *testing.T) {
 		got = append(got, p.Name)
 	}
 	sort.Strings(got)
-	want := []string{"env.background_tick", "env.host_call.torana_cache_pricing", "env.host_call.torana_send_request", "env.now", "env.plugin_config", "env.state_get", "env.state_keys", "env.state_set"}
+	want := []string{"env.background_tick", "env.cache_policy", "env.host_call.torana_send_request", "env.now", "env.plugin_config", "env.state_get", "env.state_keys", "env.state_set"}
 	if len(got) != len(want) {
 		t.Fatalf("permissions = %v, want %v", got, want)
 	}
