@@ -85,7 +85,7 @@ func resetConfigForTest() {
 }
 
 // High-precision patterns — deterministic, no model call, exact line numbers,
-// and they still catch obvious PII when the local model is unavailable.
+// and they still catch obvious PII when the scanner service is unavailable.
 var piiPatterns = []struct {
 	name            string
 	requiredLiteral string
@@ -181,7 +181,7 @@ func init() {
 
 				// The deterministic scan runs FIRST over ALL retained text: a PII
 				// fact Torana already detected blocks as pii_detected even when
-				// the extraction is incomplete or the provider/model pair is
+				// the extraction is incomplete or the bound scanner service is
 				// misconfigured — on_error governs the UNAVAILABLE contextual
 				// scan, never a deterministic finding already made.
 				if f := regexScan(ex.text); len(f) > 0 {
