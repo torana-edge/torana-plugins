@@ -47,7 +47,7 @@
     },
     {
       "name": "env.plugin_config",
-      "description": "Read plugins.config.compactor (tool_policies, expected_applications, and max_offload_input_bytes)"
+      "description": "Read plugins.config.compactor (tool_policies, expected_applications, and max_summarizer_input_bytes)"
     },
     {
       "name": "ir.tool_results.write",

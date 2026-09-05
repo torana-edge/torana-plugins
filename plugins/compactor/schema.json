@@ -17,7 +17,7 @@
       "default": [],
       "description": "Ordered first-match compaction rules."
     },
-    "max_offload_input_bytes": {
+    "max_summarizer_input_bytes": {
       "type": "integer",
       "minimum": 0,
       "default": 0,

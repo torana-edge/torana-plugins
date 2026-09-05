@@ -258,7 +258,7 @@ func containsMarker(s string) bool {
 // ==========================================================================
 
 // TestDefaultConfigIsInert — schema defaults (0/0/[]) must mean: no policy
-// matches, model path disabled, unbounded offload input. Result: pass-through
+// matches, model path disabled, unbounded summarizer input. Result: pass-through
 // with no cache/extension traffic.
 func TestDefaultConfigIsInert(t *testing.T) {
 	h := newHarness(t)
@@ -376,7 +376,7 @@ func TestModelPathAppliesWithNamedService(t *testing.T) {
 		t.Fatal("model request missing the intent")
 	}
 	if strings.Contains(modelArgs.Messages[1].Content, "[truncated]") {
-		t.Fatal("default max_offload_input_bytes=0 must send the FULL output, not a truncated one")
+		t.Fatal("default max_summarizer_input_bytes=0 must send the FULL output, not a truncated one")
 	}
 	if hasMetric(h, "torana_intent_missing_total") {
 		t.Fatal("a captured intent must take precedence over the derived fallback")
@@ -417,7 +417,7 @@ func TestModelAdvisoryRefusalSkipsWithoutRetry(t *testing.T) {
 				t.Fatal("no candidate survived the advisory refusal; nothing may change")
 			}
 			if n := countCommand(h, "env.model_complete"); n != 1 {
-				t.Fatalf("advisory refusal was retried: %d offload calls", n)
+				t.Fatalf("advisory refusal was retried: %d summarizer calls", n)
 			}
 		})
 	}
@@ -488,7 +488,7 @@ func TestMissingUsageDeclinesEconomicApplication(t *testing.T) {
 }
 
 // TestEconomicGateDeclinesBatch — evaluate {"apply":false} declines; the
-// optimistic preflight declines BEFORE any offload call.
+// optimistic preflight declines BEFORE any summarizer call.
 func TestEconomicGateDeclinesBatch(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
@@ -502,15 +502,15 @@ func TestEconomicGateDeclinesBatch(t *testing.T) {
 	if !res.PassedThrough {
 		t.Fatal("a declined batch must not apply")
 	}
-	// Preflight declined -> no offload spend at all.
+	// Preflight declined -> no summarizer spend at all.
 	if n := countCommand(h, "env.model_complete"); n != 0 {
-		t.Fatalf("offload ran despite a declined preflight: %d calls", n)
+		t.Fatalf("summarizer ran despite a declined preflight: %d calls", n)
 	}
 }
 
 // TestUncachedBatchEvaluatesTwice — an uncached batch calls
 // torana_evaluate_compaction TWICE (optimistic preflight, then the real
-// post-offload report), both with candidate_count 2 for a two-candidate batch.
+// post-summarizer report), both with candidate_count 2 for a two-candidate batch.
 func TestUncachedBatchEvaluatesTwice(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
@@ -562,7 +562,7 @@ func TestAllCachedBatchEvaluatesOnce(t *testing.T) {
 		t.Fatalf("cached replacement not reused: %q", toolText(t, res.Request, 3))
 	}
 	if n := countCommand(h, "env.model_complete"); n != 0 {
-		t.Fatalf("cached-shorter value must be reused WITHOUT offload: %d calls", n)
+		t.Fatalf("cached-shorter value must be reused WITHOUT summarizer: %d calls", n)
 	}
 	if n := countCommand(h, "torana_evaluate_compaction"); n != 1 {
 		t.Fatalf("all-cached batch must evaluate exactly once, got %d", n)
@@ -571,7 +571,7 @@ func TestAllCachedBatchEvaluatesOnce(t *testing.T) {
 
 // TestCachedValueNotShorterLeavesUntouched — a cached value >= the original
 // is not applied and not recomputed: the message stays byte-identical, with
-// no offload and no evaluation (the hit is not even queued as work).
+// no summarizer and no evaluation (the hit is not even queued as work).
 func TestCachedValueNotShorterLeavesUntouched(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
@@ -591,7 +591,7 @@ func TestCachedValueNotShorterLeavesUntouched(t *testing.T) {
 		t.Fatal("a cached value >= the original must leave the message untouched")
 	}
 	if n := countCommand(h, "env.model_complete"); n != 0 {
-		t.Fatalf("offload ran despite a non-shorter cache hit: %d calls", n)
+		t.Fatalf("summarizer ran despite a non-shorter cache hit: %d calls", n)
 	}
 	if n := countCommand(h, "torana_evaluate_compaction"); n != 0 {
 		t.Fatalf("evaluate ran despite a non-shorter cache hit: %d calls", n)
@@ -629,7 +629,7 @@ func TestTwoCandidatesShareOneBoundService(t *testing.T) {
 // TestIntentMissUsesBoundedFallback — NOT_FOUND and present-empty remain
 // distinct host states but have the same policy outcome: emit the miss metric,
 // derive the exact bounded local intent, and continue through the real
-// economic/offload path.
+// economic/summarizer path.
 func TestIntentMissUsesBoundedFallback(t *testing.T) {
 	for _, name := range []string{"absent", "present-empty"} {
 		t.Run(name, func(t *testing.T) {
@@ -745,7 +745,7 @@ func TestDerivedIntentCacheIdentity(t *testing.T) {
 			t.Fatalf("derived cached value = %q", got)
 		}
 		if calls := countCommand(h, "env.model_complete"); calls != 0 {
-			t.Fatalf("derived cache hit made %d offload calls", calls)
+			t.Fatalf("derived cache hit made %d summarizer calls", calls)
 		}
 	})
 
@@ -791,7 +791,7 @@ func TestDerivedIntentCacheIdentity(t *testing.T) {
 				t.Fatalf("mutated row failed: %v", res.Err)
 			}
 			if calls := countCommand(h, "env.model_complete"); calls != 1 {
-				t.Fatalf("mutated row made %d offload calls, want 1", calls)
+				t.Fatalf("mutated row made %d summarizer calls, want 1", calls)
 			}
 			if got := toolText(t, res.Request, 3); got != "fresh-summary" {
 				t.Fatalf("mutated row reused baseline cache: %q", got)
@@ -842,8 +842,8 @@ func TestToolResultMustStayExact(t *testing.T) {
 	}
 }
 
-// TestMinOffloadCharsBoundary — 1999 bytes is not eligible; 2000 is.
-func TestMinOffloadCharsBoundary(t *testing.T) {
+// TestMinSummarizerCharsBoundary — 1999 bytes is not eligible; 2000 is.
+func TestMinSummarizerCharsBoundary(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
 	h.SeedCache("intent:call_1", "find the bug")
@@ -870,12 +870,12 @@ func TestMinOffloadCharsBoundary(t *testing.T) {
 	}
 }
 
-// TestTruncationMarkerInOffloadPayload — a positive max_offload_input_bytes
-// truncates head+tail in the offload payload; the tool result itself is never
+// TestTruncationMarkerInSummarizerPayload — a positive max_summarizer_input_bytes
+// truncates head+tail in the summarizer payload; the tool result itself is never
 // truncated.
-func TestTruncationMarkerInOffloadPayload(t *testing.T) {
+func TestTruncationMarkerInSummarizerPayload(t *testing.T) {
 	h := newHarness(t)
-	h.SetConfig(`{"tool_policies":[{"match":"read*","mode":"model"}],"expected_applications":6,"max_offload_input_bytes":100}`)
+	h.SetConfig(`{"tool_policies":[{"match":"read*","mode":"model"}],"expected_applications":6,"max_summarizer_input_bytes":100}`)
 	h.SeedCache("intent:call_1", "find the bug")
 	var modelArgs *pbv1.ModelCompleteArgs
 	h.StubModelComplete(func(args *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
@@ -888,7 +888,7 @@ func TestTruncationMarkerInOffloadPayload(t *testing.T) {
 		t.Fatalf("expected replacement, err=%v", res.Err)
 	}
 	if modelArgs == nil || len(modelArgs.Messages) != 2 || !strings.Contains(modelArgs.Messages[1].Content, "... [truncated] ...") {
-		t.Fatal("configured cap must truncate the offload payload head+tail")
+		t.Fatal("configured cap must truncate the summarizer payload head+tail")
 	}
 	if len(toolText(t, res.Request, 3)) >= len(bigContent()) {
 		t.Fatal("the tool result itself must not be truncated by the input cap")
@@ -1026,7 +1026,7 @@ func TestModelPathDisabledByDefault(t *testing.T) {
 		t.Fatal("expected_applications=0 must disable the model path")
 	}
 	if n := countCommand(h, "env.model_complete"); n != 0 {
-		t.Fatalf("offload ran with the model path disabled: %d calls", n)
+		t.Fatalf("summarizer ran with the model path disabled: %d calls", n)
 	}
 }
 
@@ -1084,7 +1084,7 @@ func mustJSON(t *testing.T, req *pbv1.ChatRequest) []byte {
 
 // TestModelPresentEmptyReplacementRecomputes — a present-empty model-cache
 // value is unusable: it must never erase the tool result; the work is
-// recomputed through offload.
+// recomputed through summarizer.
 func TestModelPresentEmptyReplacementRecomputes(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
@@ -1102,7 +1102,7 @@ func TestModelPresentEmptyReplacementRecomputes(t *testing.T) {
 		t.Fatalf("present-empty cache value must recompute, got %q", toolText(t, res.Request, 3))
 	}
 	if n := countCommand(h, "env.model_complete"); n != 1 {
-		t.Fatalf("offload must run for a present-empty cache value, got %d", n)
+		t.Fatalf("summarizer must run for a present-empty cache value, got %d", n)
 	}
 }
 
@@ -1172,7 +1172,7 @@ func TestDeterministicCacheMalformedReplyErrors(t *testing.T) {
 }
 
 // TestEvaluateAdvisoryRefusalDeclinesWithoutRetry — NOT_CONFIGURED on the
-// economic gate declines the batch; the preflight fails so no offload spend
+// economic gate declines the batch; the preflight fails so no summarizer spend
 // happens, and evaluate is called exactly once.
 func TestEvaluateAdvisoryRefusalDeclinesWithoutRetry(t *testing.T) {
 	for _, code := range []pbv1.ErrorCode{
@@ -1198,7 +1198,7 @@ func TestEvaluateAdvisoryRefusalDeclinesWithoutRetry(t *testing.T) {
 				t.Fatalf("advisory refusal was retried: %d evaluate calls", n)
 			}
 			if n := countCommand(h, "env.model_complete"); n != 0 {
-				t.Fatalf("offload ran despite a declined preflight: %d calls", n)
+				t.Fatalf("summarizer ran despite a declined preflight: %d calls", n)
 			}
 		})
 	}
@@ -1221,7 +1221,7 @@ func TestEvaluateContractRefusalErrors(t *testing.T) {
 }
 
 // TestRealEvaluationDeclinesAfterPreflight — the preflight approves, the
-// real evaluation declines: offload spent at most once and NO mutation is
+// real evaluation declines: summarizer spent at most once and NO mutation is
 // applied (a declined batch never half-applies).
 func TestRealEvaluationDeclinesAfterPreflight(t *testing.T) {
 	h := newHarness(t)
@@ -1244,12 +1244,12 @@ func TestRealEvaluationDeclinesAfterPreflight(t *testing.T) {
 		t.Fatal("a declined real evaluation must not apply any mutation")
 	}
 	if n := countCommand(h, "env.model_complete"); n != 1 {
-		t.Fatalf("offload spend=%d, want exactly 1 (preflight approved once)", n)
+		t.Fatalf("summarizer spend=%d, want exactly 1 (preflight approved once)", n)
 	}
 }
 
 // TestRealEvaluationRefusalAfterPreflight — preflight approves, the real
-// evaluation contract-refuses: hook error, no mutation, offload spent once.
+// evaluation contract-refuses: hook error, no mutation, summarizer spent once.
 func TestRealEvaluationRefusalAfterPreflight(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
@@ -1268,14 +1268,14 @@ func TestRealEvaluationRefusalAfterPreflight(t *testing.T) {
 		t.Fatal("a contract refusal on the real evaluation must error the hook")
 	}
 	if n := countCommand(h, "env.model_complete"); n != 1 {
-		t.Fatalf("offload spend=%d, want exactly 1", n)
+		t.Fatalf("summarizer spend=%d, want exactly 1", n)
 	}
 }
 
 // TestSchemaDefaultsMatchRuntimeDefaults — parity against schema.json itself,
 // so a schema/default drift cannot pass: the schema's defaults must equal the
 // runtime defaults (0 unbounded / 0 disables the model path / empty policies),
-// and the budget field must be named max_offload_input_bytes.
+// and the budget field must be named max_summarizer_input_bytes.
 func TestSchemaDefaultsMatchRuntimeDefaults(t *testing.T) {
 	raw, err := os.ReadFile("schema.json")
 	if err != nil {
@@ -1289,12 +1289,12 @@ func TestSchemaDefaultsMatchRuntimeDefaults(t *testing.T) {
 	if err := json.Unmarshal(raw, &schema); err != nil {
 		t.Fatalf("parse schema.json: %v", err)
 	}
-	prop, ok := schema.Properties["max_offload_input_bytes"]
+	prop, ok := schema.Properties["max_summarizer_input_bytes"]
 	if !ok {
-		t.Fatal("schema.json has no max_offload_input_bytes property (legacy name would drift)")
+		t.Fatal("schema.json has no max_summarizer_input_bytes property (legacy name would drift)")
 	}
 	if string(prop.Default) != "0" {
-		t.Fatalf("schema max_offload_input_bytes default=%s, want 0", prop.Default)
+		t.Fatalf("schema max_summarizer_input_bytes default=%s, want 0", prop.Default)
 	}
 	if string(schema.Properties["expected_applications"].Default) != "0" {
 		t.Fatalf("schema expected_applications default=%s, want 0", schema.Properties["expected_applications"].Default)
@@ -1305,7 +1305,7 @@ func TestSchemaDefaultsMatchRuntimeDefaults(t *testing.T) {
 
 	// Runtime defaults must match: no config -> inert (0/0/nil).
 	rt := parseConfig("")
-	if rt.MaxOffloadInputBytes != 0 || rt.ExpectedApplications != 0 || len(rt.ToolPolicies) != 0 {
+	if rt.MaxSummarizerInputBytes != 0 || rt.ExpectedApplications != 0 || len(rt.ToolPolicies) != 0 {
 		t.Fatalf("runtime defaults %+v do not match the schema defaults", rt)
 	}
 }
@@ -1388,7 +1388,7 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 	// Two results in one message: independent candidates, both applied. The
 	// accounting is pinned exactly: the real evaluate report carries
 	// candidate_count=2, and every per-candidate call fires exactly once per
-	// candidate (intent cache_get x2, model-key cache_get x2, offload x2,
+	// candidate (intent cache_get x2, model-key cache_get x2, summarizer x2,
 	// eligible metric x2, cache_set x2) while the batch-level calls fire once
 	// (preflight + real evaluate x2, record_savings x1, plugin_config x1).
 	t.Run("two results in one message", func(t *testing.T) {
@@ -1453,15 +1453,15 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 			t.Fatalf("eligible metric = %d, want 2 (one per candidate)", eligible)
 		}
 		// The evaluate payloads IN ORDER: BOTH carry candidate_count=2, but
-		// only the REAL report (the second) carries the offload facts — the
-		// optimistic preflight is offload-free by construction.
+		// only the REAL report (the second) carries the summarizer facts — the
+		// optimistic preflight is summarizer-free by construction.
 		type evalPayload struct {
 			CandidateCount  int    `json:"candidate_count"`
 			Source          string `json:"source"`
 			PricingResource string `json:"pricing_resource"`
-			Offload         *struct {
+			Summarizer      *struct {
 				PricingResource string `json:"pricing_resource"`
-			} `json:"offload"`
+			} `json:"summarizer"`
 		}
 		var evals []evalPayload
 		for _, c := range h.Calls() {
@@ -1480,19 +1480,19 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 		if evals[0].CandidateCount != 2 || evals[1].CandidateCount != 2 {
 			t.Fatalf("candidate_count = %d/%d, want 2/2", evals[0].CandidateCount, evals[1].CandidateCount)
 		}
-		if evals[0].Offload != nil {
-			t.Fatalf("the OPTIMISTIC preflight must not carry offload facts: %+v", evals[0].Offload)
+		if evals[0].Summarizer != nil {
+			t.Fatalf("the OPTIMISTIC preflight must not carry summarizer facts: %+v", evals[0].Summarizer)
 		}
 		if evals[0].PricingResource != "target" || evals[1].PricingResource != "target" {
 			t.Fatalf("target pricing resource = %q/%q", evals[0].PricingResource, evals[1].PricingResource)
 		}
-		if evals[1].Offload == nil || evals[1].Offload.PricingResource != "summarizer" {
-			t.Fatalf("the REAL report must carry the offload facts: %+v", evals[1].Offload)
+		if evals[1].Summarizer == nil || evals[1].Summarizer.PricingResource != "summarizer" {
+			t.Fatalf("the REAL report must carry the summarizer facts: %+v", evals[1].Summarizer)
 		}
 	})
 
 	// Unsupported shapes decline unchanged with EXACTLY ONE env.plugin_config
-	// call and ZERO cache/offload/metrics/savings calls. The marker-only row
+	// call and ZERO cache/summarizer/metrics/savings calls. The marker-only row
 	// is IN-DOMAIN (a real cache-breakpoint arm, not the out-of-domain empty
 	// content list); the explicit-empty row is a scalar candidate whose
 	// content is below the minimum threshold — inert with the same zero-spend
