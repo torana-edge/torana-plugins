@@ -121,7 +121,6 @@ var knownPermissions = map[string]bool{
 	"env.host_call.torana_db_query":            true,
 	"env.host_call.torana_evaluate_compaction": true,
 	"env.host_call.torana_kms_decrypt":         true,
-	"env.host_call.torana_offload_completion":  true,
 	"env.host_call.torana_plugin_counter":      true,
 	"env.host_call.torana_record_savings":      true,
 	"env.host_call.torana_send_request":        true,
