@@ -2,12 +2,12 @@
 // scores output lines using a cached intent when one is available or a
 // bounded deterministic signal derived from the request and tool call
 // otherwise, then keeps matching lines with a small context window — no model
-// call, no offload spend. Compacted results are cached by
+// call and no model-service spend. Compacted results are cached by
 // content-address, so later turns replaying the same result reuse the compact
 // form for free.
 //
 // Running it AFTER the intent plugin improves relevance but is not required.
-// It is an alternative to compactor (cheap-model offload) — pick ONE per
+// It is an alternative to compactor (model summarization) — pick ONE per
 // deployment; both can consume the same optional intent cache, but their
 // cache namespaces are disjoint (keyword_compactor/* vs compactor/*), so no
 // cross-plugin collision.
@@ -129,7 +129,7 @@ func compactToolResults(req *pbv1.ChatRequest) (bool, error) {
 		for _, view := range sdk.ToolResults(msg) {
 			// Scalar seam: exactly one text arm, zero unknown arms, any
 			// cache-marker arms. An unsupported shape declines the result
-			// UNCHANGED before any cache/offload/metric/savings call.
+			// UNCHANGED before any cache/model/metric/savings call.
 			text, ok := sdk.ToolResultScalarText(view)
 			if !ok {
 				continue

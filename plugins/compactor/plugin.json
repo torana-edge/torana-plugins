@@ -42,6 +42,10 @@
       "description": "Generate summaries through the operator-bound summarizer service"
     },
     {
+      "name": "env.model_pricing",
+      "description": "Resolve only the operator-bound target and summarizer pricing resources"
+    },
+    {
       "name": "env.host_call.torana_record_savings",
       "description": "Report compaction byte savings to /stats"
     },

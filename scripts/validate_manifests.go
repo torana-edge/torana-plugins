@@ -159,7 +159,7 @@ var pluginContracts = map[string]pluginContract{
 	"cache_warmer": {hooks: []string{"run_before_request", "run_on_tick"},
 		permissions: []string{"env.background_tick", "env.host_call.torana_cache_pricing", "env.host_call.torana_send_request", "env.now", "env.plugin_config", "env.state_get", "env.state_keys", "env.state_set"}},
 	"compactor": {hooks: []string{"run_before_request"},
-		permissions:   []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.host_call.torana_evaluate_compaction", "env.host_call.torana_record_savings", "env.model_complete", "env.plugin_config", "env.shared_cache_get", "ir.tool_results.write"},
+		permissions:   []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.host_call.torana_evaluate_compaction", "env.host_call.torana_record_savings", "env.model_complete", "env.model_pricing", "env.plugin_config", "env.shared_cache_get", "ir.tool_results.write"},
 		conflictsWith: []string{"torana/keyword_compactor"}},
 	"intent": {hooks: []string{"run_before_request", "run_on_stream_chunk"},
 		permissions: []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.log", "env.meta_get", "env.meta_set", "env.plugin_config", "env.shared_cache_set", "ir.cache_control.write", "ir.messages.write.assistant", "ir.messages.write.developer", "ir.messages.write.other", "ir.messages.write.system", "ir.messages.write.tool", "ir.messages.write.user", "ir.stream.write", "ir.tool_results.write", "ir.tools.write"}},
@@ -438,6 +438,9 @@ func validateModelResources(pluginName string, m manifest) {
 	}
 	pricing := map[string]bool{}
 	for _, resource := range m.PricingResources {
+		if !permissions["env.model_pricing"] {
+			panic(fmt.Sprintf("%s: pricing resource %q requires env.model_pricing", pluginName, resource.Name))
+		}
 		if strings.TrimSpace(resource.Name) == "" || strings.TrimSpace(resource.Description) == "" || pricing[resource.Name] {
 			panic(fmt.Sprintf("%s: invalid or duplicate pricing resource %q", pluginName, resource.Name))
 		}

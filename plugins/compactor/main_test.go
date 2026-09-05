@@ -972,6 +972,7 @@ func TestNoUnauthorizedCalls(t *testing.T) {
 		"env.shared_cache_get":       true,
 		"env.emit_metric":            true,
 		"env.model_complete":         true,
+		"env.model_pricing":          true,
 		"torana_evaluate_compaction": true,
 		"torana_record_savings":      true,
 	}
