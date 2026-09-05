@@ -36,6 +36,7 @@ type manifest struct {
 	Files []struct {
 		Path          string   `json:"path"`
 		Operations    []string `json:"operations"`
+		Required      bool     `json:"required"`
 		MaxBytes      int64    `json:"max_bytes"`
 		RetainedFiles int      `json:"retained_files"`
 	} `json:"files"`
