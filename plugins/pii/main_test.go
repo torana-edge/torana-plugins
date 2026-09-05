@@ -48,15 +48,10 @@ func markerArm() *pbv1.ToolResultContentBlock {
 	return &pbv1.ToolResultContentBlock{Kind: &pbv1.ToolResultContentBlock_CacheBreakpoint{CacheBreakpoint: &pbv1.ToolResultCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}}
 }
 
-func offloadStub(completion string) func(string) (string, error) {
-	return func(string) (string, error) {
-		return sdktest.HostResultValue([]byte(`{"completion":` + jsonEncode(completion) + `}`)), nil
+func modelStub(content string) func(*pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
+	return func(*pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
+		return &pbv1.ModelCompleteResult{Content: content}, nil, nil
 	}
-}
-
-func jsonEncode(s string) string {
-	b, _ := json.Marshal(s)
-	return string(b)
 }
 
 func countCommand(h *sdktest.Harness, cmd string) int {
@@ -193,7 +188,7 @@ func TestUnknownUnscannableContentFollowsOnError(t *testing.T) {
 			if n := countCommand(h, "env.cache_set"); n != 0 {
 				t.Fatalf("incomplete extractions must never be cached, got %d writes", n)
 			}
-			if n := countCommand(h, "torana_offload_completion"); n != 0 {
+			if n := countCommand(h, "env.model_complete"); n != 0 {
 				t.Fatalf("incomplete extractions must never be model-scanned, got %d calls", n)
 			}
 		})
@@ -411,8 +406,8 @@ func TestDuplicateToolCallIDsAmbiguous(t *testing.T) {
 // TestCleanCacheSkipsRescan — the plugin's own cache round-trip.
 func TestCleanCacheSkipsRescan(t *testing.T) {
 	h := newHarness(t)
-	h.SetConfig(`{"provider":"local","model":"qwen"}`)
-	h.StubHostCall("torana_offload_completion", offloadStub(`{"pii":false,"findings":[]}`))
+	h.SetConfig(`{}`)
+	h.StubModelComplete(modelStub(`{"pii":false,"findings":[]}`))
 	first := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("clean output here"))))
 	if first.Err != nil || !first.PassedThrough {
 		t.Fatalf("err=%v", first.Err)
@@ -421,22 +416,22 @@ func TestCleanCacheSkipsRescan(t *testing.T) {
 	if second.Err != nil || !second.PassedThrough {
 		t.Fatalf("err=%v", second.Err)
 	}
-	if n := countCommand(h, "torana_offload_completion"); n != 1 {
-		t.Fatalf("a cached clean verdict must skip the scan, got %d offload calls", n)
+	if n := countCommand(h, "env.model_complete"); n != 1 {
+		t.Fatalf("a cached clean verdict must skip the scan, got %d model calls", n)
 	}
 
 	// Present-empty: unusable, rescan.
 	h2 := newHarness(t)
-	h2.SetConfig(`{"provider":"local","model":"qwen"}`)
+	h2.SetConfig(`{}`)
 	h2.Run(func() { loadConfig() })
 	h2.SeedCache(piiCleanCacheKey(sdk.ToolResults(toolMsg("c1", "read", textArm("clean output here")))[0], "read"), "")
-	h2.StubHostCall("torana_offload_completion", offloadStub(`{"pii":false,"findings":[]}`))
+	h2.StubModelComplete(modelStub(`{"pii":false,"findings":[]}`))
 	res2 := h2.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("clean output here"))))
 	if res2.Err != nil || !res2.PassedThrough {
 		t.Fatalf("err=%v", res2.Err)
 	}
-	if n := countCommand(h2, "torana_offload_completion"); n != 1 {
-		t.Fatalf("present-empty must rescan, got %d offload calls", n)
+	if n := countCommand(h2, "env.model_complete"); n != 1 {
+		t.Fatalf("present-empty must rescan, got %d model calls", n)
 	}
 }
 
@@ -447,6 +442,7 @@ func TestCacheRefusalClasses(t *testing.T) {
 	h.StubHostCall("env.cache_get", func(string) (string, error) {
 		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no cache"), nil
 	})
+	h.StubModelComplete(modelStub(`{"pii":false,"findings":[]}`))
 	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("no pii here"))))
 	if res.Err != nil || !res.PassedThrough {
 		t.Fatalf("advisory cache refusal must still scan, err=%v", res.Err)
@@ -504,8 +500,8 @@ func TestAllowlistSemantics(t *testing.T) {
 // caches and passes.
 func TestModelScanHappyPath(t *testing.T) {
 	h := newHarness(t)
-	h.SetConfig(`{"provider":"local","model":"qwen"}`)
-	h.StubHostCall("torana_offload_completion", offloadStub(`{"pii":true,"findings":[{"type":"email","line":3}]}`))
+	h.SetConfig(`{}`)
+	h.StubModelComplete(modelStub(`{"pii":true,"findings":[{"type":"email","line":3}]}`))
 	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("line1\nline2\nline3"))))
 	if res.Err != nil || !res.PassedThrough {
 		t.Fatalf("err=%v", res.Err)
@@ -513,8 +509,8 @@ func TestModelScanHappyPath(t *testing.T) {
 	assertBlocked(t, h, "pii_detected")
 
 	h2 := newHarness(t)
-	h2.SetConfig(`{"provider":"local","model":"qwen"}`)
-	h2.StubHostCall("torana_offload_completion", offloadStub(`{"pii":false,"findings":[]}`))
+	h2.SetConfig(`{}`)
+	h2.StubModelComplete(modelStub(`{"pii":false,"findings":[]}`))
 	res2 := h2.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("clean text"))))
 	if res2.Err != nil || !res2.PassedThrough {
 		t.Fatalf("err=%v", res2.Err)
@@ -545,8 +541,8 @@ func TestModelVerdictShapeValidation(t *testing.T) {
 		for mode, onError := range map[string]string{"block": "block", "allow": "allow"} {
 			t.Run(name+"/"+mode, func(t *testing.T) {
 				h := newHarness(t)
-				h.SetConfig(`{"provider":"local","model":"qwen","on_error":"` + onError + `"}`)
-				h.StubHostCall("torana_offload_completion", offloadStub(completion))
+				h.SetConfig(`{"on_error":"` + onError + `"}`)
+				h.StubModelComplete(modelStub(completion))
 				res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("text"))))
 				if res.Err != nil || !res.PassedThrough {
 					t.Fatalf("err=%v", res.Err)
@@ -569,10 +565,10 @@ func TestModelVerdictShapeValidation(t *testing.T) {
 // block message cannot contain the echoed secret.
 func TestModelCategoryNormalization(t *testing.T) {
 	h := newHarness(t)
-	h.SetConfig(`{"provider":"local","model":"qwen"}`)
+	h.SetConfig(`{}`)
 	secret := "victim@example.com"
-	h.StubHostCall("torana_offload_completion", offloadStub(
-		`{"pii":true,"findings":[{"type":"`+secret+`","line":1}]}`))
+	h.StubModelComplete(modelStub(
+		`{"pii":true,"findings":[{"type":"` + secret + `","line":1}]}`))
 	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("text"))))
 	if res.Err != nil || !res.PassedThrough {
 		t.Fatalf("err=%v", res.Err)
@@ -598,8 +594,8 @@ func TestModelCategoryNormalization(t *testing.T) {
 
 	// Line numbers are clamped before display.
 	h2 := newHarness(t)
-	h2.SetConfig(`{"provider":"local","model":"qwen"}`)
-	h2.StubHostCall("torana_offload_completion", offloadStub(`{"pii":true,"findings":[{"type":"email","line":-7}]}`))
+	h2.SetConfig(`{}`)
+	h2.StubModelComplete(modelStub(`{"pii":true,"findings":[{"type":"email","line":-7}]}`))
 	res2 := h2.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("text"))))
 	if res2.Err != nil || !res2.PassedThrough {
 		t.Fatalf("err=%v", res2.Err)
@@ -623,7 +619,7 @@ func TestToolLabelSafety(t *testing.T) {
 	}
 }
 
-// TestModelScanRefusalClasses — advisory offload refusals are a scanner
+// TestModelScanRefusalClasses — advisory model-service refusals are a scanner
 // failure governed by on_error; contract refusals and malformed frames error
 // the hook regardless of on_error.
 func TestModelScanRefusalClasses(t *testing.T) {
@@ -633,9 +629,9 @@ func TestModelScanRefusalClasses(t *testing.T) {
 	} {
 		t.Run("advisory/"+code.String(), func(t *testing.T) {
 			h := newHarness(t)
-			h.SetConfig(`{"provider":"local","model":"qwen","on_error":"block"}`)
-			h.StubHostCall("torana_offload_completion", func(string) (string, error) {
-				return sdktest.HostResultError(code, "stub"), nil
+			h.SetConfig(`{"on_error":"block"}`)
+			h.StubModelComplete(func(*pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
+				return nil, &pbv1.HostError{Code: code, Message: "stub"}, nil
 			})
 			res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("text"))))
 			if res.Err != nil || !res.PassedThrough {
@@ -647,16 +643,16 @@ func TestModelScanRefusalClasses(t *testing.T) {
 
 	t.Run("advisory allow", func(t *testing.T) {
 		h := newHarness(t)
-		h.SetConfig(`{"provider":"local","model":"qwen","on_error":"allow"}`)
-		h.StubHostCall("torana_offload_completion", func(string) (string, error) {
-			return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "stub"), nil
+		h.SetConfig(`{"on_error":"allow"}`)
+		h.StubModelComplete(func(*pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
+			return nil, &pbv1.HostError{Code: pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, Message: "stub"}, nil
 		})
 		res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("text"))))
 		if res.Err != nil || !res.PassedThrough {
 			t.Fatalf("err=%v", res.Err)
 		}
 		if len(h.BlockCalls()) != 0 {
-			t.Fatal("allow must forward on an advisory offload refusal")
+			t.Fatal("allow must forward on an advisory model-service refusal")
 		}
 	})
 
@@ -668,9 +664,9 @@ func TestModelScanRefusalClasses(t *testing.T) {
 		t.Run("contract/"+code.String(), func(t *testing.T) {
 			for _, onError := range []string{"block", "allow"} {
 				h := newHarness(t)
-				h.SetConfig(`{"provider":"local","model":"qwen","on_error":"` + onError + `"}`)
-				h.StubHostCall("torana_offload_completion", func(string) (string, error) {
-					return sdktest.HostResultError(code, "stub"), nil
+				h.SetConfig(`{"on_error":"` + onError + `"}`)
+				h.StubModelComplete(func(*pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
+					return nil, &pbv1.HostError{Code: code, Message: "stub"}, nil
 				})
 				if res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("text")))); res.Err == nil {
 					t.Fatalf("contract refusal must error the hook regardless of on_error=%s", onError)
@@ -681,19 +677,19 @@ func TestModelScanRefusalClasses(t *testing.T) {
 
 	t.Run("malformed frame", func(t *testing.T) {
 		h := newHarness(t)
-		h.SetConfig(`{"provider":"local","model":"qwen","on_error":"allow"}`)
-		h.StubHostCall("torana_offload_completion", func(string) (string, error) {
+		h.SetConfig(`{"on_error":"allow"}`)
+		h.StubHostCall("env.model_complete", func(string) (string, error) {
 			return "not a frame", nil
 		})
 		if res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("text")))); res.Err == nil {
-			t.Fatal("a malformed offload frame must error the hook")
+			t.Fatal("a malformed model-service frame must error the hook")
 		}
 	})
 
 	t.Run("unparseable verdict", func(t *testing.T) {
 		h := newHarness(t)
-		h.SetConfig(`{"provider":"local","model":"qwen","on_error":"block"}`)
-		h.StubHostCall("torana_offload_completion", offloadStub(`no json here`))
+		h.SetConfig(`{"on_error":"block"}`)
+		h.StubModelComplete(modelStub(`no json here`))
 		res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("text"))))
 		if res.Err != nil || !res.PassedThrough {
 			t.Fatalf("err=%v", res.Err)
@@ -723,29 +719,30 @@ func TestMaxScanBytesTruncation(t *testing.T) {
 	for _, onError := range []string{"block", "allow"} {
 		t.Run(onError, func(t *testing.T) {
 			h := newHarness(t)
-			h.SetConfig(`{"provider":"local","model":"qwen","max_scan_bytes":100,"on_error":"` + onError + `"}`)
-			var payload string
-			h.StubHostCall("torana_offload_completion", func(args string) (string, error) {
-				payload = args
-				return sdktest.HostResultValue([]byte(`{"completion":"{\"pii\":false,\"findings\":[]}"}`)), nil
+			h.SetConfig(`{"max_scan_bytes":100,"on_error":"` + onError + `"}`)
+			var request *pbv1.ModelCompleteArgs
+			h.StubModelComplete(func(args *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
+				request = args
+				return &pbv1.ModelCompleteResult{Content: `{"pii":false,"findings":[]}`}, nil, nil
 			})
 			content := strings.Repeat("日本語", 500)
 			res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm(content))))
 			if res.Err != nil || !res.PassedThrough {
 				t.Fatalf("err=%v", res.Err)
 			}
-			idx := strings.Index(payload, "Output to scan:\\n")
+			if request == nil || len(request.Messages) != 2 {
+				t.Fatalf("model request = %+v, want two messages", request)
+			}
+			const marker = "Output to scan:\n"
+			idx := strings.Index(request.Messages[1].Content, marker)
 			if idx < 0 {
-				t.Fatal("offload payload missing the scan content")
+				t.Fatalf("model user message missing scan marker: %q", request.Messages[1].Content)
 			}
-			scanned := payload[idx+len("Output to scan:\\n"):]
-			scanned = strings.TrimSuffix(scanned, `"}`)
-			var decoded string
-			_ = json.Unmarshal([]byte(`"`+scanned+`"`), &decoded)
-			if len(decoded) > 100 {
-				t.Fatalf("scanned bytes=%d exceed the 100-byte budget", len(decoded))
+			scanned := request.Messages[1].Content[idx+len(marker):]
+			if len(scanned) > 100 {
+				t.Fatalf("scanned bytes=%d exceed the 100-byte budget", len(scanned))
 			}
-			if !utf8.ValidString(decoded) {
+			if !utf8.ValidString(scanned) {
 				t.Fatal("truncation split a rune")
 			}
 			if n := countCommand(h, "env.cache_set"); n != 0 {
@@ -759,62 +756,44 @@ func TestMaxScanBytesTruncation(t *testing.T) {
 	}
 }
 
-// TestScannerPairConfiguration — both-or-neither with ZERO offload calls for
-// an invalid pair; a deterministic regex finding still blocks under a
-// mispaired configuration (the safer ordering).
-func TestScannerPairConfiguration(t *testing.T) {
-	for name, cfg := range map[string]string{
-		"provider only": `{"provider":"local"}`,
-		"model only":    `{"model":"qwen"}`,
-	} {
-		t.Run(name+"/block", func(t *testing.T) {
-			h := newHarness(t)
-			h.SetConfig(cfg)
-			h.StubHostCall("torana_offload_completion", offloadStub(`{"pii":false,"findings":[]}`))
-			res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("text"))))
-			if res.Err != nil || !res.PassedThrough {
-				t.Fatalf("err=%v", res.Err)
-			}
-			if n := countCommand(h, "torana_offload_completion"); n != 0 {
-				t.Fatalf("an invalid scanner pair must make ZERO offload calls, got %d", n)
-			}
-			assertBlocked(t, h, "pii_scan_failed")
-		})
-		t.Run(name+"/allow", func(t *testing.T) {
-			h := newHarness(t)
-			h.SetConfig(cfg + `,"on_error":"allow"`)
-			h.StubHostCall("torana_offload_completion", offloadStub(`{"pii":false,"findings":[]}`))
-			res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("text"))))
-			if res.Err != nil || !res.PassedThrough {
-				t.Fatalf("err=%v", res.Err)
-			}
-			if n := countCommand(h, "torana_offload_completion"); n != 0 {
-				t.Fatalf("an invalid scanner pair must make ZERO offload calls, got %d", n)
-			}
-			if len(h.BlockCalls()) != 0 {
-				t.Fatalf("allow must forward an invalid pair: %+v", h.BlockCalls())
-			}
-		})
-	}
-
-	// A deterministic regex finding blocks even when the pair is mispaired.
+// TestScannerModelServiceContract pins the provider-neutral request. Provider,
+// model, URL, and credentials are operator-owned binding data and never enter
+// plugin configuration or the guest request.
+func TestScannerModelServiceContract(t *testing.T) {
 	h := newHarness(t)
-	h.SetConfig(`{"provider":"local"}`)
-	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("contact someone@example.com"))))
+	var got *pbv1.ModelCompleteArgs
+	h.StubModelComplete(func(args *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
+		got = args
+		return &pbv1.ModelCompleteResult{Content: `{"pii":false,"findings":[]}`}, nil, nil
+	})
+	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("clean text"))))
 	if res.Err != nil || !res.PassedThrough {
 		t.Fatalf("err=%v", res.Err)
 	}
-	assertBlocked(t, h, "pii_detected", "someone@example.com")
-
-	// Both absent: regex-only works without any offload.
-	h2 := newHarness(t)
-	h2.StubHostCall("torana_offload_completion", offloadStub(`{"pii":true,"findings":[]}`))
-	res2 := h2.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("clean text"))))
-	if res2.Err != nil || !res2.PassedThrough {
-		t.Fatalf("regex-only mode must work, err=%v", res2.Err)
+	if got == nil || got.Service != "scanner" || len(got.Messages) != 2 {
+		t.Fatalf("model request = %+v", got)
 	}
-	if n := countCommand(h2, "torana_offload_completion"); n != 0 {
-		t.Fatalf("regex-only mode must not call the model, got %d", n)
+	if got.Messages[0].Role != "system" || got.Messages[0].Content != piiSystemPrompt {
+		t.Fatalf("system message = %+v", got.Messages[0])
+	}
+	if got.Messages[1].Role != "user" || !strings.Contains(got.Messages[1].Content, "clean text") {
+		t.Fatalf("user message = %+v", got.Messages[1])
+	}
+	if got.MaxTokens == nil || *got.MaxTokens != 512 || got.Temperature == nil || *got.Temperature != 0 {
+		t.Fatalf("model controls = %+v", got)
+	}
+
+	// The deterministic scanner remains first and blocks without invoking the
+	// bound model service when it already has a conclusive finding.
+	h2 := newHarness(t)
+	h2.StubModelComplete(modelStub(`{"pii":false,"findings":[]}`))
+	res2 := h2.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("contact someone@example.com"))))
+	if res2.Err != nil || !res2.PassedThrough {
+		t.Fatalf("err=%v", res2.Err)
+	}
+	assertBlocked(t, h2, "pii_detected", "someone@example.com")
+	if n := countCommand(h2, "env.model_complete"); n != 0 {
+		t.Fatalf("regex finding made %d model calls, want zero", n)
 	}
 }
 
@@ -835,15 +814,15 @@ func TestBlockReturnsPassAndNoWriteGrant(t *testing.T) {
 
 func TestNoUnauthorizedCalls(t *testing.T) {
 	h := newHarness(t)
-	h.SetConfig(`{"provider":"local","model":"qwen"}`)
-	h.StubHostCall("torana_offload_completion", offloadStub(`{"pii":false,"findings":[]}`))
+	h.SetConfig(`{}`)
+	h.StubModelComplete(modelStub(`{"pii":false,"findings":[]}`))
 	h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("clean"))))
 	allowed := map[string]bool{
-		"env.plugin_config":         true,
-		"env.cache_get":             true,
-		"env.cache_set":             true,
-		"env.block_request":         true,
-		"torana_offload_completion": true,
+		"env.plugin_config":  true,
+		"env.cache_get":      true,
+		"env.cache_set":      true,
+		"env.block_request":  true,
+		"env.model_complete": true,
 	}
 	for _, c := range h.Calls() {
 		if !allowed[c.Command] {
@@ -852,16 +831,16 @@ func TestNoUnauthorizedCalls(t *testing.T) {
 	}
 }
 
-// TestSchemaDefaultsMatchRuntimeDefaults — schema.json defaults and the pair
-// constraint + byte-budget name.
+// TestSchemaDefaultsMatchRuntimeDefaults pins the user-owned policy surface.
+// Provider, model, URL, credentials, and service budgets belong to the
+// operator binding declared by plugin.json, not this configuration schema.
 func TestSchemaDefaultsMatchRuntimeDefaults(t *testing.T) {
 	raw, err := os.ReadFile("schema.json")
 	if err != nil {
 		t.Fatalf("read schema.json: %v", err)
 	}
 	var schema struct {
-		Properties        map[string]json.RawMessage `json:"properties"`
-		DependentRequired map[string][]string        `json:"dependentRequired"`
+		Properties map[string]json.RawMessage `json:"properties"`
 	}
 	if err := json.Unmarshal(raw, &schema); err != nil {
 		t.Fatal(err)
@@ -877,19 +856,14 @@ func TestSchemaDefaultsMatchRuntimeDefaults(t *testing.T) {
 	if err := json.Unmarshal(schema.Properties["on_error"], &onError); err != nil || onError.Default != "block" {
 		t.Fatalf("on_error default=%q, want block", onError.Default)
 	}
-	dep, ok := schema.DependentRequired["provider"]
-	if !ok || len(dep) != 1 || dep[0] != "model" {
-		t.Fatalf("provider must depend on model: %v", dep)
-	}
-	if _, ok := schema.DependentRequired["model"]; !ok {
-		t.Fatal("model must depend on provider")
+	for _, hostOwned := range []string{"provider", "model", "url", "credential"} {
+		if _, ok := schema.Properties[hostOwned]; ok {
+			t.Fatalf("host-owned binding field %q leaked into plugin config", hostOwned)
+		}
 	}
 	rt := parseConfig("")
-	if rt.OnError != "block" || rt.Provider != "" || rt.Model != "" || rt.MaxScanBytes != 0 {
+	if rt.OnError != "block" || rt.MaxScanBytes != 0 {
 		t.Fatalf("runtime defaults %+v do not match the schema", rt)
-	}
-	if !rt.scannerPairValid() {
-		t.Fatal("empty pair must be valid (regex-only)")
 	}
 }
 
@@ -913,6 +887,7 @@ func TestConfigResetPinsIsolation(t *testing.T) {
 
 func TestDeterminismOverIdenticalRequests(t *testing.T) {
 	h := newHarness(t)
+	h.StubModelComplete(modelStub(`{"pii":false,"findings":[]}`))
 	r1 := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("clean"))))
 	r2 := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("clean"))))
 	if r1.Err != nil || r2.Err != nil || !r1.PassedThrough || !r2.PassedThrough {
@@ -979,8 +954,8 @@ func TestModelFindingCapAndLineValidation(t *testing.T) {
 	}
 	findings = findings[:len(findings)-1]
 	h := newHarness(t)
-	h.SetConfig(`{"provider":"local","model":"qwen"}`)
-	h.StubHostCall("torana_offload_completion", offloadStub(`{"pii":true,"findings":[`+findings+`]}`))
+	h.SetConfig(`{}`)
+	h.StubModelComplete(modelStub(`{"pii":true,"findings":[` + findings + `]}`))
 	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("one line"))))
 	if res.Err != nil || !res.PassedThrough {
 		t.Fatalf("err=%v", res.Err)
@@ -996,8 +971,8 @@ func TestModelFindingCapAndLineValidation(t *testing.T) {
 	// A one-line input with model lines 2 and 999999: both implausible and
 	// omitted (the category renders without a bogus line).
 	h2 := newHarness(t)
-	h2.SetConfig(`{"provider":"local","model":"qwen"}`)
-	h2.StubHostCall("torana_offload_completion", offloadStub(
+	h2.SetConfig(`{}`)
+	h2.StubModelComplete(modelStub(
 		`{"pii":true,"findings":[{"type":"email","line":2},{"type":"email","line":999999}]}`))
 	res2 := h2.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("one line"))))
 	if res2.Err != nil || !res2.PassedThrough {
@@ -1041,11 +1016,10 @@ func TestCleanCacheKeyAuthoritativeInputs(t *testing.T) {
 			t.Errorf("%s must change the cache key", tc.name)
 		}
 	}
-	// Each policy field is authoritative: a NON-default baseline, and every
-	// row mutates EXACTLY ONE field (the provider row must not change model
-	// at the same time, or it would not independently prove provider
-	// authority).
-	baseline := `{"provider":"p","model":"m","tools":["read"],"on_error":"allow","max_scan_bytes":123}`
+	// Each user-owned policy field is authoritative: a non-default baseline,
+	// and every row mutates exactly one field. The bound model coordinates are
+	// host-owned and Edge scopes the private cache to the approved resources.
+	baseline := `{"tools":["read"],"on_error":"allow","max_scan_bytes":123}`
 	baseHarness.Run(func() { loadConfig() }) // ensure defaults first
 	h0 := newHarness(t)
 	h0.SetConfig(baseline)
@@ -1055,11 +1029,9 @@ func TestCleanCacheKeyAuthoritativeInputs(t *testing.T) {
 		name string
 		cfg  string
 	}{
-		{"provider", `{"provider":"p2","model":"m","tools":["read"],"on_error":"allow","max_scan_bytes":123}`},
-		{"model", `{"provider":"p","model":"m2","tools":["read"],"on_error":"allow","max_scan_bytes":123}`},
-		{"tools", `{"provider":"p","model":"m","tools":["grep"],"on_error":"allow","max_scan_bytes":123}`},
-		{"on_error", `{"provider":"p","model":"m","tools":["read"],"on_error":"block","max_scan_bytes":123}`},
-		{"max_scan_bytes", `{"provider":"p","model":"m","tools":["read"],"on_error":"allow","max_scan_bytes":456}`},
+		{"tools", `{"tools":["grep"],"on_error":"allow","max_scan_bytes":123}`},
+		{"on_error", `{"tools":["read"],"on_error":"block","max_scan_bytes":123}`},
+		{"max_scan_bytes", `{"tools":["read"],"on_error":"allow","max_scan_bytes":456}`},
 	}
 	for _, tc := range policyCases {
 		h := newHarness(t)
@@ -1141,8 +1113,8 @@ func TestFindingCapBoundaries(t *testing.T) {
 	for _, n := range []int{19, 20, 21} {
 		t.Run("model/"+itoa(n), func(t *testing.T) {
 			h := newHarness(t)
-			h.SetConfig(`{"provider":"local","model":"qwen"}`)
-			h.StubHostCall("torana_offload_completion", offloadStub(modelCompletion(n)))
+			h.SetConfig(`{}`)
+			h.StubModelComplete(modelStub(modelCompletion(n)))
 			res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("one line"))))
 			if res.Err != nil || !res.PassedThrough {
 				t.Fatalf("err=%v", res.Err)

@@ -7,7 +7,7 @@
   "minimum_torana_version": "0.1.0",
   "failure_mode": "block",
   "repository": "https://github.com/torana-edge/torana-plugins",
-  "description": "Scans tool results through a local model + regex pre-filter and blocks the request if PII is detected",
+  "description": "Scans tool results through an operator-bound model plus a regex pre-filter and blocks the request if PII is detected",
   "hooks": [
     {
       "name": "run_before_request"
@@ -27,12 +27,24 @@
       "description": "Cache clean verdicts by tool_call_id"
     },
     {
-      "name": "env.host_call.torana_offload_completion",
-      "description": "Send tool output to the local PII-detection model"
+      "name": "env.model_complete",
+      "description": "Run the contextual scan through the required scanner model service"
     },
     {
       "name": "env.plugin_config",
-      "description": "Read plugins.config.pii (provider, model, tools, on_error)"
+      "description": "Read plugins.config.pii (tools, on_error, max_scan_bytes)"
+    }
+  ],
+  "model_services": [
+    {
+      "name": "scanner",
+      "description": "Contextual PII detector used after the deterministic regex scan",
+      "required": true,
+      "timeout_ms": 30000,
+      "max_tokens": 512,
+      "max_input_bytes": 1048576,
+      "max_calls_per_minute": 60,
+      "max_tokens_per_hour": 100000
     }
   ]
 }
