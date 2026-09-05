@@ -1,5 +1,5 @@
 // The compactor shrinks large tool results by delegating extraction to a
-// cheap model (torana_offload_completion), guided by a cached intent when one
+// bound summarizer model service, guided by a cached intent when one
 // is available or by a bounded deterministic signal derived from the request
 // and tool call otherwise. Compacted results are cached by
 // tool_call_id, so later turns replaying the same result reuse the compact
@@ -319,20 +319,8 @@ type modelCandidate struct {
 	originalBytes int
 	replacement   string
 	source        string
-	provider      string
-	model         string
 	usage         tokenUsage
 	cacheKey      string
-}
-
-// offloadResponse is the domain body of a successful offload. Additive JSON
-// fields (e.g. a legacy "status") are tolerated by the decoder and never
-// consulted: refusals arrive ONLY in the framed error arm.
-type offloadResponse struct {
-	Completion string     `json:"completion"`
-	Provider   string     `json:"provider"`
-	Model      string     `json:"model"`
-	Usage      tokenUsage `json:"usage"`
 }
 
 // prepareAndApplyModelBatch runs the economic gate (optimistic preflight for
@@ -372,14 +360,18 @@ func prepareAndApplyModelBatch(req *pbv1.ChatRequest, works []modelWork) (bool, 
 			continue
 		}
 		ctxStr := extractConversationContext(req.Messages)
-		payload, _ := json.Marshal(map[string]any{
-			"system_prompt": "You are a tool output summarizer. Given a tool output and an extraction intent, return ONLY the relevant parts. Be concise. Do not add commentary.",
-			"user_prompt": fmt.Sprintf("Intent: %s\n\nConversation context:\n%s\n\nTool output:\n%s\n\nExtract only the parts relevant to the intent.",
-				work.intent, ctxStr, truncateForPrompt(work.text, maxOffloadInputBytes)),
+		maxTokens := uint32(512)
+		result, herr, err := sdk.ModelComplete(&pbv1.ModelCompleteArgs{
+			Service: "summarizer",
+			Messages: []*pbv1.ModelMessage{
+				{Role: "system", Content: "You are a tool output summarizer. Given a tool output and an extraction intent, return ONLY the relevant parts. Be concise. Do not add commentary."},
+				{Role: "user", Content: fmt.Sprintf("Intent: %s\n\nConversation context:\n%s\n\nTool output:\n%s\n\nExtract only the parts relevant to the intent.",
+					work.intent, ctxStr, truncateForPrompt(work.text, maxOffloadInputBytes))},
+			},
+			MaxTokens: &maxTokens,
 		})
-		result, herr, err := sdk.HostCallExtension("torana_offload_completion", payload)
 		if err != nil {
-			return false, fmt.Errorf("compactor: offload: %w", err)
+			return false, fmt.Errorf("compactor: summarizer: %w", err)
 		}
 		if herr != nil {
 			switch herr.Code {
@@ -388,18 +380,20 @@ func prepareAndApplyModelBatch(req *pbv1.ChatRequest, works []modelWork) (bool, 
 				// retry in the same request (duplicate spend).
 				continue
 			default:
-				return false, fmt.Errorf("compactor: offload refused: %s", herr.Message)
+				return false, fmt.Errorf("compactor: summarizer refused: %s", herr.Message)
 			}
 		}
-		var response offloadResponse
-		if json.Unmarshal(result, &response) != nil || response.Completion == "" || len(response.Completion) >= len(work.text) {
-			// Malformed or unusable domain body: skip, like a transient
-			// failure — the host framed every refusal already.
+		if result == nil || result.Content == "" || len(result.Content) >= len(work.text) {
+			// An unusable completion is a candidate-local decline.
 			continue
 		}
+		usage := tokenUsage{}
+		if result.Usage != nil {
+			usage = tokenUsage{Reported: true, InputTokens: int64(result.Usage.InputTokens), OutputTokens: int64(result.Usage.OutputTokens), CacheReadTokens: int64(result.Usage.CacheReadTokens), CacheWriteTokens: int64(result.Usage.CacheWriteTokens)}
+		}
 		candidates = append(candidates, modelCandidate{
-			message: work.message, index: work.index, block: work.block, originalBytes: len(work.text), replacement: response.Completion,
-			source: "transformation", provider: response.Provider, model: response.Model, usage: response.Usage, cacheKey: work.cacheKey,
+			message: work.message, index: work.index, block: work.block, originalBytes: len(work.text), replacement: result.Content,
+			source: "transformation", usage: usage, cacheKey: work.cacheKey,
 		})
 	}
 	if len(candidates) == 0 {
@@ -465,7 +459,6 @@ func modelBatchReport(req *pbv1.ChatRequest, candidates []modelCandidate, includ
 	earliest := len(req.Messages)
 	originalBytes, finalBytes := 0, 0
 	source := "cache_reuse"
-	var provider, model string
 	usage := tokenUsage{Reported: true}
 	hasTransformation := false
 	for _, candidate := range candidates {
@@ -479,12 +472,6 @@ func modelBatchReport(req *pbv1.ChatRequest, candidates []modelCandidate, includ
 		}
 		hasTransformation = true
 		source = "transformation"
-		if provider == "" {
-			provider, model = candidate.provider, candidate.model
-		}
-		if provider != candidate.provider || model != candidate.model {
-			return nil, false
-		}
 		usage.Reported = usage.Reported && candidate.usage.Reported
 		usage.InputTokens += candidate.usage.InputTokens
 		usage.OutputTokens += candidate.usage.OutputTokens
@@ -505,12 +492,13 @@ func modelBatchReport(req *pbv1.ChatRequest, candidates []modelCandidate, includ
 		"candidate_count":               len(candidates),
 		"expected_applications":         expectedApplications,
 		"source":                        source,
+		"pricing_resource":              "target",
 	}
 	if includeOffload && hasTransformation {
-		if provider == "" || model == "" || !usage.Reported {
+		if !usage.Reported {
 			return nil, false
 		}
-		report["offload"] = map[string]any{"provider": provider, "model": model, "usage": usage}
+		report["offload"] = map[string]any{"pricing_resource": "summarizer", "usage": usage}
 	}
 	return report, true
 }

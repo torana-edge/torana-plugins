@@ -81,11 +81,9 @@ func bigContent() string {
 // modelConfig enables the model path with an economic gate that must approve.
 const modelConfig = `{"tool_policies":[{"match":"read*","mode":"model"}],"expected_applications":6}`
 
-// offloadStub returns the typed success shape (NO status field) for the offload
-// host call.
-func offloadStub(completion string) func(args string) (string, error) {
-	return func(args string) (string, error) {
-		return sdktest.HostResultValue([]byte(`{"completion":"` + completion + `","provider":"deepseek","model":"deepseek-v4-flash","usage":{"reported":true,"input_tokens":100,"output_tokens":50}}`)), nil
+func modelStub(completion string) func(*pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
+	return func(*pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
+		return &pbv1.ModelCompleteResult{Content: completion, ReportedModel: "small-model", Usage: &pbv1.Usage{InputTokens: 100, OutputTokens: 50}}, nil, nil
 	}
 }
 
@@ -348,15 +346,15 @@ func TestDeterministicConsumptionGate(t *testing.T) {
 	}
 }
 
-// TestModelPathAppliesWithV2OffloadShape — the full model row: stubbed offload
-// with the typed body (no status), economic gate approves; asserts the
-// replacement, the cache write, the savings report, and the carried
-// provider/model/usage.
-func TestModelPathAppliesWithV2OffloadShape(t *testing.T) {
+func TestModelPathAppliesWithNamedService(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
 	h.SeedCache("intent:call_1", "find the bug in server.go")
-	h.StubHostCall("torana_offload_completion", offloadStub("summary"))
+	var modelArgs *pbv1.ModelCompleteArgs
+	h.StubModelComplete(func(args *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
+		modelArgs = args
+		return modelStub("summary")(args)
+	})
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 
 	res := h.BeforeRequest(bigToolRequest(bigContent()))
@@ -371,17 +369,13 @@ func TestModelPathAppliesWithV2OffloadShape(t *testing.T) {
 	if countCommand(h, "torana_record_savings") != 1 {
 		t.Fatalf("record_savings calls=%d, want 1", countCommand(h, "torana_record_savings"))
 	}
-	// The offload payload carried the intent and the (unbounded) full output.
-	offloadArgs := ""
-	for _, c := range h.Calls() {
-		if c.Command == "torana_offload_completion" {
-			offloadArgs = c.Args
-		}
+	if modelArgs == nil || modelArgs.Service != "summarizer" || len(modelArgs.Messages) != 2 {
+		t.Fatalf("named model request = %+v", modelArgs)
 	}
-	if !strings.Contains(offloadArgs, "find the bug in server.go") {
-		t.Fatal("offload payload missing the intent")
+	if !strings.Contains(modelArgs.Messages[1].Content, "find the bug in server.go") {
+		t.Fatal("model request missing the intent")
 	}
-	if strings.Contains(offloadArgs, "[truncated]") {
+	if strings.Contains(modelArgs.Messages[1].Content, "[truncated]") {
 		t.Fatal("default max_offload_input_bytes=0 must send the FULL output, not a truncated one")
 	}
 	if hasMetric(h, "torana_intent_missing_total") {
@@ -399,10 +393,10 @@ func TestModelPathAppliesWithV2OffloadShape(t *testing.T) {
 	}
 }
 
-// TestOffloadAdvisoryRefusalSkipsWithoutRetry — NOT_CONFIGURED/UNAVAILABLE are
+// TestModelAdvisoryRefusalSkipsWithoutRetry — NOT_CONFIGURED/UNAVAILABLE are
 // advisory: the candidate is skipped, the batch may still apply others, and
 // the same call is never retried.
-func TestOffloadAdvisoryRefusalSkipsWithoutRetry(t *testing.T) {
+func TestModelAdvisoryRefusalSkipsWithoutRetry(t *testing.T) {
 	for _, code := range []pbv1.ErrorCode{
 		pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED,
 		pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE,
@@ -411,8 +405,8 @@ func TestOffloadAdvisoryRefusalSkipsWithoutRetry(t *testing.T) {
 			h := newHarness(t)
 			h.SetConfig(modelConfig)
 			h.SeedCache("intent:call_1", "find the bug")
-			h.StubHostCall("torana_offload_completion", func(string) (string, error) {
-				return sdktest.HostResultError(code, "stub refusal"), nil
+			h.StubModelComplete(func(*pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
+				return nil, &pbv1.HostError{Code: code, Message: "stub refusal"}, nil
 			})
 			h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 			res := h.BeforeRequest(bigToolRequest(bigContent()))
@@ -422,16 +416,16 @@ func TestOffloadAdvisoryRefusalSkipsWithoutRetry(t *testing.T) {
 			if !res.PassedThrough {
 				t.Fatal("no candidate survived the advisory refusal; nothing may change")
 			}
-			if n := countCommand(h, "torana_offload_completion"); n != 1 {
+			if n := countCommand(h, "env.model_complete"); n != 1 {
 				t.Fatalf("advisory refusal was retried: %d offload calls", n)
 			}
 		})
 	}
 }
 
-// TestOffloadContractRefusalErrors — INVALID_ARGUMENT/PERMISSION_DENIED are
+// TestModelContractRefusalErrors — INVALID_ARGUMENT/PERMISSION_DENIED are
 // contract defects: the hook errors so failure_mode applies.
-func TestOffloadContractRefusalErrors(t *testing.T) {
+func TestModelContractRefusalErrors(t *testing.T) {
 	for _, code := range []pbv1.ErrorCode{
 		pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT,
 		pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED,
@@ -441,8 +435,8 @@ func TestOffloadContractRefusalErrors(t *testing.T) {
 			h := newHarness(t)
 			h.SetConfig(modelConfig)
 			h.SeedCache("intent:call_1", "find the bug")
-			h.StubHostCall("torana_offload_completion", func(string) (string, error) {
-				return sdktest.HostResultError(code, "stub refusal"), nil
+			h.StubModelComplete(func(*pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
+				return nil, &pbv1.HostError{Code: code, Message: "stub refusal"}, nil
 			})
 			h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 			res := h.BeforeRequest(bigToolRequest(bigContent()))
@@ -453,22 +447,18 @@ func TestOffloadContractRefusalErrors(t *testing.T) {
 	}
 }
 
-// TestUnusableOffloadBodiesSkip — empty completion or a completion no shorter
-// than the original is unusable: skip, no error, nothing applied.
-func TestUnusableOffloadBodiesSkip(t *testing.T) {
-	for name, body := range map[string]string{
-		"empty completion":   `{"completion":"","provider":"p","model":"m"}`,
-		"not shorter":        `{"completion":"` + strings.Repeat("x", 20_000) + `","provider":"p","model":"m"}`,
-		"no completion":      `{"provider":"p","model":"m"}`,
-		"legacy error shape": `{"status":"error","message":"nope"}`,
+// TestUnusableModelCompletionsSkip — empty or non-shorter completions are
+// candidate-local declines, not malformed legacy envelopes.
+func TestUnusableModelCompletionsSkip(t *testing.T) {
+	for name, completion := range map[string]string{
+		"empty completion": "",
+		"not shorter":      strings.Repeat("x", 20_000),
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)
 			h.SetConfig(modelConfig)
 			h.SeedCache("intent:call_1", "find the bug")
-			h.StubHostCall("torana_offload_completion", func(string) (string, error) {
-				return sdktest.HostResultValue([]byte(body)), nil
-			})
+			h.StubModelComplete(modelStub(completion))
 			h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 			res := h.BeforeRequest(bigToolRequest(bigContent()))
 			if res.Err != nil {
@@ -481,23 +471,19 @@ func TestUnusableOffloadBodiesSkip(t *testing.T) {
 	}
 }
 
-// TestOffloadAdditiveFieldsAreTolerated — a body with an extra legacy
-// "status":"ok" field plus a valid completion APPLIES: the decoder never
-// consults status (OffloadResult is additively evolvable).
-func TestOffloadAdditiveFieldsAreTolerated(t *testing.T) {
+// TestMissingUsageDeclinesEconomicApplication ensures the plugin never guesses
+// model cost when the provider omitted usage.
+func TestMissingUsageDeclinesEconomicApplication(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
 	h.SeedCache("intent:call_1", "find the bug")
-	h.StubHostCall("torana_offload_completion", func(string) (string, error) {
-		return sdktest.HostResultValue([]byte(`{"status":"ok","completion":"summary","provider":"p","model":"m","usage":{"reported":true}}`)), nil
+	h.StubModelComplete(func(*pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
+		return &pbv1.ModelCompleteResult{Content: "summary"}, nil, nil
 	})
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	res := h.BeforeRequest(bigToolRequest(bigContent()))
-	if res.Err != nil || res.Request == nil {
-		t.Fatalf("expected the additive-tolerant decode to apply, err=%v", res.Err)
-	}
-	if toolText(t, res.Request, 3) != "summary" {
-		t.Fatal("completion with an additive status field must apply")
+	if res.Err != nil || !res.PassedThrough {
+		t.Fatalf("missing usage must decline unchanged, err=%v", res.Err)
 	}
 }
 
@@ -507,7 +493,7 @@ func TestEconomicGateDeclinesBatch(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
 	h.SeedCache("intent:call_1", "find the bug")
-	h.StubHostCall("torana_offload_completion", offloadStub("summary"))
+	h.StubModelComplete(modelStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(false))
 	res := h.BeforeRequest(bigToolRequest(bigContent()))
 	if res.Err != nil {
@@ -517,7 +503,7 @@ func TestEconomicGateDeclinesBatch(t *testing.T) {
 		t.Fatal("a declined batch must not apply")
 	}
 	// Preflight declined -> no offload spend at all.
-	if n := countCommand(h, "torana_offload_completion"); n != 0 {
+	if n := countCommand(h, "env.model_complete"); n != 0 {
 		t.Fatalf("offload ran despite a declined preflight: %d calls", n)
 	}
 }
@@ -530,7 +516,7 @@ func TestUncachedBatchEvaluatesTwice(t *testing.T) {
 	h.SetConfig(modelConfig)
 	h.SeedCache("intent:call_1", "find the bug")
 	h.SeedCache("intent:call_2", "second intent")
-	h.StubHostCall("torana_offload_completion", offloadStub("summary"))
+	h.StubModelComplete(modelStub("summary"))
 	var counts []int
 	h.StubHostCall("torana_evaluate_compaction", func(args string) (string, error) {
 		var report struct {
@@ -562,7 +548,7 @@ func TestAllCachedBatchEvaluatesOnce(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
 	h.SeedCache("intent:call_1", "find the bug")
-	h.StubHostCall("torana_offload_completion", offloadStub("must-not-run"))
+	h.StubModelComplete(modelStub("must-not-run"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	content := bigContent()
 	modelKey := sdk.ContentAddressedCacheKey(compactionCache, "v4", "read", `{"path":"server.go"}`, content, "captured", "find the bug", "model")
@@ -575,7 +561,7 @@ func TestAllCachedBatchEvaluatesOnce(t *testing.T) {
 	if toolText(t, res.Request, 3) != "cached-summary" {
 		t.Fatalf("cached replacement not reused: %q", toolText(t, res.Request, 3))
 	}
-	if n := countCommand(h, "torana_offload_completion"); n != 0 {
+	if n := countCommand(h, "env.model_complete"); n != 0 {
 		t.Fatalf("cached-shorter value must be reused WITHOUT offload: %d calls", n)
 	}
 	if n := countCommand(h, "torana_evaluate_compaction"); n != 1 {
@@ -590,7 +576,7 @@ func TestCachedValueNotShorterLeavesUntouched(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
 	h.SeedCache("intent:call_1", "find the bug")
-	h.StubHostCall("torana_offload_completion", offloadStub("must-not-run"))
+	h.StubModelComplete(modelStub("must-not-run"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	content := bigContent()
 	modelKey := sdk.ContentAddressedCacheKey(compactionCache, "v4", "read", `{"path":"server.go"}`, content, "captured", "find the bug", "model")
@@ -604,7 +590,7 @@ func TestCachedValueNotShorterLeavesUntouched(t *testing.T) {
 	if !res.PassedThrough {
 		t.Fatal("a cached value >= the original must leave the message untouched")
 	}
-	if n := countCommand(h, "torana_offload_completion"); n != 0 {
+	if n := countCommand(h, "env.model_complete"); n != 0 {
 		t.Fatalf("offload ran despite a non-shorter cache hit: %d calls", n)
 	}
 	if n := countCommand(h, "torana_evaluate_compaction"); n != 0 {
@@ -612,22 +598,20 @@ func TestCachedValueNotShorterLeavesUntouched(t *testing.T) {
 	}
 }
 
-// TestProviderModelInconsistencyRejectsBatch — two transformation candidates
-// from different providers/models cannot share one report: nothing applies.
-func TestProviderModelInconsistencyRejectsBatch(t *testing.T) {
+// TestTwoCandidatesShareOneBoundService proves model coordinates are not
+// guest-selected per candidate; both requests use the same logical slot.
+func TestTwoCandidatesShareOneBoundService(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
 	h.SeedCache("intent:call_1", "find the bug")
 	h.SeedCache("intent:call_2", "second")
-	seq := 0
-	h.StubHostCall("torana_offload_completion", func(string) (string, error) {
-		seq++
-		prov := "deepseek"
-		model := "deepseek-v4-flash"
-		if seq == 2 {
-			prov, model = "openai", "gpt-4o-mini"
+	var calls int
+	h.StubModelComplete(func(args *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
+		calls++
+		if args.Service != "summarizer" {
+			t.Fatalf("service = %q", args.Service)
 		}
-		return sdktest.HostResultValue([]byte(`{"completion":"summary","provider":"` + prov + `","model":"` + model + `"}`)), nil
+		return modelStub("summary")(args)
 	})
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	req := bigToolRequest(bigContent())
@@ -637,8 +621,8 @@ func TestProviderModelInconsistencyRejectsBatch(t *testing.T) {
 	if res.Err != nil {
 		t.Fatal(res.Err)
 	}
-	if !res.PassedThrough {
-		t.Fatal("a provider-inconsistent batch must not apply")
+	if res.Request == nil || calls != 2 {
+		t.Fatalf("two-candidate batch request=%v model calls=%d", res.Request != nil, calls)
 	}
 }
 
@@ -658,10 +642,10 @@ func TestIntentMissUsesBoundedFallback(t *testing.T) {
 				h = newHarness(t)
 				h.SetConfig(modelConfig)
 			}
-			var offloadArgs string
-			h.StubHostCall("torana_offload_completion", func(args string) (string, error) {
-				offloadArgs = args
-				return offloadStub("summary")(args)
+			var modelArgs *pbv1.ModelCompleteArgs
+			h.StubModelComplete(func(args *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
+				modelArgs = args
+				return modelStub("summary")(args)
 			})
 			h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 			res := h.BeforeRequest(bigToolRequest(bigContent()))
@@ -678,20 +662,14 @@ func TestIntentMissUsesBoundedFallback(t *testing.T) {
 				t.Fatalf("eligible metric = %v, want 1", got)
 			}
 			const wantIntent = `torana-derived-intent-v1:{"user_request":"find the bug","tool_name":"read","tool_arguments":"{\"path\":\"server.go\"}"}`
-			var decoded struct {
-				UserPrompt string `json:"user_prompt"`
-			}
-			if err := json.Unmarshal([]byte(offloadArgs), &decoded); err != nil {
-				t.Fatalf("decode offload args: %v", err)
-			}
-			if !strings.HasPrefix(decoded.UserPrompt, "Intent: "+wantIntent+"\n\n") {
-				t.Fatalf("offload prompt lacks exact derived intent %q: %q", wantIntent, decoded.UserPrompt)
+			if modelArgs == nil || len(modelArgs.Messages) != 2 || !strings.HasPrefix(modelArgs.Messages[1].Content, "Intent: "+wantIntent+"\n\n") {
+				t.Fatalf("model prompt lacks exact derived intent %q: %+v", wantIntent, modelArgs)
 			}
 			wantCalls := map[string]int{
 				"env.plugin_config":          1,
 				"env.shared_cache_get":       1,
 				"env.cache_get":              1,
-				"torana_offload_completion":  1,
+				"env.model_complete":         1,
 				"torana_evaluate_compaction": 2,
 				"env.cache_set":              1,
 				"torana_record_savings":      1,
@@ -757,7 +735,7 @@ func TestDerivedIntentCacheIdentity(t *testing.T) {
 		h := newHarness(t)
 		h.SetConfig(modelConfig)
 		h.SeedCache(derivedKey, "cached-derived")
-		h.StubHostCall("torana_offload_completion", offloadStub("must-not-run"))
+		h.StubModelComplete(modelStub("must-not-run"))
 		h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 		res := h.BeforeRequest(bigToolRequest(content))
 		if res.Err != nil || res.Request == nil {
@@ -766,7 +744,7 @@ func TestDerivedIntentCacheIdentity(t *testing.T) {
 		if got := toolText(t, res.Request, 3); got != "cached-derived" {
 			t.Fatalf("derived cached value = %q", got)
 		}
-		if calls := countCommand(h, "torana_offload_completion"); calls != 0 {
+		if calls := countCommand(h, "env.model_complete"); calls != 0 {
 			t.Fatalf("derived cache hit made %d offload calls", calls)
 		}
 	})
@@ -776,7 +754,7 @@ func TestDerivedIntentCacheIdentity(t *testing.T) {
 		h.SetConfig(modelConfig)
 		h.SeedCache("intent:call_1", derived)
 		h.SeedCache(derivedKey, "wrong-domain")
-		h.StubHostCall("torana_offload_completion", offloadStub("fresh-summary"))
+		h.StubModelComplete(modelStub("fresh-summary"))
 		h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 		res := h.BeforeRequest(bigToolRequest(content))
 		if res.Err != nil || res.Request == nil {
@@ -804,7 +782,7 @@ func TestDerivedIntentCacheIdentity(t *testing.T) {
 			h := newHarness(t)
 			h.SetConfig(modelConfig)
 			h.SeedCache(derivedKey, "wrong-input")
-			h.StubHostCall("torana_offload_completion", offloadStub("fresh-summary"))
+			h.StubModelComplete(modelStub("fresh-summary"))
 			h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 			req := bigToolRequest(content)
 			mutate(req)
@@ -812,7 +790,7 @@ func TestDerivedIntentCacheIdentity(t *testing.T) {
 			if res.Err != nil || res.Request == nil {
 				t.Fatalf("mutated row failed: %v", res.Err)
 			}
-			if calls := countCommand(h, "torana_offload_completion"); calls != 1 {
+			if calls := countCommand(h, "env.model_complete"); calls != 1 {
 				t.Fatalf("mutated row made %d offload calls, want 1", calls)
 			}
 			if got := toolText(t, res.Request, 3); got != "fresh-summary" {
@@ -828,7 +806,7 @@ func TestIntentCacheRefusalErrors(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
 	h.DenyPermission("env.shared_cache_get")
-	h.StubHostCall("torana_offload_completion", offloadStub("summary"))
+	h.StubModelComplete(modelStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	res := h.BeforeRequest(bigToolRequest(bigContent()))
 	if res.Err == nil {
@@ -869,7 +847,7 @@ func TestMinOffloadCharsBoundary(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
 	h.SeedCache("intent:call_1", "find the bug")
-	h.StubHostCall("torana_offload_completion", offloadStub("summary"))
+	h.StubModelComplete(modelStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	short := strings.Repeat("x", 1999)
 	res := h.BeforeRequest(bigToolRequest(short))
@@ -883,7 +861,7 @@ func TestMinOffloadCharsBoundary(t *testing.T) {
 	h2 := newHarness(t)
 	h2.SetConfig(modelConfig)
 	h2.SeedCache("intent:call_1", "find the bug")
-	h2.StubHostCall("torana_offload_completion", offloadStub("summary"))
+	h2.StubModelComplete(modelStub("summary"))
 	h2.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	exact := strings.Repeat("x", 2000)
 	res2 := h2.BeforeRequest(bigToolRequest(exact))
@@ -899,17 +877,17 @@ func TestTruncationMarkerInOffloadPayload(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(`{"tool_policies":[{"match":"read*","mode":"model"}],"expected_applications":6,"max_offload_input_bytes":100}`)
 	h.SeedCache("intent:call_1", "find the bug")
-	var offloadArgs string
-	h.StubHostCall("torana_offload_completion", func(args string) (string, error) {
-		offloadArgs = args
-		return sdktest.HostResultValue([]byte(`{"completion":"summary","provider":"p","model":"m","usage":{"reported":true}}`)), nil
+	var modelArgs *pbv1.ModelCompleteArgs
+	h.StubModelComplete(func(args *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
+		modelArgs = args
+		return modelStub("summary")(args)
 	})
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	res := h.BeforeRequest(bigToolRequest(bigContent()))
 	if res.Err != nil || res.Request == nil {
 		t.Fatalf("expected replacement, err=%v", res.Err)
 	}
-	if !strings.Contains(offloadArgs, "... [truncated] ...") {
+	if modelArgs == nil || len(modelArgs.Messages) != 2 || !strings.Contains(modelArgs.Messages[1].Content, "... [truncated] ...") {
 		t.Fatal("configured cap must truncate the offload payload head+tail")
 	}
 	if len(toolText(t, res.Request, 3)) >= len(bigContent()) {
@@ -922,7 +900,7 @@ func TestExactModeSkips(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(`{"tool_policies":[{"match":"read*","mode":"exact"}],"expected_applications":6}`)
 	h.SeedCache("intent:call_1", "find the bug")
-	h.StubHostCall("torana_offload_completion", offloadStub("summary"))
+	h.StubModelComplete(modelStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	res := h.BeforeRequest(bigToolRequest(bigContent()))
 	if res.Err != nil {
@@ -941,7 +919,7 @@ func TestCacheSetRefusalIsBestEffort(t *testing.T) {
 	h.SetConfig(modelConfig)
 	h.SeedCache("intent:call_1", "find the bug")
 	h.DenyPermission("env.cache_set")
-	h.StubHostCall("torana_offload_completion", offloadStub("summary"))
+	h.StubModelComplete(modelStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	res := h.BeforeRequest(bigToolRequest(bigContent()))
 	if res.Err != nil {
@@ -961,7 +939,7 @@ func TestSavingsReportRefusalDoesNotChangeReplacement(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
 	h.SeedCache("intent:call_1", "find the bug")
-	h.StubHostCall("torana_offload_completion", offloadStub("summary"))
+	h.StubModelComplete(modelStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	h.StubHostCall("torana_record_savings", func(string) (string, error) {
 		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub refusal"), nil
@@ -981,7 +959,7 @@ func TestNoUnauthorizedCalls(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
 	h.SeedCache("intent:call_1", "find the bug")
-	h.StubHostCall("torana_offload_completion", offloadStub("summary"))
+	h.StubModelComplete(modelStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	h.BeforeRequest(bigToolRequest(bigContent()))
 
@@ -993,7 +971,7 @@ func TestNoUnauthorizedCalls(t *testing.T) {
 		"env.cache_set":              true,
 		"env.shared_cache_get":       true,
 		"env.emit_metric":            true,
-		"torana_offload_completion":  true,
+		"env.model_complete":         true,
 		"torana_evaluate_compaction": true,
 		"torana_record_savings":      true,
 	}
@@ -1011,7 +989,7 @@ func TestConfigResetPinsIsolation(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
 	h.SeedCache("intent:call_1", "find the bug")
-	h.StubHostCall("torana_offload_completion", offloadStub("summary"))
+	h.StubModelComplete(modelStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	res := h.BeforeRequest(bigToolRequest(bigContent()))
 	if res.Err != nil || res.Request == nil {
@@ -1021,7 +999,7 @@ func TestConfigResetPinsIsolation(t *testing.T) {
 	h2 := newHarness(t)
 	h2.SetConfig(`{"tool_policies":[{"match":"read*","mode":"model"}],"expected_applications":0}`)
 	h2.SeedCache("intent:call_1", "find the bug")
-	h2.StubHostCall("torana_offload_completion", offloadStub("summary"))
+	h2.StubModelComplete(modelStub("summary"))
 	h2.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	res2 := h2.BeforeRequest(bigToolRequest(bigContent()))
 	if res2.Err != nil {
@@ -1038,7 +1016,7 @@ func TestModelPathDisabledByDefault(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(`{"tool_policies":[{"match":"read*","mode":"model"}]}`)
 	h.SeedCache("intent:call_1", "find the bug")
-	h.StubHostCall("torana_offload_completion", offloadStub("summary"))
+	h.StubModelComplete(modelStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	res := h.BeforeRequest(bigToolRequest(bigContent()))
 	if res.Err != nil {
@@ -1047,7 +1025,7 @@ func TestModelPathDisabledByDefault(t *testing.T) {
 	if !res.PassedThrough {
 		t.Fatal("expected_applications=0 must disable the model path")
 	}
-	if n := countCommand(h, "torana_offload_completion"); n != 0 {
+	if n := countCommand(h, "env.model_complete"); n != 0 {
 		t.Fatalf("offload ran with the model path disabled: %d calls", n)
 	}
 }
@@ -1058,7 +1036,7 @@ func TestModelConsumptionGate(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
 	h.SeedCache("intent:call_1", "find the bug")
-	h.StubHostCall("torana_offload_completion", offloadStub("summary"))
+	h.StubModelComplete(modelStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	// No assistant message after the tool result.
 	req := bigToolRequest(bigContent())
@@ -1114,7 +1092,7 @@ func TestModelPresentEmptyReplacementRecomputes(t *testing.T) {
 	content := bigContent()
 	modelKey := sdk.ContentAddressedCacheKey(compactionCache, "v4", "read", `{"path":"server.go"}`, content, "captured", "find the bug", "model")
 	h.SeedCache(modelKey, "") // present, empty
-	h.StubHostCall("torana_offload_completion", offloadStub("summary"))
+	h.StubModelComplete(modelStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	res := h.BeforeRequest(bigToolRequest(content))
 	if res.Err != nil || res.Request == nil {
@@ -1123,7 +1101,7 @@ func TestModelPresentEmptyReplacementRecomputes(t *testing.T) {
 	if toolText(t, res.Request, 3) != "summary" {
 		t.Fatalf("present-empty cache value must recompute, got %q", toolText(t, res.Request, 3))
 	}
-	if n := countCommand(h, "torana_offload_completion"); n != 1 {
+	if n := countCommand(h, "env.model_complete"); n != 1 {
 		t.Fatalf("offload must run for a present-empty cache value, got %d", n)
 	}
 }
@@ -1205,7 +1183,7 @@ func TestEvaluateAdvisoryRefusalDeclinesWithoutRetry(t *testing.T) {
 			h := newHarness(t)
 			h.SetConfig(modelConfig)
 			h.SeedCache("intent:call_1", "find the bug")
-			h.StubHostCall("torana_offload_completion", offloadStub("summary"))
+			h.StubModelComplete(modelStub("summary"))
 			h.StubHostCall("torana_evaluate_compaction", func(string) (string, error) {
 				return sdktest.HostResultError(code, "stub"), nil
 			})
@@ -1219,7 +1197,7 @@ func TestEvaluateAdvisoryRefusalDeclinesWithoutRetry(t *testing.T) {
 			if n := countCommand(h, "torana_evaluate_compaction"); n != 1 {
 				t.Fatalf("advisory refusal was retried: %d evaluate calls", n)
 			}
-			if n := countCommand(h, "torana_offload_completion"); n != 0 {
+			if n := countCommand(h, "env.model_complete"); n != 0 {
 				t.Fatalf("offload ran despite a declined preflight: %d calls", n)
 			}
 		})
@@ -1232,7 +1210,7 @@ func TestEvaluateContractRefusalErrors(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
 	h.SeedCache("intent:call_1", "find the bug")
-	h.StubHostCall("torana_offload_completion", offloadStub("summary"))
+	h.StubModelComplete(modelStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", func(string) (string, error) {
 		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "stub"), nil
 	})
@@ -1249,7 +1227,7 @@ func TestRealEvaluationDeclinesAfterPreflight(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
 	h.SeedCache("intent:call_1", "find the bug")
-	h.StubHostCall("torana_offload_completion", offloadStub("summary"))
+	h.StubModelComplete(modelStub("summary"))
 	seq := 0
 	h.StubHostCall("torana_evaluate_compaction", func(string) (string, error) {
 		seq++
@@ -1265,7 +1243,7 @@ func TestRealEvaluationDeclinesAfterPreflight(t *testing.T) {
 	if !res.PassedThrough {
 		t.Fatal("a declined real evaluation must not apply any mutation")
 	}
-	if n := countCommand(h, "torana_offload_completion"); n != 1 {
+	if n := countCommand(h, "env.model_complete"); n != 1 {
 		t.Fatalf("offload spend=%d, want exactly 1 (preflight approved once)", n)
 	}
 }
@@ -1276,7 +1254,7 @@ func TestRealEvaluationRefusalAfterPreflight(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
 	h.SeedCache("intent:call_1", "find the bug")
-	h.StubHostCall("torana_offload_completion", offloadStub("summary"))
+	h.StubModelComplete(modelStub("summary"))
 	seq := 0
 	h.StubHostCall("torana_evaluate_compaction", func(string) (string, error) {
 		seq++
@@ -1289,7 +1267,7 @@ func TestRealEvaluationRefusalAfterPreflight(t *testing.T) {
 	if res.Err == nil {
 		t.Fatal("a contract refusal on the real evaluation must error the hook")
 	}
-	if n := countCommand(h, "torana_offload_completion"); n != 1 {
+	if n := countCommand(h, "env.model_complete"); n != 1 {
 		t.Fatalf("offload spend=%d, want exactly 1", n)
 	}
 }
@@ -1387,7 +1365,7 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 		h := newHarness(t)
 		h.SetConfig(modelConfig)
 		h.StubHostCall("torana_cache_pricing", func(string) (string, error) { return sdktest.HostResultValue([]byte(`{"status":"ok"}`)), nil })
-		h.StubHostCall("torana_offload_completion", offloadStub(summary))
+		h.StubModelComplete(modelStub(summary))
 		h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 		h.SeedCache("intent:c1", "find the bug")
 		req := &pbv1.ChatRequest{Messages: []*pbv1.Message{
@@ -1417,7 +1395,7 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 		h := newHarness(t)
 		h.SetConfig(modelConfig)
 		h.StubHostCall("torana_cache_pricing", func(string) (string, error) { return sdktest.HostResultValue([]byte(`{"status":"ok"}`)), nil })
-		h.StubHostCall("torana_offload_completion", offloadStub(summary))
+		h.StubModelComplete(modelStub(summary))
 		h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 		h.SeedCache("intent:c1", "find the bug")
 		h.SeedCache("intent:c2", "find the bug")
@@ -1448,7 +1426,7 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 			"env.cache_get":              2, // model key per candidate
 			"env.shared_cache_get":       2, // intent key per candidate
 			"env.cache_set":              2, // best-effort per transformation
-			"torana_offload_completion":  2, // one per uncached candidate
+			"env.model_complete":         2, // one per uncached candidate
 			"torana_evaluate_compaction": 2, // optimistic preflight + real report
 			"torana_record_savings":      1, // the batch
 		}
@@ -1478,11 +1456,11 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 		// only the REAL report (the second) carries the offload facts — the
 		// optimistic preflight is offload-free by construction.
 		type evalPayload struct {
-			CandidateCount int    `json:"candidate_count"`
-			Source         string `json:"source"`
-			Offload        *struct {
-				Provider string `json:"provider"`
-				Model    string `json:"model"`
+			CandidateCount  int    `json:"candidate_count"`
+			Source          string `json:"source"`
+			PricingResource string `json:"pricing_resource"`
+			Offload         *struct {
+				PricingResource string `json:"pricing_resource"`
 			} `json:"offload"`
 		}
 		var evals []evalPayload
@@ -1505,7 +1483,10 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 		if evals[0].Offload != nil {
 			t.Fatalf("the OPTIMISTIC preflight must not carry offload facts: %+v", evals[0].Offload)
 		}
-		if evals[1].Offload == nil || evals[1].Offload.Provider == "" || evals[1].Offload.Model == "" {
+		if evals[0].PricingResource != "target" || evals[1].PricingResource != "target" {
+			t.Fatalf("target pricing resource = %q/%q", evals[0].PricingResource, evals[1].PricingResource)
+		}
+		if evals[1].Offload == nil || evals[1].Offload.PricingResource != "summarizer" {
 			t.Fatalf("the REAL report must carry the offload facts: %+v", evals[1].Offload)
 		}
 	})
@@ -1530,7 +1511,7 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 				h := newHarness(t)
 				h.SetConfig(modelConfig)
 				h.StubHostCall("torana_cache_pricing", func(string) (string, error) { return sdktest.HostResultValue([]byte(`{"status":"ok"}`)), nil })
-				h.StubHostCall("torana_offload_completion", offloadStub(summary))
+				h.StubModelComplete(modelStub(summary))
 				req := &pbv1.ChatRequest{Messages: []*pbv1.Message{
 					{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolResult{ToolResult: tr}}}},
 					assistant(),
