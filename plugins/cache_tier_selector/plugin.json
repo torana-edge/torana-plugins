@@ -15,8 +15,8 @@
   ],
   "permissions": [
     {
-      "name": "env.host_call.torana_cache_pricing",
-      "description": "Read this provider's cache prices and lifetimes to choose a tier"
+	  "name": "env.cache_policy",
+	  "description": "Read the operator-bound prompt-cache policy used to choose a tier"
     },
     {
       "name": "env.host_call.torana_plugin_counter",
@@ -50,5 +50,12 @@
       "name": "ir.cache_control.write",
       "description": "Cache breakpoint replacement"
     }
-  ]
+	],
+	"prompt_cache_policies": [
+	  {
+		"name": "request-cache",
+		"description": "Prompt-cache prices, lifetimes, and marker values for the routed request model",
+		"required": true
+	  }
+	]
 }

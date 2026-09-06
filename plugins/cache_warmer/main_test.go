@@ -103,17 +103,15 @@ func warmEntrySeed(t *testing.T) warmEntry {
 // pricingStub returns a warmable two-tier pricing envelope.
 func pricingStub() func(string) (string, error) {
 	return func(string) (string, error) {
-		return sdktest.HostResultValue([]byte(`{
-			"status":"ok",
-			"refresh_on_read":true,
-			"shortest_ttl_seconds":300,
-			"warm_interval_seconds":240,
-			"break_even_refreshes":11,
-			"tiers":[
-				{"ttl_seconds":300,"write_multiplier":1.25,"marker":{"type":"ephemeral"}},
-				{"ttl_seconds":3600,"write_multiplier":2.0,"marker":{"type":"ephemeral","ttl":"1h"}}
-			]
-		}`)), nil
+		read, write, shortMultiplier, longMultiplier, warm := 0.1, 1.2, 1.25, 2.0, uint32(240)
+		raw, _ := proto.Marshal(&pbv1.PromptCachePolicy{
+			CacheReadUsdPerMtok: &read, CacheWriteUsdPerMtok: &write, RefreshOnRead: true, WarmIntervalSeconds: &warm,
+			Tiers: []*pbv1.PromptCacheTier{
+				{TtlSeconds: 300, WriteMultiplier: &shortMultiplier, MarkerJson: []byte(`{"type":"ephemeral"}`)},
+				{TtlSeconds: 3600, WriteMultiplier: &longMultiplier, MarkerJson: []byte(`{"type":"ephemeral","ttl":"1h"}`)},
+			},
+		})
+		return sdktest.HostResultValue(raw), nil
 	}
 }
 
@@ -278,7 +276,7 @@ func TestRequestPathDeterminism(t *testing.T) {
 func TestTickHappyPathHit(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(warmerCfg)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	h.StubHostCall("torana_send_request", hitStub())
 	seedEntry(t, h, warmEntrySeed(t))
 
@@ -310,7 +308,7 @@ func TestTickHappyPathHit(t *testing.T) {
 func TestTickCacheRebuiltStops(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(warmerCfg)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	h.StubHostCall("torana_send_request", rebuiltStub())
 	seedEntry(t, h, warmEntrySeed(t))
 
@@ -327,7 +325,7 @@ func TestTickCacheRebuiltStops(t *testing.T) {
 	// A second tick sends nothing.
 	h2 := newHarness(t)
 	h2.SetConfig(warmerCfg)
-	h2.StubHostCall("torana_cache_pricing", pricingStub())
+	h2.StubHostCall("env.cache_policy", pricingStub())
 	h2.StubHostCall("torana_send_request", rebuiltStub())
 	h2.SeedState("warm/conv-1", raw)
 	tickAt(h2, 300_000)
@@ -341,7 +339,7 @@ func TestTickCacheRebuiltStops(t *testing.T) {
 func TestTickUnknownOutcomeStops(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(warmerCfg)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	h.StubHostCall("torana_send_request", noSignalStub())
 	seedEntry(t, h, warmEntrySeed(t))
 
@@ -358,7 +356,7 @@ func TestTickUnknownOutcomeStops(t *testing.T) {
 	// Replay: a pending/unknown entry sends zero.
 	h2 := newHarness(t)
 	h2.SetConfig(warmerCfg)
-	h2.StubHostCall("torana_cache_pricing", pricingStub())
+	h2.StubHostCall("env.cache_policy", pricingStub())
 	h2.StubHostCall("torana_send_request", noSignalStub())
 	h2.SeedState("warm/conv-1", raw)
 	tickAt(h2, 300_000)
@@ -372,7 +370,7 @@ func TestTickUnknownOutcomeStops(t *testing.T) {
 func TestTickAdvisorySendRefusalStopsNoRetry(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(warmerCfg)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	h.StubHostCall("torana_send_request", func(string) (string, error) {
 		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "transient"), nil
 	})
@@ -384,7 +382,7 @@ func TestTickAdvisorySendRefusalStopsNoRetry(t *testing.T) {
 	raw, _ := h.State("warm/conv-1")
 	h2 := newHarness(t)
 	h2.SetConfig(warmerCfg)
-	h2.StubHostCall("torana_cache_pricing", pricingStub())
+	h2.StubHostCall("env.cache_policy", pricingStub())
 	h2.StubHostCall("torana_send_request", func(string) (string, error) {
 		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "transient"), nil
 	})
@@ -400,7 +398,7 @@ func TestTickAdvisorySendRefusalStopsNoRetry(t *testing.T) {
 func TestTickContractSendRefusalErrors(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(warmerCfg)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	h.StubHostCall("torana_send_request", func(string) (string, error) {
 		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub"), nil
 	})
@@ -415,7 +413,7 @@ func TestTickContractSendRefusalErrors(t *testing.T) {
 func TestTickPricingAdvisoryStopsContractErrors(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(warmerCfg)
-	h.StubHostCall("torana_cache_pricing", func(string) (string, error) {
+	h.StubHostCall("env.cache_policy", func(string) (string, error) {
 		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no pricing"), nil
 	})
 	seedEntry(t, h, warmEntrySeed(t))
@@ -432,7 +430,7 @@ func TestTickPricingAdvisoryStopsContractErrors(t *testing.T) {
 
 	h2 := newHarness(t)
 	h2.SetConfig(warmerCfg)
-	h2.StubHostCall("torana_cache_pricing", func(string) (string, error) {
+	h2.StubHostCall("env.cache_policy", func(string) (string, error) {
 		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub"), nil
 	})
 	seedEntry(t, h2, warmEntrySeed(t))
@@ -447,8 +445,10 @@ func TestTickNoSpendGates(t *testing.T) {
 	// Not warmable (automatic prefix caching).
 	h := newHarness(t)
 	h.SetConfig(warmerCfg)
-	h.StubHostCall("torana_cache_pricing", func(string) (string, error) {
-		return sdktest.HostResultValue([]byte(`{"status":"ok","refresh_on_read":false,"shortest_ttl_seconds":300}`)), nil
+	h.StubHostCall("env.cache_policy", func(string) (string, error) {
+		read, write := 0.1, 1.2
+		raw, _ := proto.Marshal(&pbv1.PromptCachePolicy{CacheReadUsdPerMtok: &read, CacheWriteUsdPerMtok: &write, Tiers: []*pbv1.PromptCacheTier{{TtlSeconds: 300, MarkerJson: []byte(`{}`)}}})
+		return sdktest.HostResultValue(raw), nil
 	})
 	seedEntry(t, h, warmEntrySeed(t))
 	tickAt(h, 300_000)
@@ -459,7 +459,7 @@ func TestTickNoSpendGates(t *testing.T) {
 	// Deadline reached.
 	h2 := newHarness(t)
 	h2.SetConfig(warmerCfg)
-	h2.StubHostCall("torana_cache_pricing", pricingStub())
+	h2.StubHostCall("env.cache_policy", pricingStub())
 	entry := warmEntrySeed(t)
 	entry.DeadlineMillis = 150_000
 	seedEntry(t, h2, entry)
@@ -471,7 +471,7 @@ func TestTickNoSpendGates(t *testing.T) {
 	// Break-even reached.
 	h3 := newHarness(t)
 	h3.SetConfig(warmerCfg)
-	h3.StubHostCall("torana_cache_pricing", pricingStub())
+	h3.StubHostCall("env.cache_policy", pricingStub())
 	entry3 := warmEntrySeed(t)
 	entry3.RefreshesSpent = 11
 	seedEntry(t, h3, entry3)
@@ -483,7 +483,7 @@ func TestTickNoSpendGates(t *testing.T) {
 	// Not due yet.
 	h4 := newHarness(t)
 	h4.SetConfig(warmerCfg)
-	h4.StubHostCall("torana_cache_pricing", pricingStub())
+	h4.StubHostCall("env.cache_policy", pricingStub())
 	entry4 := warmEntrySeed(t)
 	entry4.LastRefreshMillis = 190_000
 	seedEntry(t, h4, entry4)
@@ -553,12 +553,12 @@ func TestTickEntryValidationStopsWithZeroSends(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
 			h.SetConfig(warmerCfg)
-			h.StubHostCall("torana_cache_pricing", pricingStub())
+			h.StubHostCall("env.cache_policy", pricingStub())
 			entry := warmEntrySeed(t)
 			tc.mut(&entry)
 			seedEntry(t, h, entry)
 			tickAt(h, 300_000)
-			if n := countCommand(h, "torana_cache_pricing"); n != 0 {
+			if n := countCommand(h, "env.cache_policy"); n != 0 {
 				t.Fatalf("an invalid entry reached pricing %d times", n)
 			}
 			if n := countCommand(h, "torana_send_request"); n != 0 {
@@ -604,7 +604,7 @@ func TestTickEntryValidationStopsWithZeroSends(t *testing.T) {
 func TestTickOptedOutDeletesEntry(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(`{"conversations":""}`) // no longer opted in
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	seedEntry(t, h, warmEntrySeed(t))
 	tickAt(h, 300_000)
 	if n := countCommand(h, "torana_send_request"); n != 0 {
@@ -621,7 +621,7 @@ func TestTickOptedOutDeletesEntry(t *testing.T) {
 func TestTickReservationWriteFailureMeansZeroSends(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(warmerCfg)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	h.StubHostCall("torana_send_request", hitStub())
 	h.StubHostCall("env.state_set", func(string) (string, error) {
 		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "no store"), nil
@@ -634,7 +634,7 @@ func TestTickReservationWriteFailureMeansZeroSends(t *testing.T) {
 
 	h2 := newHarness(t)
 	h2.SetConfig(warmerCfg)
-	h2.StubHostCall("torana_cache_pricing", pricingStub())
+	h2.StubHostCall("env.cache_policy", pricingStub())
 	h2.StubHostCall("torana_send_request", hitStub())
 	h2.StubHostCall("env.state_set", func(string) (string, error) {
 		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub"), nil
@@ -654,7 +654,7 @@ func TestTickReservationWriteFailureMeansZeroSends(t *testing.T) {
 func TestTickFinalizeWriteFailureKeepsPending(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(warmerCfg)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	h.StubHostCall("torana_send_request", hitStub())
 	sets := 0
 	h.StubHostCall("env.state_set", func(args string) (string, error) {
@@ -686,7 +686,7 @@ func TestTickFinalizeWriteFailureKeepsPending(t *testing.T) {
 func TestTickSeededPendingEntrySendsZero(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(warmerCfg)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	h.StubHostCall("torana_send_request", hitStub())
 	entry := warmEntrySeed(t)
 	entry.Stopped = "refresh outcome unknown"
@@ -703,7 +703,7 @@ func TestTickSeededPendingEntrySendsZero(t *testing.T) {
 func TestTickCorruptEntryIsKeyLocal(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(warmerCfg)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	h.StubHostCall("torana_send_request", hitStub())
 	h.SeedState("warm/conv-1", "not json")
 	good := warmEntrySeed(t)
@@ -798,20 +798,20 @@ func TestParseConfigWarmForMinutesDefaults(t *testing.T) {
 func TestNoUnauthorizedCalls(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(warmerCfg)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	h.StubHostCall("torana_send_request", hitStub())
 	seedEntry(t, h, warmEntrySeed(t))
 	tickAt(h, 300_000)
 
 	allowed := map[string]bool{
-		"env.plugin_config":    true,
-		"env.state_get":        true,
-		"env.state_set":        true,
-		"env.state_delete":     true, // command; authorized by env.state_set
-		"env.state_keys":       true,
-		"env.now":              true,
-		"torana_cache_pricing": true,
-		"torana_send_request":  true,
+		"env.plugin_config":   true,
+		"env.state_get":       true,
+		"env.state_set":       true,
+		"env.state_delete":    true, // command; authorized by env.state_set
+		"env.state_keys":      true,
+		"env.now":             true,
+		"env.cache_policy":    true,
+		"torana_send_request": true,
 	}
 	for _, c := range h.Calls() {
 		if !allowed[c.Command] {
@@ -845,14 +845,14 @@ func TestTickInvalidEntryZeroPricingZeroSends(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
 			h.SetConfig(warmerCfg)
-			h.StubHostCall("torana_cache_pricing", pricingStub())
+			h.StubHostCall("env.cache_policy", pricingStub())
 			h.StubHostCall("torana_send_request", hitStub())
 			entry := valid
 			tc.mut(&entry)
 			b, _ := json.Marshal(entry)
 			h.SeedState(tc.key, string(b))
 			tickAt(h, 300_000)
-			if n := countCommand(h, "torana_cache_pricing"); n != 0 {
+			if n := countCommand(h, "env.cache_policy"); n != 0 {
 				t.Fatalf("an invalid entry must reach ZERO pricing calls, got %d", n)
 			}
 			if n := countCommand(h, "torana_send_request"); n != 0 {
@@ -877,7 +877,7 @@ func TestTickIntervalOverrideBoundary(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)
 			h.SetConfig(`{"conversations":"conv-1","interval_seconds_override":` + itoa(override) + `}`)
-			h.StubHostCall("torana_cache_pricing", pricingStub())
+			h.StubHostCall("env.cache_policy", pricingStub())
 			h.StubHostCall("torana_send_request", hitStub())
 			seedEntry(t, h, warmEntrySeed(t))
 			tickAt(h, 300_000)
@@ -894,7 +894,7 @@ func TestTickIntervalOverrideBoundary(t *testing.T) {
 	// Just below the TTL (299 < 300): due and sends.
 	h := newHarness(t)
 	h.SetConfig(`{"conversations":"conv-1","interval_seconds_override":299}`)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	h.StubHostCall("torana_send_request", hitStub())
 	seedEntry(t, h, warmEntrySeed(t))
 	tickAt(h, 300_000)
@@ -1101,12 +1101,12 @@ func TestRequestPathValidNonTerminalSuffix(t *testing.T) {
 func TestTickDriftStopsZeroPricingZeroSends(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(warmerCfg)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	entry := warmEntrySeed(t)
 	entry.PrefixFingerprint = "not-the-replay"
 	seedEntry(t, h, entry)
 	tickAt(h, 300_000)
-	if n := countCommand(h, "torana_cache_pricing"); n != 0 {
+	if n := countCommand(h, "env.cache_policy"); n != 0 {
 		t.Fatalf("pricing called %d times on a drifted entry", n)
 	}
 	if n := countCommand(h, "torana_send_request"); n != 0 {
@@ -1125,7 +1125,7 @@ func TestTickDriftStopsZeroPricingZeroSends(t *testing.T) {
 func TestTickSeededPendingNeverRetries(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(warmerCfg)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	entry := warmEntrySeed(t)
 	entry.Stopped = "refresh outcome unknown"
 	entry.AttemptMillis = 250_000
@@ -1133,7 +1133,7 @@ func TestTickSeededPendingNeverRetries(t *testing.T) {
 	for _, now := range []int64{300_000, 900_000, 9_000_000} {
 		tickAt(h, now)
 	}
-	if n := countCommand(h, "torana_cache_pricing"); n != 0 {
+	if n := countCommand(h, "env.cache_policy"); n != 0 {
 		t.Fatalf("a pending entry reached pricing %d times", n)
 	}
 	if n := countCommand(h, "torana_send_request"); n != 0 {
@@ -1229,7 +1229,7 @@ func richWarmRequest() *pbv1.ChatRequest {
 func TestTickExactSendPayload(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(warmerCfg)
-	h.StubHostCall("torana_cache_pricing", pricingStub())
+	h.StubHostCall("env.cache_policy", pricingStub())
 	var sent string
 	h.StubHostCall("torana_send_request", func(payload string) (string, error) {
 		sent = payload
@@ -1635,7 +1635,7 @@ func TestTickActionsCountConfirmedCompletesOnly(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			h := newHarness(t)
 			h.SetConfig(warmerCfg)
-			h.StubHostCall("torana_cache_pricing", pricingStub())
+			h.StubHostCall("env.cache_policy", pricingStub())
 			h.StubHostCall("torana_send_request", row.send)
 			seedEntry(t, h, warmEntrySeed(t))
 			res := h.Tick(&pbv1.TickRequest{UnixMillis: 300_000})

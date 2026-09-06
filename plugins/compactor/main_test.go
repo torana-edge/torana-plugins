@@ -1365,7 +1365,6 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 	t.Run("user-role result is a candidate", func(t *testing.T) {
 		h := newHarness(t)
 		h.SetConfig(modelConfig)
-		h.StubHostCall("torana_cache_pricing", func(string) (string, error) { return sdktest.HostResultValue([]byte(`{"status":"ok"}`)), nil })
 		h.StubModelComplete(modelStub(summary))
 		h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 		h.SeedCache("intent:c1", "find the bug")
@@ -1395,7 +1394,6 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 	t.Run("two results in one message", func(t *testing.T) {
 		h := newHarness(t)
 		h.SetConfig(modelConfig)
-		h.StubHostCall("torana_cache_pricing", func(string) (string, error) { return sdktest.HostResultValue([]byte(`{"status":"ok"}`)), nil })
 		h.StubModelComplete(modelStub(summary))
 		h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 		h.SeedCache("intent:c1", "find the bug")
@@ -1511,7 +1509,6 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				h := newHarness(t)
 				h.SetConfig(modelConfig)
-				h.StubHostCall("torana_cache_pricing", func(string) (string, error) { return sdktest.HostResultValue([]byte(`{"status":"ok"}`)), nil })
 				h.StubModelComplete(modelStub(summary))
 				req := &pbv1.ChatRequest{Messages: []*pbv1.Message{
 					{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolResult{ToolResult: tr}}}},

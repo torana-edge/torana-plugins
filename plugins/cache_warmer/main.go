@@ -409,7 +409,7 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 	}
 
 	// No-spend gates next: nothing durable happens until every one passes.
-	pricing, err := sdk.GetCachePricing(entry.Provider, entry.Model)
+	policy, refusal, err := sdk.GetPromptCachePolicy("warm-cache")
 	if err != nil {
 		if isAdvisory(err) {
 			entry.Stopped = "pricing unavailable"
@@ -418,17 +418,27 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 		}
 		return false, "", err
 	}
-	if !pricing.Available() {
+	if refusal != nil {
+		if refusal.Code != pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED && refusal.Code != pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE {
+			return false, "", fmt.Errorf("cache_warmer: prompt cache policy refused: %s", refusal.Message)
+		}
 		entry.Stopped = "pricing unavailable"
 		persistStop(key, entry)
 		return false, fmt.Sprintf("%s: stopped, pricing unavailable", short(entry.ConversationID)), nil
 	}
-	if !pricing.Warmable() {
+	if !policy.RefreshOnRead {
 		// Automatic prefix caching: no lifetime the caller owns, so nothing a
 		// request can keep alive.
 		entry.Stopped = "provider cache does not refresh on read"
 		persistStop(key, entry)
 		return false, fmt.Sprintf("%s: stopped, %s cache cannot be refreshed", short(entry.ConversationID), entry.Provider), nil
+	}
+	shortestTTL, hasTTL := sdk.ShortestPromptCacheTTL(policy)
+	breakEvenRefreshes, hasEconomics := sdk.PromptCacheBreakEvenRefreshes(policy)
+	if !hasTTL || !hasEconomics {
+		entry.Stopped = "pricing unavailable"
+		persistStop(key, entry)
+		return false, fmt.Sprintf("%s: stopped, pricing unavailable", short(entry.ConversationID)), nil
 	}
 
 	if entry.DeadlineMillis > 0 && now >= entry.DeadlineMillis {
@@ -436,7 +446,7 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 		persistStop(key, entry)
 		return false, fmt.Sprintf("%s: stopped, deadline reached", short(entry.ConversationID)), nil
 	}
-	if pricing.BreakEvenRefreshes > 0 && entry.RefreshesSpent >= pricing.BreakEvenRefreshes {
+	if breakEvenRefreshes > 0 && entry.RefreshesSpent >= breakEvenRefreshes {
 		entry.Stopped = "break-even reached"
 		persistStop(key, entry)
 		return false, fmt.Sprintf("%s: stopped after %d refreshes, past break-even",
@@ -448,13 +458,13 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 	// could only rebuild and waste money. Zero means the provider-derived
 	// cadence; anything else must be strictly inside the lifetime.
 	if cfg.IntervalSecondsOverride > 0 &&
-		cfg.IntervalSecondsOverride >= pricing.ShortestTTLSeconds {
+		cfg.IntervalSecondsOverride >= int(shortestTTL) {
 		entry.Stopped = "refresh interval exceeds cache lifetime"
 		persistStop(key, entry)
 		return false, fmt.Sprintf("%s: stopped, refresh interval %ds not below the %ds cache lifetime",
-			short(entry.ConversationID), cfg.IntervalSecondsOverride, pricing.ShortestTTLSeconds), nil
+			short(entry.ConversationID), cfg.IntervalSecondsOverride, shortestTTL), nil
 	}
-	interval := int64(pricing.WarmIntervalSeconds) * 1000
+	interval := int64(policy.GetWarmIntervalSeconds()) * 1000
 	if cfg.IntervalSecondsOverride > 0 {
 		interval = int64(cfg.IntervalSecondsOverride) * 1000
 	}

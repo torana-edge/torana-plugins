@@ -22,8 +22,8 @@
       "description": "Refresh caches while no request is in flight \u2014 the only time a cache can lapse"
     },
     {
-      "name": "env.host_call.torana_cache_pricing",
-      "description": "Read cache prices and lifetimes to know when refreshing stops paying"
+	  "name": "env.cache_policy",
+	  "description": "Read the operator-bound cache prices and lifetimes used to bound refreshes"
     },
     {
       "name": "env.host_call.torana_send_request",
@@ -49,5 +49,12 @@
       "name": "env.state_set",
       "description": "Store the cached prefix of an opted-in conversation"
     }
-  ]
+	],
+	"prompt_cache_policies": [
+	  {
+		"name": "warm-cache",
+		"description": "Prompt-cache prices, lifetimes, and refresh policy for the warmed model",
+		"required": true
+	  }
+	]
 }

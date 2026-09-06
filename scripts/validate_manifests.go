@@ -72,6 +72,11 @@ type manifest struct {
 		ForModelService string `json:"for_model_service"`
 		Required        bool   `json:"required"`
 	} `json:"pricing_resources"`
+	PromptCachePolicies []struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Required    bool   `json:"required"`
+	} `json:"prompt_cache_policies"`
 }
 
 var semver = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$`)
@@ -117,7 +122,7 @@ var knownPermissions = map[string]bool{
 	"env.block_request":   true, "env.cache_get": true, "env.cache_set": true,
 	"env.shared_cache_get": true, "env.shared_cache_set": true,
 	"env.emit_metric":                          true,
-	"env.host_call.torana_cache_pricing":       true,
+	"env.cache_policy":                         true,
 	"env.host_call.torana_db_query":            true,
 	"env.host_call.torana_evaluate_compaction": true,
 	"env.host_call.torana_kms_decrypt":         true,
@@ -155,9 +160,9 @@ var pluginContracts = map[string]pluginContract{
 	"auth": {hooks: []string{"run_before_request"},
 		permissions: []string{"env.block_request", "env.host_call.verify_virtual_key", "env.request_headers", "env.set_identity"}},
 	"cache_tier_selector": {hooks: []string{"run_before_request"},
-		permissions: []string{"env.host_call.torana_cache_pricing", "env.host_call.torana_plugin_counter", "env.log", "env.now", "env.plugin_config", "env.state_get", "env.state_keys", "env.state_set", "ir.cache_control.write"}},
+		permissions: []string{"env.cache_policy", "env.host_call.torana_plugin_counter", "env.log", "env.now", "env.plugin_config", "env.state_get", "env.state_keys", "env.state_set", "ir.cache_control.write"}},
 	"cache_warmer": {hooks: []string{"run_before_request", "run_on_tick"},
-		permissions: []string{"env.background_tick", "env.host_call.torana_cache_pricing", "env.host_call.torana_send_request", "env.now", "env.plugin_config", "env.state_get", "env.state_keys", "env.state_set"}},
+		permissions: []string{"env.background_tick", "env.cache_policy", "env.host_call.torana_send_request", "env.now", "env.plugin_config", "env.state_get", "env.state_keys", "env.state_set"}},
 	"compactor": {hooks: []string{"run_before_request"},
 		permissions:   []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.host_call.torana_evaluate_compaction", "env.host_call.torana_record_savings", "env.model_complete", "env.model_pricing", "env.plugin_config", "env.shared_cache_get", "ir.tool_results.write"},
 		conflictsWith: []string{"torana/keyword_compactor"}},
@@ -448,6 +453,16 @@ func validateModelResources(pluginName string, m manifest) {
 			panic(fmt.Sprintf("%s: pricing resource %q references undeclared model service %q", pluginName, resource.Name, resource.ForModelService))
 		}
 		pricing[resource.Name] = true
+	}
+	cachePolicies := map[string]bool{}
+	for _, resource := range m.PromptCachePolicies {
+		if !permissions["env.cache_policy"] {
+			panic(fmt.Sprintf("%s: prompt cache policy %q requires env.cache_policy", pluginName, resource.Name))
+		}
+		if strings.TrimSpace(resource.Name) == "" || strings.TrimSpace(resource.Description) == "" || cachePolicies[resource.Name] {
+			panic(fmt.Sprintf("%s: invalid or duplicate prompt cache policy %q", pluginName, resource.Name))
+		}
+		cachePolicies[resource.Name] = true
 	}
 }
 
