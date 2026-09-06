@@ -786,6 +786,42 @@ func TestStreamPassThroughForUnrecordedTool(t *testing.T) {
 	}
 }
 
+func TestStreamPassesFreeformToolInputWithoutJSONTranslation(t *testing.T) {
+	h := newHarness(t)
+	req := &pbv1.ChatRequest{Tools: []*pbv1.ToolDef{{
+		Name: "shell", Description: "run shell input",
+		InvocationKind:  pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM,
+		InputFormatJson: []byte(`{"type":"grammar","syntax":"lark","definition":"start: /.+/"}`),
+	}}}
+	before := proto.Clone(req).(*pbv1.ChatRequest)
+	prepared := h.BeforeRequest(req)
+	if prepared.Err != nil || !prepared.PassedThrough || !proto.Equal(req, before) {
+		t.Fatalf("free-form definition was translated: result=%+v request=%v", prepared, req)
+	}
+	input := "echo $HOME && printf '%s' done"
+	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+		ContentBlockStart: &pbv1.ContentBlockStart{Index: 2, Block: &pbv1.ContentBlockStart_ToolCall{ToolCall: &pbv1.ToolCallRef{
+			Id: "call_custom", Name: "shell", Signature: "sig-custom",
+			InvocationKind: pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM,
+		}}},
+	}})
+	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
+		ToolCallDelta: &pbv1.ToolCallDelta{Index: 2, InputTextDelta: &input},
+	}})
+	res := h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+		ContentBlockStop: &pbv1.ContentBlockStop{Index: 2},
+	}})
+	if res.Err != nil || len(res.Events) != 3 {
+		t.Fatalf("free-form pass result: %+v", res)
+	}
+	ref := res.Events[0].GetContentBlockStart().GetToolCall()
+	delta := res.Events[1].GetToolCallDelta()
+	if ref.GetInvocationKind() != pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM || ref.GetSignature() != "sig-custom" ||
+		delta.InputTextDelta == nil || *delta.InputTextDelta != input || delta.ArgumentsDelta != "" {
+		t.Fatalf("free-form call changed: ref=%+v delta=%+v", ref, delta)
+	}
+}
+
 // TestStreamReversesRecordedTool — a translated tool's assembled call is
 // reversed and re-emitted; the signature is cleared because the arguments
 // changed.

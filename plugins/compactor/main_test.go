@@ -1385,6 +1385,31 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 		}
 	})
 
+	// Free-form result payloads use the same ordered text carrier. Compaction
+	// changes only that text and must preserve the invocation family.
+	t.Run("free-form result is a candidate", func(t *testing.T) {
+		h := newHarness(t)
+		h.SetConfig(modelConfig)
+		h.StubModelComplete(modelStub(summary))
+		h.StubHostCall("torana_evaluate_compaction", applyStub(true))
+		h.SeedCache("intent:c1", "find the bug")
+		block := result("c1", content)
+		block.GetToolResult().InvocationKind = pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM
+		req := &pbv1.ChatRequest{Messages: []*pbv1.Message{
+			{Role: "user", Blocks: []*pbv1.RequestBlock{block}},
+			assistant(),
+		}}
+		req.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
+		res := h.BeforeRequest(req)
+		if res.Err != nil || res.Request == nil {
+			t.Fatalf("err=%v", res.Err)
+		}
+		got := res.Request.Messages[0].Blocks[0].GetToolResult()
+		if got.GetInvocationKind() != pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM || got.Content[0].GetText().Text != summary {
+			t.Fatalf("free-form result not preserved and compacted: %+v", got)
+		}
+	})
+
 	// Two results in one message: independent candidates, both applied. The
 	// accounting is pinned exactly: the real evaluate report carries
 	// candidate_count=2, and every per-candidate call fires exactly once per
@@ -1534,6 +1559,44 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestToolInvocationInputIdentitySeparatesFreeformInputs(t *testing.T) {
+	empty := ""
+	one := "echo one"
+	two := "echo two"
+	identities := []string{
+		toolInvocationInputIdentity(pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FUNCTION, sdk.ToolCallView{
+			InvocationKind: pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FUNCTION, Arguments: []byte(`{"path":"x"}`),
+		}, true),
+		toolInvocationInputIdentity(pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM, sdk.ToolCallView{
+			InvocationKind: pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM, InputText: &empty,
+		}, true),
+		toolInvocationInputIdentity(pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM, sdk.ToolCallView{
+			InvocationKind: pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM, InputText: &one,
+		}, true),
+		toolInvocationInputIdentity(pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM, sdk.ToolCallView{
+			InvocationKind: pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM, InputText: &two,
+		}, true),
+		toolInvocationInputIdentity(pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM, sdk.ToolCallView{}, false),
+	}
+	seen := make(map[string]struct{}, len(identities))
+	for _, identity := range identities {
+		if _, exists := seen[identity]; exists {
+			t.Fatalf("invocation identity collision: %q in %v", identity, identities)
+		}
+		seen[identity] = struct{}{}
+	}
+	if identities[0] != `{"path":"x"}` {
+		t.Fatalf("function identity changed: %q", identities[0])
+	}
+	if identities[1] != "freeform:" || identities[4] != "freeform-absent:" {
+		t.Fatalf("free-form presence collapsed: %v", identities)
+	}
+	if modelResultCacheKey("shell", identities[2], "same output", "same intent", false) ==
+		modelResultCacheKey("shell", identities[3], "same output", "same intent", false) {
+		t.Fatal("distinct free-form inputs share a model compaction cache key")
+	}
 }
 
 // TestOrderedSeamContextExtraction — the ported context algorithm pinned

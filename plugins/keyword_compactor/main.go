@@ -144,7 +144,9 @@ func compactToolResults(req *pbv1.ChatRequest) (bool, error) {
 			}
 			toolArgs := ""
 			if call, ok := toolCalls[view.ToolCallId]; ok {
-				toolArgs = string(call.Arguments)
+				toolArgs = toolInvocationInputIdentity(view.InvocationKind, call, true)
+			} else if view.InvocationKind == pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM {
+				toolArgs = toolInvocationInputIdentity(view.InvocationKind, sdk.ToolCallView{}, false)
 			}
 			if toolName == "" || sdk.ToolResultMustStayExact(toolName, text) {
 				continue
@@ -247,6 +249,23 @@ func compactToolResults(req *pbv1.ChatRequest) (bool, error) {
 		}
 	}
 	return modified, nil
+}
+
+// toolInvocationInputIdentity keeps the existing function-arguments identity
+// byte-for-byte while placing provider-native text in a disjoint domain. A
+// missing historical free-form call is distinct from an explicitly empty
+// input, so neither can alias a different call's compaction cache entry.
+func toolInvocationInputIdentity(resultKind pbv1.ToolInvocationKind, call sdk.ToolCallView, found bool) string {
+	if resultKind != pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM {
+		if found && call.InvocationKind == pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FUNCTION {
+			return string(call.Arguments)
+		}
+		return ""
+	}
+	if !found || call.InvocationKind != pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM || call.InputText == nil {
+		return "freeform-absent:"
+	}
+	return "freeform:" + *call.InputText
 }
 
 func keywordResultCacheKey(toolName, toolArgs, text, intent string, derived bool) string {

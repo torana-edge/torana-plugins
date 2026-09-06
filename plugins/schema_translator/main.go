@@ -298,6 +298,15 @@ func handleAssembled(call sdk.ToolCall) (sdk.StreamResult, error) {
 	if err != nil {
 		return sdk.StreamResult{}, fmt.Errorf("schema_translator: registry corrupt: %w", err)
 	}
+	if call.InvocationKind == pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM {
+		if call.InputText == nil {
+			return sdk.StreamResult{}, fmt.Errorf("schema_translator: free-form tool call has no input")
+		}
+		// Free-form input is text, never the model-facing KV-array schema this
+		// plugin translates. A valid registry still gates pass-through, but the
+		// payload and its signature remain byte-identical.
+		return sdk.EmitEvents(sdk.EmitAssembledToolCall(call, *call.InputText)...), nil
+	}
 	paths, recorded := reg.tools[call.Name]
 	if !recorded || len(paths) == 0 {
 		// Explicit absence in a valid envelope: this tool was not translated.
