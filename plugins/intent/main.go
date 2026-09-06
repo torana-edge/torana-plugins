@@ -96,7 +96,7 @@ func resetConfigForTest() {
 func init() {
 	// ── Request side: teach the "i" convention ──────────────────────
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
-		if len(req.Tools) == 0 {
+		if !hasFunctionTool(req) {
 			return sdk.PassRequest(), nil
 		}
 		modified, err := injectIntentSchema(req)
@@ -150,6 +150,12 @@ func init() {
 // unchanged. JSON formatting or key order in the model's output is never a
 // reason to rewrite the block.
 func handleToolCall(call sdk.ToolCall) (sdk.ToolCallAction, error) {
+	// The "i" convention belongs to JSON-object function arguments. A
+	// provider-native free-form payload is opaque text and must never be
+	// parsed, cached, stripped, or converted into a function call.
+	if call.InvocationKind != pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FUNCTION {
+		return sdk.PassToolCall(), nil
+	}
 	// Parse regardless of leading whitespace (json.Unmarshal accepts it);
 	// invalid, non-object, and "null" arguments (args stays nil) are not
 	// representable and pass the exact bytes.
@@ -268,6 +274,9 @@ func rehydrateHistoryIntents(req *pbv1.ChatRequest) (bool, error) {
 			continue
 		}
 		for _, tc := range calls {
+			if tc.InvocationKind != pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FUNCTION {
+				continue
+			}
 			var args map[string]any
 			if len(tc.Arguments) == 0 {
 				args = map[string]any{}
@@ -502,6 +511,18 @@ func injectIntentSchema(req *pbv1.ChatRequest) (bool, error) {
 		}
 	}
 	return modified, nil
+}
+
+func hasFunctionTool(req *pbv1.ChatRequest) bool {
+	if req == nil {
+		return false
+	}
+	for _, tool := range req.Tools {
+		if tool != nil && tool.InvocationKind == pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FUNCTION {
+			return true
+		}
+	}
+	return false
 }
 
 // injectSystemPrompt appends the "i" convention with a one-line example

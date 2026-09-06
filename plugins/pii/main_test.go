@@ -168,6 +168,17 @@ func TestKnownPIIBlocksDespiteUnsupportedPart(t *testing.T) {
 	assertBlocked(t, h2, "pii_detected", "AKIA1234567890ABCDEF")
 }
 
+func TestFreeformToolOutputIsScanned(t *testing.T) {
+	h := newHarness(t)
+	msg := toolMsg("call_1", "exec", textArm("contact victim@example.com"))
+	msg.Blocks[0].GetToolResult().InvocationKind = pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM
+	res := h.BeforeRequest(reqWith(msg))
+	if res.Err != nil || !res.PassedThrough {
+		t.Fatalf("err=%v passed=%v", res.Err, res.PassedThrough)
+	}
+	assertBlocked(t, h, "pii_detected", "victim@example.com")
+}
+
 // TestUnknownUnscannableContentFollowsOnError — incomplete extraction with NO
 // deterministic finding: on_error block vetoes with pii_scan_failed, allow
 // forwards, and nothing is cached or model-scanned.

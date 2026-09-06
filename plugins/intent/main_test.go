@@ -214,6 +214,22 @@ func streamCall(t *testing.T, h *sdktest.Harness, id, name, sig, args string) sd
 	}})
 }
 
+func streamFreeformCall(t *testing.T, h *sdktest.Harness, id, name, sig, input string) sdktest.StreamResult {
+	t.Helper()
+	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+		ContentBlockStart: &pbv1.ContentBlockStart{Index: 0, Block: &pbv1.ContentBlockStart_ToolCall{
+			ToolCall: &pbv1.ToolCallRef{Id: id, Name: name, Signature: sig,
+				InvocationKind: pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM},
+		}},
+	}})
+	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
+		ToolCallDelta: &pbv1.ToolCallDelta{Index: 0, InputTextDelta: &input},
+	}})
+	return h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+		ContentBlockStop: &pbv1.ContentBlockStop{Index: 0},
+	}})
+}
+
 // emittedArgs pulls the delta from an assembled start+delta+stop result.
 func emittedArgs(t *testing.T, res sdktest.StreamResult) string {
 	t.Helper()
@@ -252,6 +268,48 @@ func TestBeforeRequestNoToolsPasses(t *testing.T) {
 	}
 	for _, c := range h.Calls() {
 		t.Errorf("unexpected host call with no tools: %s", c.Command)
+	}
+}
+
+func TestFreeformToolsStayOutsideTheIntentConvention(t *testing.T) {
+	h := newHarness(t)
+	input := `echo {"i":"literal input, not an intent field"}`
+	req := &pbv1.ChatRequest{
+		Tools: []*pbv1.ToolDef{{
+			Name: "shell", InvocationKind: pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM,
+			InputFormatJson: []byte(`{"type":"grammar","syntax":"lark","definition":"start: /.+/"}`),
+		}},
+		Messages: []*pbv1.Message{
+			{Role: "system", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "You are a coding agent."}}}}},
+			{Role: "assistant", Blocks: []*pbv1.RequestBlock{
+				{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{
+					Id: "call_1", Name: "shell", InputText: &input,
+					InvocationKind: pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM, Signature: "sig",
+				}}},
+			}},
+		},
+	}
+	before := proto.Clone(req).(*pbv1.ChatRequest)
+	res := h.BeforeRequest(req)
+	if res.Err != nil || !res.PassedThrough || !proto.Equal(req, before) {
+		t.Fatalf("custom-only request was taught or rewritten: result=%+v request=%v", res, req)
+	}
+
+	stream := streamFreeformCall(t, h, "call_2", "shell", "stream-sig", input)
+	if stream.Err != nil || len(stream.Events) != 3 {
+		t.Fatalf("free-form stream result: %+v", stream)
+	}
+	ref := stream.Events[0].GetContentBlockStart().GetToolCall()
+	delta := stream.Events[1].GetToolCallDelta()
+	if ref.GetInvocationKind() != pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM || ref.GetSignature() != "stream-sig" ||
+		delta.InputTextDelta == nil || *delta.InputTextDelta != input || delta.ArgumentsDelta != "" {
+		t.Fatalf("free-form stream changed: ref=%+v delta=%+v", ref, delta)
+	}
+	for _, call := range h.Calls() {
+		switch call.Command {
+		case "env.cache_get", "env.cache_set", "env.shared_cache_set", "env.emit_metric", "env.log", "env.meta_get":
+			t.Fatalf("intent convention acted on a free-form call: %s", call.Command)
+		}
 	}
 }
 

@@ -1075,6 +1075,28 @@ func TestKeywordOrderedSeamRows(t *testing.T) {
 		}
 	})
 
+	// Free-form result payloads share the ordered scalar-text carrier. The
+	// compactor may shorten the text but must not change the invocation family.
+	t.Run("free-form result is a candidate", func(t *testing.T) {
+		h := newHarness(t)
+		h.SetConfig(keywordCfg)
+		h.SeedCache("intent:c1", "find the bug in server")
+		block := result("c1", content)
+		block.GetToolResult().InvocationKind = pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM
+		req := &pbv1.ChatRequest{Messages: []*pbv1.Message{
+			{Role: "user", Blocks: []*pbv1.RequestBlock{block}},
+			assistantAfter(),
+		}}
+		res := h.BeforeRequest(req)
+		if res.Err != nil || res.Request == nil {
+			t.Fatalf("err=%v", res.Err)
+		}
+		got := res.Request.Messages[0].Blocks[0].GetToolResult()
+		if got.GetInvocationKind() != pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM || !worthwhileReduction(len(content), len(got.Content[0].GetText().Text)) {
+			t.Fatalf("free-form result not preserved and compacted: %+v", got)
+		}
+	})
+
 	// Two results in one message: independent candidates, both applied,
 	// with exact cardinalities: intent + keyword cache_get per candidate
 	// (4 total), savings per candidate (2: cache_reuse + transformation),
@@ -1208,4 +1230,42 @@ func TestKeywordOrderedSeamRows(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestToolInvocationInputIdentitySeparatesFreeformInputs(t *testing.T) {
+	empty := ""
+	one := "echo one"
+	two := "echo two"
+	identities := []string{
+		toolInvocationInputIdentity(pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FUNCTION, sdk.ToolCallView{
+			InvocationKind: pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FUNCTION, Arguments: []byte(`{"path":"x"}`),
+		}, true),
+		toolInvocationInputIdentity(pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM, sdk.ToolCallView{
+			InvocationKind: pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM, InputText: &empty,
+		}, true),
+		toolInvocationInputIdentity(pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM, sdk.ToolCallView{
+			InvocationKind: pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM, InputText: &one,
+		}, true),
+		toolInvocationInputIdentity(pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM, sdk.ToolCallView{
+			InvocationKind: pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM, InputText: &two,
+		}, true),
+		toolInvocationInputIdentity(pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM, sdk.ToolCallView{}, false),
+	}
+	seen := make(map[string]struct{}, len(identities))
+	for _, identity := range identities {
+		if _, exists := seen[identity]; exists {
+			t.Fatalf("invocation identity collision: %q in %v", identity, identities)
+		}
+		seen[identity] = struct{}{}
+	}
+	if identities[0] != `{"path":"x"}` {
+		t.Fatalf("function identity changed: %q", identities[0])
+	}
+	if identities[1] != "freeform:" || identities[4] != "freeform-absent:" {
+		t.Fatalf("free-form presence collapsed: %v", identities)
+	}
+	if keywordResultCacheKey("shell", identities[2], "same output", "same intent", false) ==
+		keywordResultCacheKey("shell", identities[3], "same output", "same intent", false) {
+		t.Fatal("distinct free-form inputs share a keyword compaction cache key")
+	}
 }
