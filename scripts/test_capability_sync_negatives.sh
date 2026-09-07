@@ -71,16 +71,34 @@ for dir in "$root"/plugins/*/; do
   cp "$dir/go.mod" "$tmp/plugins/$(basename "$dir")/go.mod"
 done
 drifted="$tmp/plugins/schema_translator/go.mod"
-pin_suffix=$(sed -n 's|.*torana-plugin-sdk v[^ ]*-\([0-9a-f]\{12\}\)$|\1|p' "$drifted")
-if [[ ! "$pin_suffix" =~ ^[0-9a-f]{12}$ ]]; then
-  echo "capability sync negative: could not resolve the current pin suffix" >&2
+# Shape-agnostic: replace the WHOLE pin rather than a pseudo-version's commit
+# suffix, which a released tag like v0.3.0 does not have. Extracting the
+# suffix worked only while every pin was a pseudo-version.
+pin_value=$(sed -n 's|.*torana-plugin-sdk \(v[^ ]*\)$|\1|p' "$drifted")
+if [[ -z "$pin_value" ]]; then
+  echo "capability sync negative: could not resolve the current pin" >&2
   exit 1
 fi
-sed "s|$pin_suffix|deadbeef0000|" "$drifted" > "$drifted.tmp" && mv "$drifted.tmp" "$drifted"
+sed "s|torana-plugin-sdk $pin_value|torana-plugin-sdk v0.0.0-00010101000000-deadbeef0000|" "$drifted" > "$drifted.tmp" && mv "$drifted.tmp" "$drifted"
 if [[ $(grep -c 'deadbeef0000' "$drifted") -ne 1 ]]; then
   echo "capability sync negative: the one-module drift did not apply exactly once" >&2
   exit 1
 fi
 expect fail "a one-module SDK pin drift" "$validator" "$tmp/plugins"
 
-echo "capability sync negatives: all six cases pass"
+# SDK_REF must name the pin in the SHAPE the pin uses. When the modules pin a
+# released tag, a commit SHA does not name it — even the RIGHT commit — because
+# nothing downstream can check that correspondence without the SDK repository.
+current_pin=$(sed -n 's|.*torana-plugin-sdk \(v[^ ]*\)$|\1|p' "$root/plugins/schema_translator/go.mod")
+case "$current_pin" in
+  *-*-*) ;; # pseudo-version: SDK_REF is a SHA and the case below does not apply
+  *)
+    printf '%s\n' "70179850b78a3b0f3c6ca6dad1e344407b631031" > "$tmp/SDK_REF"
+    if SDK_REF_FILE="$tmp/SDK_REF" bash "$sync" >/dev/null 2>&1; then
+      echo "capability sync negative: expected FAILURE for a commit SDK_REF against a released pin, but the sync passed" >&2
+      exit 1
+    fi
+    ;;
+esac
+
+echo "capability sync negatives: all cases pass"

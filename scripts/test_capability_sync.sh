@@ -47,17 +47,40 @@ if [[ -z "$expected_ref" ]]; then
   echo "capability sync: SDK_REF is empty or missing" >&2
   exit 1
 fi
-# EXACT revision equality: the pin's revision is the last dash component of
-# the pseudo-version (v0.2.1-0.<timestamp>-<commit>); SDK_REF carries the
-# FULL commit SHA (a short SHA is not fetchable by ref in CI checkout).
-# Substring matching is deliberately rejected: a value like "0.2.1" or
-# "20260804" must NOT pass — only the full SHA whose 12-char prefix equals
-# the pinned revision does.
-pin_rev="${pin##*-}"
-if [[ "${expected_ref:0:12}" != "$pin_rev" ]]; then
-  echo "capability sync: SDK_REF $expected_ref does not exactly name the pinned revision $pin_rev ($pin)" >&2
-  exit 1
-fi
+# EXACT revision equality. A pin comes in two shapes and they name the
+# revision differently, so the check has to know which it is looking at:
+#
+#   pseudo-version  vX.Y.Z-0.<timestamp>-<commit>
+#       The revision is the last dash component, a 12-character commit
+#       prefix, so SDK_REF carries the FULL commit SHA — a short SHA is not
+#       fetchable by ref in a CI checkout.
+#
+#   released tag    vX.Y.Z
+#       The version IS the revision and SDK_REF names the tag. Deriving a
+#       commit from it would need the SDK repository, which this check does
+#       not have; checkout_sdk_ref.sh resolves the tag where it does.
+#
+# Only the pseudo-version shape existed until the first tagged release, at
+# which point ${pin##*-} on "v0.3.0" yields "v0.3.0" and the SHA comparison
+# could never pass — a repin to a real version was unrepresentable.
+#
+# Substring matching is deliberately rejected in both shapes: a value like
+# "0.2.1" or "20260804" must NOT pass.
+case "$pin" in
+  *-*-*)
+    pin_rev="${pin##*-}"
+    if [[ "${expected_ref:0:12}" != "$pin_rev" ]]; then
+      echo "capability sync: SDK_REF $expected_ref does not exactly name the pinned commit $pin_rev ($pin)" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    if [[ "$expected_ref" != "$pin" ]]; then
+      echo "capability sync: SDK_REF $expected_ref does not exactly name the pinned release $pin" >&2
+      exit 1
+    fi
+    ;;
+esac
 
 # Resolve the agreed pin through Go module resolution (GOWORK=off) from a
 # plugin module: a CLEAN checkout must work without a pre-warmed cache — the

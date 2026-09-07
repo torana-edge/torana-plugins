@@ -21,8 +21,16 @@ executable release inventory.
 ```
 
 The workspace resolves `../torana-plugin-sdk` during local development. An
-external plugin should depend on the released SDK module instead. Build
-artifacts are written to `dist/` and are deliberately not committed.
+external plugin should depend on the released SDK module instead:
+
+```bash
+go get github.com/torana-edge/torana-plugin-sdk@v0.3.0
+```
+
+`v0.3.0` is Plugin ABI v1 — the contract the current host speaks. Anything
+older is a different ABI and the host will refuse to load it.
+
+Build artifacts are written to `dist/` and are deliberately not committed.
 
 ## Writing your own plugin
 
@@ -75,5 +83,5 @@ fail open because this is a capability example, not an authentication boundary.
 A production auth plugin must use a fail-closed policy instead.
 
 An earlier iteration of this plugin shipped hardcoded stubs that returned a dummy
-tenant for every request. Those were removed (torana-edge#130) precisely because a
-security stub that returns success is worse than no stub at all.
+tenant for every request. Those were removed precisely because a security stub
+that returns success is worse than no stub at all.
