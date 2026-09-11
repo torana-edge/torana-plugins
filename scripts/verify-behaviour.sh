@@ -61,8 +61,14 @@ status=0
 # exist HERE, and skips unless both repos are checked out. This job is the only
 # place both are — so without it, the one guard against a shipped plugin being
 # absent from the catalog runs nowhere at all.
+# -timeout matches torana-edge's own gate (1800s) rather than sitting below it.
+# At 900s this was always marginal — internal/plugin used 876s of that budget on
+# the run before this one — and it tipped over into `panic: test timed out after
+# 15m0s` with no assertion having failed. A timeout under the suite's real
+# runtime reports a green tree as broken, which is the most expensive kind of
+# wrong: it costs a debugging session to discover nothing was.
 (cd "$edge_dir" && go test ./internal/plugin ./internal/proxy ./internal/wasm ./internal/plugincmd \
-  -count=1 -v -timeout 900s) >"$log" 2>&1 || status=$?
+  -count=1 -v -timeout 1800s) >"$log" 2>&1 || status=$?
 
 # Show failures without dumping several thousand lines of -v output.
 if [ "$status" -ne 0 ]; then
