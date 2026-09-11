@@ -2,20 +2,12 @@
 // conversation.
 //
 // Providers that sell explicit cache breakpoints often sell more than one
-// lifetime at different write prices — Anthropic's are 5 minutes at 1.25x the
-// base input rate and 1 hour at 2.0x. Which is cheaper depends entirely on how
-// long the conversation is about to sit idle, and a harness always asks for the
-// default.
-//
-// The arithmetic, for a prefix of P tokens at base rate B:
-//
-//	short tier, cache lapses:   pay (1.25 - 1.0) x B x P again on resume
-//	long tier, bought upfront:  pay (2.0 - 1.25) x B x P once, no lapse
-//
-// So the long tier costs about 3x the short tier's *premium*, but only once —
-// while a lapsed short tier costs its full write every time the gap exceeds
-// five minutes. Buying the hour wins whenever a session has more than a few
-// multi-minute pauses in it, which is what real coding sessions look like.
+// lifetime at different write prices. Automatic mode is deliberately a TTL
+// heuristic: it chooses the longer tier only after the conversation has shown
+// a sufficiently long idle gap. It is not a claim of globally optimal cost.
+// The heuristic runs only when the policy supplies its cache prices and every
+// tier's write multiplier; absent economics fail closed. Explicit short/long
+// modes remain operator choices.
 //
 // # Why the decision must be sticky
 //
@@ -65,10 +57,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 func main() {}
@@ -161,6 +155,9 @@ func init() {
 		}
 
 		meta := readHostMeta(req)
+		if meta.Provider == "" {
+			return sdk.PassRequest(), nil
+		}
 		policy, refusal, err := sdk.GetPromptCachePolicy("request-cache")
 		if err != nil {
 			// Authoritative read: advisory pricing declines (unknown
@@ -177,6 +174,9 @@ func init() {
 			}
 			return sdk.RequestResult{}, fmt.Errorf("cache_tier_selector: prompt cache policy refused: %s", refusal.Message)
 		}
+		if cfg.Mode == "auto" && !autoEconomicsKnown(policy) {
+			return sdk.PassRequest(), nil
+		}
 
 		// prefixKey came from the production decisionKey helper (parity
 		// invariant I1): identical observable prefixes key the same sticky
@@ -187,7 +187,11 @@ func init() {
 		// A decision already exists for this exact prefix — reapply it
 		// verbatim until the provider cache itself has expired.
 		var prior decision
-		decisionKey := "decision/" + prefixKey
+		scopedKey, err := scopedDecisionKey(prefixKey, meta.Provider, policy)
+		if err != nil {
+			return sdk.RequestResult{}, err
+		}
+		decisionKey := "decision/" + scopedKey
 		// The decision read is AUTHORITATIVE, so the failure classes must be
 		// distinguishable: a malformed host frame or transport failure is a
 		// protocol defect (hook error); a refusal is advisory or contract by
@@ -213,6 +217,22 @@ func init() {
 			return sdk.PassRequest(), nil
 		default:
 			found = true
+		}
+		if found && !decisionMatchesPolicy(prior, policy) {
+			// Corrupt or foreign state must never reintroduce a marker the
+			// current policy does not offer, even if it was planted under the
+			// current scoped key.
+			if herr, err := sdk.StateDelete(decisionKey); err != nil || herr != nil {
+				if err != nil {
+					return sdk.RequestResult{}, err
+				}
+				if !sdk.IsNotFound(herr) && herr.Code != pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED &&
+					herr.Code != pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE {
+					return sdk.RequestResult{}, fmt.Errorf("cache_tier_selector: delete invalid %s refused: %s", decisionKey, herr.Message)
+				}
+				return sdk.PassRequest(), nil
+			}
+			found = false
 		}
 		if found {
 			switch {
@@ -346,6 +366,34 @@ func chooseTier(cfg config, policy *pbv1.PromptCachePolicy, act activity, now in
 	return marker, int(long.TtlSeconds)
 }
 
+func autoEconomicsKnown(policy *pbv1.PromptCachePolicy) bool {
+	if policy == nil || policy.CacheReadUsdPerMtok == nil || policy.CacheWriteUsdPerMtok == nil {
+		return false
+	}
+	for _, tier := range policy.Tiers {
+		if tier == nil || tier.WriteMultiplier == nil {
+			return false
+		}
+	}
+	return true
+}
+
+func decisionMatchesPolicy(value decision, policy *pbv1.PromptCachePolicy) bool {
+	if value.Marker == nil || value.TierTTL <= 0 || policy == nil {
+		return false
+	}
+	for _, tier := range policy.Tiers {
+		if tier == nil || int(tier.TtlSeconds) != value.TierTTL {
+			continue
+		}
+		var marker map[string]any
+		if json.Unmarshal(tier.MarkerJson, &marker) == nil && reflect.DeepEqual(marker, value.Marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // recordActivity updates and returns this conversation's gap history.
 // Advisory refusals return the in-memory history so the caller can still
 // decide (the decision persistence gates any mutation); contract/protocol
@@ -474,6 +522,17 @@ func decisionKey(req *pbv1.ChatRequest) (key string, hasBreakpoint bool, err err
 		return "", false, err
 	}
 	return sdk.ContentAddressedCacheKey("tier", string(prefix)), has, nil
+}
+
+// scopedDecisionKey prevents a sticky marker chosen for one provider or cache
+// policy from crossing into another. Deterministic protobuf encoding makes
+// every policy field, including presence and tier order, part of the identity.
+func scopedDecisionKey(prefixKey, provider string, policy *pbv1.PromptCachePolicy) (string, error) {
+	raw, err := (proto.MarshalOptions{Deterministic: true}).Marshal(policy)
+	if err != nil {
+		return "", fmt.Errorf("cache_tier_selector: encode cache policy identity: %w", err)
+	}
+	return sdk.ContentAddressedCacheKey("tier/decision", prefixKey, provider, string(raw)), nil
 }
 
 // replaceMarker applies the tier marker with the SDK's exact-carrier
