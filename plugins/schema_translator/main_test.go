@@ -665,6 +665,60 @@ func TestBeforeRequestLeavesHybridObjectBoundaryUnchanged(t *testing.T) {
 	}
 }
 
+// TestHybridObjectRecursesIntoReversibleNamedChild proves that a hybrid
+// object remains an object while an independently reversible named child is
+// translated and recorded at its complete parent path. The stream hook must
+// reverse only that child without losing fixed or additional parent fields.
+func TestHybridObjectRecursesIntoReversibleNamedChild(t *testing.T) {
+	h := newHarness(t)
+	raw := `{"type":"object","properties":{"config":{"type":"object","properties":{"label":{"type":"string","minLength":2},"env":{"type":"object","additionalProperties":{"type":"string","minLength":1}}},"required":["label","env"],"minProperties":2,"additionalProperties":{"type":"integer","minimum":0}}}}`
+	res := h.BeforeRequest(reqWithTools(raw))
+	if res.Err != nil || res.Request == nil {
+		t.Fatalf("expected the named child to be translated, err=%v", res.Err)
+	}
+
+	var schema map[string]any
+	if err := json.Unmarshal(res.Request.Tools[0].ParametersJson, &schema); err != nil {
+		t.Fatal(err)
+	}
+	config := schema["properties"].(map[string]any)["config"].(map[string]any)
+	properties := config["properties"].(map[string]any)
+	label := properties["label"].(map[string]any)
+	env := properties["env"].(map[string]any)
+	additional := config["additionalProperties"].(map[string]any)
+	value := env["items"].(map[string]any)["properties"].(map[string]any)["value"].(map[string]any)
+	if config["type"] != "object" || env["type"] != "array" || label["minLength"] != float64(2) ||
+		value["minLength"] != float64(1) || additional["type"] != "integer" ||
+		additional["minimum"] != float64(0) || config["minProperties"] != float64(2) ||
+		!reflect.DeepEqual(config["required"], []any{"label", "env"}) {
+		t.Fatalf("hybrid parent or child constraints changed: %v", config)
+	}
+
+	const wantEnvelope = `{"version":1,"tools":{"read":[{"path":[{"field":"config","each":false},{"field":"env","each":false}]}]}}`
+	if got := publishedEnvelope(t, h); got != wantEnvelope {
+		t.Fatalf("registry envelope:\n  got  %s\n  want %s", got, wantEnvelope)
+	}
+
+	streamed := `{"config":{"label":"prod","env":[{"key":"REGION","value":"eu"}],"retries":3}}`
+	streamRes := streamBlock(t, h, 0, "call_1", "read", "sig-hybrid", streamed)
+	if streamRes.Err != nil {
+		t.Fatalf("stream reversal failed: %v", streamRes.Err)
+	}
+	var gotArgs, wantArgs map[string]any
+	if err := json.Unmarshal([]byte(emittedArgs(t, streamRes)), &gotArgs); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(`{"config":{"label":"prod","env":{"REGION":"eu"},"retries":3}}`), &wantArgs); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("hybrid reversal changed fixed/additional fields:\n  got  %v\n  want %v", gotArgs, wantArgs)
+	}
+	if sig := emittedSig(t, streamRes); sig != "" {
+		t.Fatalf("signature must be cleared when the child arguments change, got %q", sig)
+	}
+}
+
 // TestAdvisoryPublicationFailureReturnsOriginalUnchanged — an advisory
 // MetaSet refusal means the reversal registry was not persisted; the ORIGINAL
 // request travels untouched (no partial schema mutation escapes).
