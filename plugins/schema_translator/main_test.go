@@ -109,6 +109,29 @@ func TestNestedOpenMapStillConverts(t *testing.T) {
 	}
 }
 
+func TestHybridObjectKeepsNamedFields(t *testing.T) {
+	got, mutations := translate(t, `{"type":"object","properties":{"config":{"type":"object","properties":{"label":{"type":"string"}},"required":["label"],"additionalProperties":{"type":"integer"}}}}`)
+	config := got["properties"].(map[string]any)["config"].(map[string]any)
+	if config["type"] != "object" {
+		t.Fatalf("hybrid object became %v", config["type"])
+	}
+	properties, ok := config["properties"].(map[string]any)
+	if !ok || properties["label"].(map[string]any)["type"] != "string" {
+		t.Fatalf("named field constraints were lost: %v", config)
+	}
+	required, ok := config["required"].([]any)
+	if !ok || len(required) != 1 || required[0] != "label" {
+		t.Fatalf("required named field was lost: %v", config)
+	}
+	additional, ok := config["additionalProperties"].(map[string]any)
+	if !ok || additional["type"] != "integer" {
+		t.Fatalf("free-form value schema was lost: %v", config)
+	}
+	if len(mutations) != 0 {
+		t.Fatalf("unsupported hybrid boundary recorded destructive mutations: %+v", mutations)
+	}
+}
+
 // TestNestedBareObjectStillConverts is the same guard for the bare-object case:
 // restricting rule 1 to the root must not disable the conversion below it.
 func TestNestedBareObjectStillConverts(t *testing.T) {
@@ -615,6 +638,30 @@ func TestBeforeRequestUnchangedStillPublishesEmptyEnvelope(t *testing.T) {
 	env := publishedEnvelope(t, h)
 	if env != `{"version":1,"tools":{}}` {
 		t.Fatalf("envelope should be empty but is: %s", env)
+	}
+}
+
+func TestBeforeRequestLeavesHybridObjectBoundaryUnchanged(t *testing.T) {
+	h := newHarness(t)
+	raw := `{"type":"object","properties":{"config":{"type":"object","properties":{"label":{"type":"string"}},"required":["label"],"additionalProperties":{"type":"integer"}}}}`
+	req := reqWithTools(raw)
+	res := h.BeforeRequest(req)
+	if res.Err != nil || res.Request == nil {
+		t.Fatalf("expected only the intentional root closure, err=%v", res.Err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(res.Request.Tools[0].ParametersJson, &got); err != nil {
+		t.Fatal(err)
+	}
+	config := got["properties"].(map[string]any)["config"].(map[string]any)
+	properties := config["properties"].(map[string]any)
+	additional := config["additionalProperties"].(map[string]any)
+	if config["type"] != "object" || properties["label"].(map[string]any)["type"] != "string" ||
+		additional["type"] != "integer" || !reflect.DeepEqual(config["required"], []any{"label"}) {
+		t.Fatalf("hybrid boundary changed: %v", config)
+	}
+	if env := publishedEnvelope(t, h); env != `{"version":1,"tools":{}}` {
+		t.Fatalf("hybrid schema published a reversal mutation: %s", env)
 	}
 }
 
