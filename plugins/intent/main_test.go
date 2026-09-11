@@ -176,6 +176,27 @@ func TestStrictSchemasSurviveInjection(t *testing.T) {
 	}
 }
 
+func TestSchemaInjectionPreservesLargeIntegerConstraints(t *testing.T) {
+	h := newHarness(t)
+	req := &pbv1.ChatRequest{Tools: []*pbv1.ToolDef{{
+		Name:           "lookup",
+		ParametersJson: []byte(`{"type":"object","properties":{"record_id":{"type":"integer","const":9007199254740993}},"required":["record_id"]}`),
+	}}}
+	h.Run(func() {
+		changed, err := injectIntentSchema(req)
+		if err != nil || !changed {
+			t.Fatalf("injectIntentSchema changed=%v err=%v", changed, err)
+		}
+	})
+	got := string(req.Tools[0].ParametersJson)
+	if !strings.Contains(got, `"const":9007199254740993`) {
+		t.Fatalf("large integer schema constraint changed: %s", got)
+	}
+	if strings.Contains(got, `9007199254740992`) {
+		t.Fatalf("schema constraint was rounded through float64: %s", got)
+	}
+}
+
 // ==========================================================================
 // Hook-level matrix (sdktest; the plugin registers in init(), so every
 // dispatch exercises the real hook).
@@ -736,6 +757,7 @@ func TestStreamSemanticHandlingTable(t *testing.T) {
 		{"native number i", `{"path":"server.go","i":5}`, `{"path":"server.go","i":5}`, false, "sig", true},
 		{"native null i", `{"path":"server.go","i":null}`, `{"path":"server.go","i":null}`, false, "sig", true},
 		{"injected i", `{"path":"server.go","i":"find the bug"}`, `{"path":"server.go"}`, true, "", false},
+		{"large integer beside injected i", `{"record_id":9007199254740993,"i":"find the record"}`, `{"record_id":9007199254740993}`, true, "", false},
 		{"whitespace prefix, injected i", `  {"path":"server.go","i":"find the bug"}`, `{"path":"server.go"}`, true, "", false},
 		{"null", `null`, `null`, false, "sig", false},
 		{"array", `[1,2]`, `[1,2]`, false, "sig", false},
@@ -820,6 +842,21 @@ func TestRehydrationUnrepresentableArgumentsNoPanic(t *testing.T) {
 	}
 	if !strings.Contains(string(sdk.ToolCalls(res.Request.Messages[2])[0].Arguments), `"i"`) {
 		t.Fatalf("an empty object must be filled: %s", sdk.ToolCalls(res.Request.Messages[2])[0].Arguments)
+	}
+}
+
+func TestRehydrationPreservesLargeIntegerArguments(t *testing.T) {
+	h := newHarness(t)
+	res := h.BeforeRequest(reqWith(`{"record_id":9007199254740993}`))
+	if res.Err != nil || res.Request == nil {
+		t.Fatalf("expected replacement, err=%v", res.Err)
+	}
+	args := string(sdk.ToolCalls(res.Request.Messages[2])[0].Arguments)
+	if !strings.Contains(args, `"record_id":9007199254740993`) {
+		t.Fatalf("large history argument changed during intent fill: %s", args)
+	}
+	if strings.Contains(args, `9007199254740992`) {
+		t.Fatalf("history argument was rounded through float64: %s", args)
 	}
 }
 
