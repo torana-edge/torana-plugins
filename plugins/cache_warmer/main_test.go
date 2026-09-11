@@ -624,7 +624,7 @@ func TestTickEntryValidationStopsWithZeroSends(t *testing.T) {
 	}
 }
 
-func TestTickExtendedThinkingStopsBeforePricingOrReservation(t *testing.T) {
+func TestTickManualThinkingStopsBeforePricingOrReservation(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(warmerCfg)
 	h.StubHostCall("env.cache_policy", pricingStub())
@@ -653,11 +653,81 @@ func TestTickExtendedThinkingStopsBeforePricingOrReservation(t *testing.T) {
 		t.Fatalf("unsupported replay sent %d times", n)
 	}
 	raw, ok := h.State("warm/conv-1")
-	if !ok || !strings.Contains(raw, `"extended thinking is not warmable"`) {
+	if !ok || !strings.Contains(raw, `"manual thinking budget is not warmable"`) {
 		t.Fatalf("unsupported replay must stop visibly: %s", raw)
 	}
 	if strings.Contains(raw, `"attempt_millis"`) {
 		t.Fatalf("unsupported replay must stop before reservation: %s", raw)
+	}
+}
+
+func TestThinkingReplayClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want thinkingReplayStatus
+	}{
+		{"absent", `{}`, thinkingReplaySafe},
+		{"disabled", `{"thinking":{"type":"disabled"}}`, thinkingReplaySafe},
+		{"adaptive", `{"thinking":{"type":"adaptive"}}`, thinkingReplaySafe},
+		{"manual enabled", `{"thinking":{"type":"enabled","budget_tokens":1024}}`, thinkingReplayManualBudget},
+		{"unknown arm", `{"thinking":{"type":"future"}}`, thinkingReplayUnsupported},
+		{"unknown member", `{"thinking":{"type":"adaptive","budget_hint":1}}`, thinkingReplayUnsupported},
+		{"missing manual budget", `{"thinking":{"type":"enabled"}}`, thinkingReplayUnsupported},
+		{"null", `{"thinking":null}`, thinkingReplayUnsupported},
+		{"malformed envelope", `{"thinking":`, thinkingReplayUnsupported},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &pbv1.ChatRequest{ProviderExtensionsJson: []byte(tc.raw)}
+			if got := classifyThinkingReplay(req); got != tc.want {
+				t.Fatalf("classifyThinkingReplay()=%d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNonManualThinkingRemainsWarmable(t *testing.T) {
+	for _, kind := range []string{"disabled", "adaptive"} {
+		t.Run(kind+" request path", func(t *testing.T) {
+			h := newHarness(t)
+			h.SetConfig(warmerCfg)
+			h.SetNow(100_000)
+			req := warmRequest()
+			req.ProviderExtensionsJson = []byte(`{"thinking":{"type":"` + kind + `"}}`)
+			req.ToranaMetaJson = []byte(`{"_provider":"anthropic","_conversation_id":"conv-1","_path":"/v1/messages"}`)
+			res := h.BeforeRequest(req)
+			if res.Err != nil || !res.PassedThrough {
+				t.Fatalf("valid %s thinking was rejected: %v", kind, res.Err)
+			}
+			if _, ok := h.State("warm/conv-1"); !ok {
+				t.Fatalf("valid %s thinking request was not recorded", kind)
+			}
+		})
+
+		t.Run(kind+" tick", func(t *testing.T) {
+			h := newHarness(t)
+			h.SetConfig(warmerCfg)
+			h.StubHostCall("env.cache_policy", pricingStub())
+			h.StubHostCall("torana_send_request", hitStub())
+			replay := warmRequest()
+			replay.ProviderExtensionsJson = []byte(`{"thinking":{"type":"` + kind + `"}}`)
+			encoded, err := sdk.EncodeRequest(replay)
+			if err != nil {
+				t.Fatal(err)
+			}
+			prefix, _, err := pbv1.RequestObservablePrefix(replay)
+			if err != nil {
+				t.Fatal(err)
+			}
+			entry := warmEntrySeed(t)
+			entry.PrefixPB = encoded
+			entry.PrefixFingerprint = prefixFingerprint(prefix)
+			seedEntry(t, h, entry)
+			tickAt(h, 300_000)
+			if n := countCommand(h, "torana_send_request"); n != 1 {
+				t.Fatalf("valid %s thinking sends=%d, want 1", kind, n)
+			}
+		})
 	}
 }
 
@@ -1035,8 +1105,8 @@ func TestRequestPathSanitizedReplayAndFingerprint(t *testing.T) {
 
 // TestRequestPathExactCallMultisets — for an opted-in malformed/out-of-domain
 // request, an opted-in no-marker request, an opted-in terminal-suffix request,
-// and a request whose extended-thinking configuration cannot survive a
-// one-token replay: EXACTLY ONE env.plugin_config call (torana_meta_json is local),
+// plus manual-budget and unknown thinking configurations that cannot safely
+// survive a one-token replay: EXACTLY ONE env.plugin_config call (torana_meta_json is local),
 // nothing else, no clock/state, and exact input preservation.
 func TestRequestPathExactCallMultisets(t *testing.T) {
 	outOfDomain := uReq()
@@ -1051,8 +1121,10 @@ func TestRequestPathExactCallMultisets(t *testing.T) {
 		},
 	}
 	terminalSuffix.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
-	extendedThinking := uReq()
-	extendedThinking.ProviderExtensionsJson = []byte(`{"thinking":{"type":"enabled","budget_tokens":1024}}`)
+	manualThinking := uReq()
+	manualThinking.ProviderExtensionsJson = []byte(`{"thinking":{"type":"enabled","budget_tokens":1024}}`)
+	unknownThinking := uReq()
+	unknownThinking.ProviderExtensionsJson = []byte(`{"thinking":{"type":"future"}}`)
 	for _, row := range []struct {
 		name string
 		req  *pbv1.ChatRequest
@@ -1060,7 +1132,8 @@ func TestRequestPathExactCallMultisets(t *testing.T) {
 		{"out of domain", outOfDomain},
 		{"no marker", noMarker},
 		{"terminal suffix", terminalSuffix},
-		{"extended thinking", extendedThinking},
+		{"manual thinking budget", manualThinking},
+		{"unknown thinking arm", unknownThinking},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			h := newHarness(t)
