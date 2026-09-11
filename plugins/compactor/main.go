@@ -1,10 +1,10 @@
 // The compactor shrinks large tool results by delegating extraction to a
 // bound summarizer model service, guided by a cached intent when one
 // is available or by a bounded deterministic signal derived from the request
-// and tool call otherwise. Compacted results are cached by
-// tool_call_id, so later turns replaying the same result reuse the compact
-// form for free. Cache identity includes the original content, tool arguments,
-// intent, and policy version so reused call IDs cannot return stale summaries.
+// and tool call otherwise. Compacted results are cached by the original
+// content, tool arguments, intent, and policy version, so equivalent results
+// can reuse the compact form without letting reused call IDs return stale
+// summaries.
 //
 // Running it AFTER the intent plugin improves relevance but is not required.
 // It is an alternative to keyword_compactor (deterministic, local, no model
