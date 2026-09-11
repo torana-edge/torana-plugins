@@ -24,7 +24,7 @@
     },
     {
       "name": "env.cache_set",
-      "description": "Cache clean verdicts by tool_call_id"
+      "description": "Cache clean verdicts by tool-result and scan-policy identity"
     },
     {
       "name": "env.model_complete",
