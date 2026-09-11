@@ -173,6 +173,56 @@ func isAdvisory(err error) bool {
 	return false
 }
 
+type thinkingReplayStatus uint8
+
+const (
+	thinkingReplaySafe thinkingReplayStatus = iota
+	thinkingReplayManualBudget
+	thinkingReplayUnsupported
+)
+
+// classifyThinkingReplay parses the closed provider-level thinking union that
+// affects the warmer's one-token output limit. Manual enabled thinking retains
+// budget_tokens and is invalid when max_tokens becomes one. Disabled and
+// adaptive thinking carry no manual budget and remain valid. Unknown or
+// malformed arms fail closed rather than being guessed.
+func classifyThinkingReplay(req *pbv1.ChatRequest) thinkingReplayStatus {
+	if len(req.ProviderExtensionsJson) == 0 {
+		return thinkingReplaySafe
+	}
+	var extensions map[string]json.RawMessage
+	if err := json.Unmarshal(req.ProviderExtensionsJson, &extensions); err != nil {
+		return thinkingReplayUnsupported
+	}
+	raw, ok := extensions["thinking"]
+	if !ok {
+		return thinkingReplaySafe
+	}
+	var cfg struct {
+		Type         string `json:"type"`
+		BudgetTokens *int64 `json:"budget_tokens"`
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&cfg); err != nil {
+		return thinkingReplayUnsupported
+	}
+	switch cfg.Type {
+	case "enabled":
+		if cfg.BudgetTokens == nil || *cfg.BudgetTokens <= 0 {
+			return thinkingReplayUnsupported
+		}
+		return thinkingReplayManualBudget
+	case "disabled", "adaptive":
+		if cfg.BudgetTokens != nil {
+			return thinkingReplayUnsupported
+		}
+		return thinkingReplaySafe
+	default:
+		return thinkingReplayUnsupported
+	}
+}
+
 func init() {
 	// Request path: remember the cached prefix of any conversation the operator
 	// opted in. This hook only observes and stores — it never modifies the
@@ -195,6 +245,9 @@ func init() {
 			return sdk.PassRequest(), nil
 		}
 		if !hasBreakpoint {
+			return sdk.PassRequest(), nil
+		}
+		if classifyThinkingReplay(req) != thinkingReplaySafe {
 			return sdk.PassRequest(), nil
 		}
 
@@ -407,6 +460,16 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 		persistStop(key, entry)
 		return false, fmt.Sprintf("%s: stopped, prefix ends on an unanswered tool call", short(entry.ConversationID)), nil
 	}
+	switch classifyThinkingReplay(req) {
+	case thinkingReplayManualBudget:
+		entry.Stopped = "manual thinking budget is not warmable"
+		persistStop(key, entry)
+		return false, fmt.Sprintf("%s: stopped, manual thinking budget is not warmable", short(entry.ConversationID)), nil
+	case thinkingReplayUnsupported:
+		entry.Stopped = "unsupported thinking configuration"
+		persistStop(key, entry)
+		return false, fmt.Sprintf("%s: stopped, unsupported thinking configuration", short(entry.ConversationID)), nil
+	}
 
 	// No-spend gates next: nothing durable happens until every one passes.
 	policy, refusal, err := sdk.GetPromptCachePolicy("warm-cache")
@@ -446,7 +509,7 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 		persistStop(key, entry)
 		return false, fmt.Sprintf("%s: stopped, deadline reached", short(entry.ConversationID)), nil
 	}
-	if breakEvenRefreshes > 0 && entry.RefreshesSpent >= breakEvenRefreshes {
+	if entry.RefreshesSpent >= breakEvenRefreshes {
 		entry.Stopped = "break-even reached"
 		persistStop(key, entry)
 		return false, fmt.Sprintf("%s: stopped after %d refreshes, past break-even",
