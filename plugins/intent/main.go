@@ -28,9 +28,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
 	"sync"
 
@@ -156,11 +158,11 @@ func handleToolCall(call sdk.ToolCall) (sdk.ToolCallAction, error) {
 	if call.InvocationKind != pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FUNCTION {
 		return sdk.PassToolCall(), nil
 	}
-	// Parse regardless of leading whitespace (json.Unmarshal accepts it);
+	// Parse regardless of leading whitespace (the JSON decoder accepts it);
 	// invalid, non-object, and "null" arguments (args stays nil) are not
 	// representable and pass the exact bytes.
-	var args map[string]any
-	if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil || args == nil {
+	args, err := decodeJSONObject([]byte(call.Arguments))
+	if err != nil || args == nil {
 		return sdk.PassToolCall(), nil
 	}
 
@@ -280,11 +282,13 @@ func rehydrateHistoryIntents(req *pbv1.ChatRequest) (bool, error) {
 			var args map[string]any
 			if len(tc.Arguments) == 0 {
 				args = map[string]any{}
-			} else if json.Unmarshal(tc.Arguments, &args) != nil || args == nil {
+			} else if decoded, err := decodeJSONObject(tc.Arguments); err != nil || decoded == nil {
 				// Unrepresentable history arguments: null (which decodes as a
 				// nil map), arrays, scalars, malformed JSON. Leave them
 				// unchanged — assigning into a nil map would panic.
 				continue
+			} else {
+				args = decoded
 			}
 			if _, ok := args[intentField]; ok {
 				present++
@@ -409,6 +413,26 @@ func contentKey(name string, args map[string]any) string {
 	return sdk.ContentAddressedCacheKey("intent/content/v1", string(b))
 }
 
+// decodeJSONObject preserves every JSON number lexeme as json.Number. These
+// objects are later re-encoded after adding or removing the intent field, so a
+// float64 decode would silently change large integer tool arguments and schema
+// constraints. It also rejects trailing documents like json.Unmarshal does.
+func decodeJSONObject(raw []byte) (map[string]any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var out map[string]any
+	if err := decoder.Decode(&out); err != nil {
+		return nil, err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("trailing JSON document")
+		}
+		return nil, err
+	}
+	return out, nil
+}
+
 // ==========================================================================
 // Schema injection
 // ==========================================================================
@@ -419,8 +443,8 @@ func injectIntentSchema(req *pbv1.ChatRequest) (bool, error) {
 		if len(tool.ParametersJson) == 0 {
 			continue
 		}
-		var params map[string]any
-		if err := json.Unmarshal(tool.ParametersJson, &params); err != nil {
+		params, err := decodeJSONObject(tool.ParametersJson)
+		if err != nil {
 			continue
 		}
 		if params["type"] == nil {
