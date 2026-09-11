@@ -480,6 +480,31 @@ func TestTickNoSpendGates(t *testing.T) {
 		t.Fatalf("break-even reached must not spend, got %d", n)
 	}
 
+	// A known zero refresh budget is exhausted before the first send. Equal
+	// read/write prices produce floor(write/read-1) == 0, which is distinct
+	// from unknown economics.
+	hZero := newHarness(t)
+	hZero.SetConfig(warmerCfg)
+	hZero.StubHostCall("env.cache_policy", func(string) (string, error) {
+		read, write, warm := 1.0, 1.0, uint32(240)
+		raw, _ := proto.Marshal(&pbv1.PromptCachePolicy{
+			CacheReadUsdPerMtok: &read, CacheWriteUsdPerMtok: &write,
+			RefreshOnRead: true, WarmIntervalSeconds: &warm,
+			Tiers: []*pbv1.PromptCacheTier{{TtlSeconds: 300, MarkerJson: []byte(`{}`)}},
+		})
+		return sdktest.HostResultValue(raw), nil
+	})
+	hZero.StubHostCall("torana_send_request", hitStub())
+	seedEntry(t, hZero, warmEntrySeed(t))
+	tickAt(hZero, 300_000)
+	if n := countCommand(hZero, "torana_send_request"); n != 0 {
+		t.Fatalf("zero break-even budget must not spend, got %d", n)
+	}
+	rawZero, _ := hZero.State("warm/conv-1")
+	if !strings.Contains(rawZero, `"break-even reached"`) {
+		t.Fatalf("zero break-even budget must stop visibly: %s", rawZero)
+	}
+
 	// Not due yet.
 	h4 := newHarness(t)
 	h4.SetConfig(warmerCfg)
@@ -596,6 +621,43 @@ func TestTickEntryValidationStopsWithZeroSends(t *testing.T) {
 				t.Fatalf("an invalid entry must never reserve: %s", setArgs.Value)
 			}
 		})
+	}
+}
+
+func TestTickExtendedThinkingStopsBeforePricingOrReservation(t *testing.T) {
+	h := newHarness(t)
+	h.SetConfig(warmerCfg)
+	h.StubHostCall("env.cache_policy", pricingStub())
+	h.StubHostCall("torana_send_request", hitStub())
+
+	replay := warmRequest()
+	replay.ProviderExtensionsJson = []byte(`{"thinking":{"type":"enabled","budget_tokens":1024}}`)
+	encoded, err := sdk.EncodeRequest(replay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix, _, err := pbv1.RequestObservablePrefix(replay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := warmEntrySeed(t)
+	entry.PrefixPB = encoded
+	entry.PrefixFingerprint = prefixFingerprint(prefix)
+	seedEntry(t, h, entry)
+	tickAt(h, 300_000)
+
+	if n := countCommand(h, "env.cache_policy"); n != 0 {
+		t.Fatalf("unsupported replay reached pricing %d times", n)
+	}
+	if n := countCommand(h, "torana_send_request"); n != 0 {
+		t.Fatalf("unsupported replay sent %d times", n)
+	}
+	raw, ok := h.State("warm/conv-1")
+	if !ok || !strings.Contains(raw, `"extended thinking is not warmable"`) {
+		t.Fatalf("unsupported replay must stop visibly: %s", raw)
+	}
+	if strings.Contains(raw, `"attempt_millis"`) {
+		t.Fatalf("unsupported replay must stop before reservation: %s", raw)
 	}
 }
 
@@ -972,8 +1034,9 @@ func TestRequestPathSanitizedReplayAndFingerprint(t *testing.T) {
 }
 
 // TestRequestPathExactCallMultisets — for an opted-in malformed/out-of-domain
-// request, an opted-in no-marker request, and an opted-in terminal-suffix
-// request: EXACTLY ONE env.plugin_config call (torana_meta_json is local),
+// request, an opted-in no-marker request, an opted-in terminal-suffix request,
+// and a request whose extended-thinking configuration cannot survive a
+// one-token replay: EXACTLY ONE env.plugin_config call (torana_meta_json is local),
 // nothing else, no clock/state, and exact input preservation.
 func TestRequestPathExactCallMultisets(t *testing.T) {
 	outOfDomain := uReq()
@@ -988,6 +1051,8 @@ func TestRequestPathExactCallMultisets(t *testing.T) {
 		},
 	}
 	terminalSuffix.ToranaMetaJson = []byte(`{"_provider":"p","_conversation_id":"conv-1","_path":"/x"}`)
+	extendedThinking := uReq()
+	extendedThinking.ProviderExtensionsJson = []byte(`{"thinking":{"type":"enabled","budget_tokens":1024}}`)
 	for _, row := range []struct {
 		name string
 		req  *pbv1.ChatRequest
@@ -995,6 +1060,7 @@ func TestRequestPathExactCallMultisets(t *testing.T) {
 		{"out of domain", outOfDomain},
 		{"no marker", noMarker},
 		{"terminal suffix", terminalSuffix},
+		{"extended thinking", extendedThinking},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			h := newHarness(t)

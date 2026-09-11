@@ -173,6 +173,23 @@ func isAdvisory(err error) bool {
 	return false
 }
 
+// hasThinkingConfig reports whether replaying the request with the warmer's
+// one-token output limit would retain a provider-level thinking configuration.
+// Extended-thinking APIs require a budget below max_tokens, so such a replay
+// cannot be made valid without changing either the caller's semantics or the
+// warmer's deliberately minimal spend. Decline it instead.
+func hasThinkingConfig(req *pbv1.ChatRequest) bool {
+	if len(req.ProviderExtensionsJson) == 0 {
+		return false
+	}
+	var extensions map[string]json.RawMessage
+	if err := json.Unmarshal(req.ProviderExtensionsJson, &extensions); err != nil {
+		return false // request validation owns malformed extension JSON
+	}
+	raw, ok := extensions["thinking"]
+	return ok && strings.TrimSpace(string(raw)) != "null"
+}
+
 func init() {
 	// Request path: remember the cached prefix of any conversation the operator
 	// opted in. This hook only observes and stores — it never modifies the
@@ -195,6 +212,9 @@ func init() {
 			return sdk.PassRequest(), nil
 		}
 		if !hasBreakpoint {
+			return sdk.PassRequest(), nil
+		}
+		if hasThinkingConfig(req) {
 			return sdk.PassRequest(), nil
 		}
 
@@ -407,6 +427,11 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 		persistStop(key, entry)
 		return false, fmt.Sprintf("%s: stopped, prefix ends on an unanswered tool call", short(entry.ConversationID)), nil
 	}
+	if hasThinkingConfig(req) {
+		entry.Stopped = "extended thinking is not warmable"
+		persistStop(key, entry)
+		return false, fmt.Sprintf("%s: stopped, extended thinking is not warmable", short(entry.ConversationID)), nil
+	}
 
 	// No-spend gates next: nothing durable happens until every one passes.
 	policy, refusal, err := sdk.GetPromptCachePolicy("warm-cache")
@@ -446,7 +471,7 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 		persistStop(key, entry)
 		return false, fmt.Sprintf("%s: stopped, deadline reached", short(entry.ConversationID)), nil
 	}
-	if breakEvenRefreshes > 0 && entry.RefreshesSpent >= breakEvenRefreshes {
+	if entry.RefreshesSpent >= breakEvenRefreshes {
 		entry.Stopped = "break-even reached"
 		persistStop(key, entry)
 		return false, fmt.Sprintf("%s: stopped after %d refreshes, past break-even",
