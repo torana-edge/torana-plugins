@@ -125,7 +125,7 @@ func decodeRegistry(data []byte) (*registry, error) {
 		return nil, fmt.Errorf("registry envelope: missing required member %q", "tools")
 	}
 	// Duplicate tool names are duplicate object keys and were already rejected
-	// by rejectDuplicateKeys on the raw tools object.
+	// by strictjson's recursive duplicate rejection on the raw tools object.
 	var toolsMap map[string]json.RawMessage
 	if err := json.Unmarshal(toolsRaw, &toolsMap); err != nil {
 		return nil, fmt.Errorf("registry envelope: tools must be an object")
@@ -659,7 +659,7 @@ func reverseTranslate(toolName string, argsJSON string, paths []mutationPath) (s
 	if len(paths) == 0 {
 		return argsJSON, false, nil
 	}
-	// Lossless decode: validateJSONText (UTF-8 + surrogate invariants),
+	// Lossless decode: strictjson's text validation (UTF-8 + surrogate invariants),
 	// duplicate-key rejection, UseNumber (number lexemes survive), and an
 	// exact one-value check. Empty bytes, null, arrays, scalars, malformed
 	// JSON, and textually invalid input all error here.

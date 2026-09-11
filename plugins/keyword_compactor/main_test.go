@@ -950,7 +950,7 @@ func TestSchemaDefaultsMatchRuntimeDefaults(t *testing.T) {
 func TestDeterminismOverIdenticalRequests(t *testing.T) {
 	h1 := newHarness(t)
 	h1.SetConfig(keywordCfg)
-	h1.SeedCache("intent:call_1", "find the bug in server")
+	h1.SeedSharedCache("intent:call_1", "find the bug in server")
 	r1 := h1.BeforeRequest(bigToolRequest(keywordContent()))
 	h2 := newHarness(t)
 	h2.SetConfig(keywordCfg)
@@ -958,6 +958,19 @@ func TestDeterminismOverIdenticalRequests(t *testing.T) {
 	r2 := h2.BeforeRequest(bigToolRequest(keywordContent()))
 	if r1.Err != nil || r2.Err != nil {
 		t.Fatalf("dispatch errors: %v %v", r1.Err, r2.Err)
+	}
+	// Identical BYTES are only meaningful if the two dispatches took the same
+	// path. They did not, once: one harness seeded the private cache and the
+	// other the shared one, so request 1 ran the missing-intent fallback while
+	// request 2 got a cache hit — and the outputs coincided for this fixture,
+	// leaving the test green while comparing two different things.
+	//
+	// torana_intent_missing_total is emitted exactly when the intent was not
+	// found, so neither side may have it.
+	if hasMetric(h1, "torana_intent_missing_total") || hasMetric(h2, "torana_intent_missing_total") {
+		t.Fatalf("a dispatch fell back to a derived intent, so the two are not the same "+
+			"path: h1 missing=%v h2 missing=%v",
+			hasMetric(h1, "torana_intent_missing_total"), hasMetric(h2, "torana_intent_missing_total"))
 	}
 	b1, _ := json.Marshal(r1.Request)
 	b2, _ := json.Marshal(r2.Request)

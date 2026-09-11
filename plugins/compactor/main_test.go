@@ -638,8 +638,9 @@ func TestIntentMissUsesBoundedFallback(t *testing.T) {
 			h.SetConfig(modelConfig)
 			h.SeedSharedCache("intent:call_1", "") // empty value, present key
 			if name == "absent" {
-				// Truly absent: the key is removed again (SeedCache with the
-				// empty string stores presence; use a harness with no seed).
+				// Truly absent: the key is removed again (SeedSharedCache
+				// with the empty string stores PRESENCE; a harness with no
+				// seed at all is the only way to get a real miss).
 				h = newHarness(t)
 				h.SetConfig(modelConfig)
 			}
