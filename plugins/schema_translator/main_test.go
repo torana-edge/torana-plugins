@@ -831,15 +831,13 @@ func TestDuplicateToolNamesAreAllUntranslated(t *testing.T) {
 // Stream hook (assembler terminal-safety matrix)
 // ==========================================================================
 
-// streamBlock drives one assembled block through a FRESH request. Tests that
-// also run the request hook must use streamBlockOn with their own request: the
-// mutations envelope travels as request metadata, which sdktest scopes per
-// request exactly as the host does.
-func streamBlock(t *testing.T, h *sdktest.Harness, index int32, id, name, sig, args string) sdktest.StreamResult {
-	t.Helper()
-	return streamBlockOn(t, h.NewRequest(), index, id, name, sig, args)
-}
-
+// streamBlockOn drives one assembled block (start/delta/stop) through a
+// CALLER-SUPPLIED request.
+//
+// The request is the caller's on purpose: a tool call is assembled across
+// chunks, and every test here also runs the request hook, whose mutations
+// envelope reaches the stream hook as request metadata. Both are request
+// scoped, exactly as in the host, so all of it has to be one request.
 func streamBlockOn(t *testing.T, r *sdktest.Request, index int32, id, name, sig, args string) sdktest.StreamResult {
 	t.Helper()
 	r.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
