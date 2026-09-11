@@ -37,12 +37,17 @@ func carrierMarkerAt(t *testing.T, req *pbv1.ChatRequest, msg, block int) []byte
 	return cb.MarkerJson
 }
 
-// keyFor is a thin test wrapper over the PRODUCTION decisionKey helper.
+// keyFor is a thin test wrapper over the production prefix and provider/policy
+// scoping helpers, using the default fixture binding.
 func keyFor(t *testing.T, req *pbv1.ChatRequest) string {
 	t.Helper()
-	k, _, err := decisionKey(req)
+	prefix, _, err := decisionKey(req)
 	if err != nil {
 		t.Fatalf("decisionKey: %v", err)
+	}
+	k, err := scopedDecisionKey(prefix, "anthropic", testPolicy())
+	if err != nil {
+		t.Fatalf("scopedDecisionKey: %v", err)
 	}
 	return k
 }
@@ -158,6 +163,34 @@ func TestDecisionKeySensitivity(t *testing.T) {
 	})
 }
 
+func TestDecisionKeyIncludesProviderAndPolicy(t *testing.T) {
+	prefix, _, err := decisionKey(baseRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := testPolicy()
+	base, err := scopedDecisionKey(prefix, "anthropic-a", policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherProvider, err := scopedDecisionKey(prefix, "anthropic-b", policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if otherProvider == base {
+		t.Fatal("provider identity did not move the sticky decision key")
+	}
+	changedPolicy := proto.Clone(policy).(*pbv1.PromptCachePolicy)
+	changedPolicy.Tiers[1].MarkerJson = []byte(`{"type":"ephemeral","ttl":"2h"}`)
+	otherPolicy, err := scopedDecisionKey(prefix, "anthropic-a", changedPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if otherPolicy == base {
+		t.Fatal("policy identity did not move the sticky decision key")
+	}
+}
+
 // ==========================================================================
 // Hook-level matrix (sdktest)
 // ==========================================================================
@@ -169,17 +202,25 @@ func newHarness(t *testing.T) *sdktest.Harness {
 	return sdktest.New(t)
 }
 
+func testPolicy() *pbv1.PromptCachePolicy {
+	read, write, shortMultiplier, longMultiplier := 0.1, 1.2, 1.25, 2.0
+	return &pbv1.PromptCachePolicy{
+		CacheReadUsdPerMtok: &read, CacheWriteUsdPerMtok: &write, RefreshOnRead: true,
+		Tiers: []*pbv1.PromptCacheTier{
+			{TtlSeconds: 300, WriteMultiplier: &shortMultiplier, MarkerJson: []byte(`{"type":"ephemeral"}`)},
+			{TtlSeconds: 3600, WriteMultiplier: &longMultiplier, MarkerJson: []byte(`{"type":"ephemeral","ttl":"1h"}`)},
+		},
+	}
+}
+
 // pricingStub returns a two-tier pricing envelope.
 func pricingStub() func(string) (string, error) {
+	return policyStub(testPolicy())
+}
+
+func policyStub(policy *pbv1.PromptCachePolicy) func(string) (string, error) {
 	return func(string) (string, error) {
-		read, write, shortMultiplier, longMultiplier := 0.1, 1.2, 1.25, 2.0
-		raw, _ := proto.Marshal(&pbv1.PromptCachePolicy{
-			CacheReadUsdPerMtok: &read, CacheWriteUsdPerMtok: &write, RefreshOnRead: true,
-			Tiers: []*pbv1.PromptCacheTier{
-				{TtlSeconds: 300, WriteMultiplier: &shortMultiplier, MarkerJson: []byte(`{"type":"ephemeral"}`)},
-				{TtlSeconds: 3600, WriteMultiplier: &longMultiplier, MarkerJson: []byte(`{"type":"ephemeral","ttl":"1h"}`)},
-			},
-		})
+		raw, _ := proto.Marshal(policy)
 		return sdktest.HostResultValue(raw), nil
 	}
 }
@@ -259,6 +300,28 @@ func TestPricingAdvisoryDeclinesContractErrors(t *testing.T) {
 	}
 }
 
+func TestAutoModeDeclinesUnknownEconomicsBeforeState(t *testing.T) {
+	h := newHarness(t)
+	h.SetNow(1_000_000)
+	h.StubHostCall("env.cache_policy", func(string) (string, error) {
+		raw, _ := proto.Marshal(&pbv1.PromptCachePolicy{Tiers: []*pbv1.PromptCacheTier{
+			{TtlSeconds: 300, MarkerJson: []byte(`{"type":"ephemeral"}`)},
+			{TtlSeconds: 3600, MarkerJson: []byte(`{"type":"ephemeral","ttl":"1h"}`)},
+		}})
+		return sdktest.HostResultValue(raw), nil
+	})
+	res := h.BeforeRequest(reqWith(t, h))
+	if res.Err != nil || !res.PassedThrough {
+		t.Fatalf("unknown economics must pass unchanged, err=%v", res.Err)
+	}
+	if n := countCommand(h, "env.state_get"); n != 0 {
+		t.Fatalf("unknown economics reached state %d times", n)
+	}
+	if n := countCommand(h, "env.state_set"); n != 0 {
+		t.Fatalf("unknown economics wrote state %d times", n)
+	}
+}
+
 // TestStoredDecisionReappliedByteIdentically — an unexpired stored decision
 // re-applies the marker verbatim with no new decision write and no counter;
 // two fresh clones produce byte-identical output.
@@ -300,6 +363,75 @@ func TestStoredDecisionReappliedByteIdentically(t *testing.T) {
 	b2, _ := json.Marshal(second.Request)
 	if string(b1) != string(b2) {
 		t.Fatal("stored-decision reapplication differs between identical requests")
+	}
+}
+
+func TestStoredDecisionMarkerMustExistInCurrentPolicy(t *testing.T) {
+	h := newHarness(t)
+	h.StubHostCall("env.cache_policy", pricingStub())
+	h.SetNow(1_000_000)
+	req := reqWith(t, h)
+	h.SeedState("decision/"+keyFor(t, req), mustJSON(t, decision{
+		Marker:          map[string]any{"type": "ephemeral", "ttl": "foreign"},
+		TierTTL:         3600,
+		DecidedAtMillis: 900_000,
+	}))
+	res := h.BeforeRequest(req)
+	if res.Err != nil || !res.PassedThrough {
+		t.Fatalf("foreign stored marker must be discarded without mutation, err=%v", res.Err)
+	}
+	if n := countCommand(h, "env.state_delete"); n != 1 {
+		t.Fatalf("foreign stored marker deletes=%d, want 1", n)
+	}
+	if strings.Contains(string(carrierMarkerAt(t, req, 1, 1)), "foreign") {
+		t.Fatal("foreign marker was applied")
+	}
+}
+
+func TestStickyDecisionDoesNotCrossProviderOrPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		secondMeta   string
+		secondPolicy func() *pbv1.PromptCachePolicy
+	}{
+		{
+			name:         "provider change",
+			secondMeta:   `{"_provider":"anthropic-b","_conversation_id":"conv-1"}`,
+			secondPolicy: testPolicy,
+		},
+		{
+			name:       "policy change",
+			secondMeta: `{"_provider":"anthropic","_conversation_id":"conv-1"}`,
+			secondPolicy: func() *pbv1.PromptCachePolicy {
+				policy := testPolicy()
+				policy.WarmIntervalSeconds = proto.Uint32(120)
+				return policy
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.SetNow(1_000_000)
+			h.SetConfig(`{"mode":"long"}`)
+			h.StubHostCall("env.cache_policy", policyStub(testPolicy()))
+			first := reqWith(t, h)
+			res := h.BeforeRequest(first)
+			if res.Err != nil || res.Request == nil {
+				t.Fatalf("first long-tier decision failed: %v", res.Err)
+			}
+
+			h.SetConfig(`{"mode":"short"}`)
+			h.StubHostCall("env.cache_policy", policyStub(tc.secondPolicy()))
+			second := baseRequest()
+			second.ToranaMetaJson = []byte(tc.secondMeta)
+			res = h.BeforeRequest(second)
+			if res.Err != nil || !res.PassedThrough {
+				t.Fatalf("foreign sticky decision crossed scope: err=%v", res.Err)
+			}
+			if strings.Contains(string(carrierMarkerAt(t, second, 1, 1)), `"ttl"`) {
+				t.Fatal("foreign long-tier marker was applied to the new scope")
+			}
+		})
 	}
 }
 
@@ -834,11 +966,11 @@ func TestCarrierHookRows(t *testing.T) {
 			h := newHarness(t)
 			h.StubHostCall("env.cache_policy", pricingStub())
 			h.SetNow(1_000_000)
-			key, has, err := decisionKey(row.req)
+			_, has, err := decisionKey(row.req)
 			if err != nil || !has {
 				t.Fatalf("decisionKey: err=%v has=%v, want a marker-present key", err, has)
 			}
-			h.SeedState("decision/"+key, mustJSON(t, decision{
+			h.SeedState("decision/"+keyFor(t, row.req), mustJSON(t, decision{
 				Marker:          marker,
 				TierTTL:         3600,
 				DecidedAtMillis: 900_000,
@@ -863,11 +995,11 @@ func TestCarrierHookRows(t *testing.T) {
 			// 4: seed the decision at the RESULT's key, then replay the
 			// result request — the byte-identical sticky reapplication is a
 			// pass-through (no replacement).
-			resultKey, _, err := decisionKey(res.Request)
+			_, _, err = decisionKey(res.Request)
 			if err != nil {
 				t.Fatalf("decisionKey(result): %v", err)
 			}
-			h.SeedState("decision/"+resultKey, mustJSON(t, decision{
+			h.SeedState("decision/"+keyFor(t, res.Request), mustJSON(t, decision{
 				Marker:          marker,
 				TierTTL:         3600,
 				DecidedAtMillis: 900_000,
