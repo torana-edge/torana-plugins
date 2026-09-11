@@ -109,6 +109,29 @@ func TestNestedOpenMapStillConverts(t *testing.T) {
 	}
 }
 
+func TestHybridObjectKeepsNamedFields(t *testing.T) {
+	got, mutations := translate(t, `{"type":"object","properties":{"config":{"type":"object","properties":{"label":{"type":"string"}},"required":["label"],"additionalProperties":{"type":"integer"}}}}`)
+	config := got["properties"].(map[string]any)["config"].(map[string]any)
+	if config["type"] != "object" {
+		t.Fatalf("hybrid object became %v", config["type"])
+	}
+	properties, ok := config["properties"].(map[string]any)
+	if !ok || properties["label"].(map[string]any)["type"] != "string" {
+		t.Fatalf("named field constraints were lost: %v", config)
+	}
+	required, ok := config["required"].([]any)
+	if !ok || len(required) != 1 || required[0] != "label" {
+		t.Fatalf("required named field was lost: %v", config)
+	}
+	additional, ok := config["additionalProperties"].(map[string]any)
+	if !ok || additional["type"] != "integer" {
+		t.Fatalf("free-form value schema was lost: %v", config)
+	}
+	if len(mutations) != 0 {
+		t.Fatalf("unsupported hybrid boundary recorded destructive mutations: %+v", mutations)
+	}
+}
+
 // TestNestedBareObjectStillConverts is the same guard for the bare-object case:
 // restricting rule 1 to the root must not disable the conversion below it.
 func TestNestedBareObjectStillConverts(t *testing.T) {
@@ -615,6 +638,84 @@ func TestBeforeRequestUnchangedStillPublishesEmptyEnvelope(t *testing.T) {
 	env := publishedEnvelope(t, h)
 	if env != `{"version":1,"tools":{}}` {
 		t.Fatalf("envelope should be empty but is: %s", env)
+	}
+}
+
+func TestBeforeRequestLeavesHybridObjectBoundaryUnchanged(t *testing.T) {
+	h := newHarness(t)
+	raw := `{"type":"object","properties":{"config":{"type":"object","properties":{"label":{"type":"string"}},"required":["label"],"additionalProperties":{"type":"integer"}}}}`
+	req := reqWithTools(raw)
+	res := h.BeforeRequest(req)
+	if res.Err != nil || res.Request == nil {
+		t.Fatalf("expected only the intentional root closure, err=%v", res.Err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(res.Request.Tools[0].ParametersJson, &got); err != nil {
+		t.Fatal(err)
+	}
+	config := got["properties"].(map[string]any)["config"].(map[string]any)
+	properties := config["properties"].(map[string]any)
+	additional := config["additionalProperties"].(map[string]any)
+	if config["type"] != "object" || properties["label"].(map[string]any)["type"] != "string" ||
+		additional["type"] != "integer" || !reflect.DeepEqual(config["required"], []any{"label"}) {
+		t.Fatalf("hybrid boundary changed: %v", config)
+	}
+	if env := publishedEnvelope(t, h); env != `{"version":1,"tools":{}}` {
+		t.Fatalf("hybrid schema published a reversal mutation: %s", env)
+	}
+}
+
+// TestHybridObjectRecursesIntoReversibleNamedChild proves that a hybrid
+// object remains an object while an independently reversible named child is
+// translated and recorded at its complete parent path. The stream hook must
+// reverse only that child without losing fixed or additional parent fields.
+func TestHybridObjectRecursesIntoReversibleNamedChild(t *testing.T) {
+	h := newHarness(t)
+	raw := `{"type":"object","properties":{"config":{"type":"object","properties":{"label":{"type":"string","minLength":2},"env":{"type":"object","additionalProperties":{"type":"string","minLength":1}}},"required":["label","env"],"minProperties":2,"additionalProperties":{"type":"integer","minimum":0}}}}`
+	res := h.BeforeRequest(reqWithTools(raw))
+	if res.Err != nil || res.Request == nil {
+		t.Fatalf("expected the named child to be translated, err=%v", res.Err)
+	}
+
+	var schema map[string]any
+	if err := json.Unmarshal(res.Request.Tools[0].ParametersJson, &schema); err != nil {
+		t.Fatal(err)
+	}
+	config := schema["properties"].(map[string]any)["config"].(map[string]any)
+	properties := config["properties"].(map[string]any)
+	label := properties["label"].(map[string]any)
+	env := properties["env"].(map[string]any)
+	additional := config["additionalProperties"].(map[string]any)
+	value := env["items"].(map[string]any)["properties"].(map[string]any)["value"].(map[string]any)
+	if config["type"] != "object" || env["type"] != "array" || label["minLength"] != float64(2) ||
+		value["minLength"] != float64(1) || additional["type"] != "integer" ||
+		additional["minimum"] != float64(0) || config["minProperties"] != float64(2) ||
+		!reflect.DeepEqual(config["required"], []any{"label", "env"}) {
+		t.Fatalf("hybrid parent or child constraints changed: %v", config)
+	}
+
+	const wantEnvelope = `{"version":1,"tools":{"read":[{"path":[{"field":"config","each":false},{"field":"env","each":false}]}]}}`
+	if got := publishedEnvelope(t, h); got != wantEnvelope {
+		t.Fatalf("registry envelope:\n  got  %s\n  want %s", got, wantEnvelope)
+	}
+
+	streamed := `{"config":{"label":"prod","env":[{"key":"REGION","value":"eu"}],"retries":3}}`
+	streamRes := streamBlock(t, h, 0, "call_1", "read", "sig-hybrid", streamed)
+	if streamRes.Err != nil {
+		t.Fatalf("stream reversal failed: %v", streamRes.Err)
+	}
+	var gotArgs, wantArgs map[string]any
+	if err := json.Unmarshal([]byte(emittedArgs(t, streamRes)), &gotArgs); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(`{"config":{"label":"prod","env":{"REGION":"eu"},"retries":3}}`), &wantArgs); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("hybrid reversal changed fixed/additional fields:\n  got  %v\n  want %v", gotArgs, wantArgs)
+	}
+	if sig := emittedSig(t, streamRes); sig != "" {
+		t.Fatalf("signature must be cleared when the child arguments change, got %q", sig)
 	}
 }
 

@@ -510,6 +510,16 @@ func translateSchema(schema map[string]any, path []pathStep, site schemaSite) []
 			continue
 		}
 		if hasAdditionalProperties(propSchema) {
+			if propHasProps {
+				// A hybrid object has fixed named fields AND a free-form tail.
+				// Flattening the whole object into homogeneous key/value rows
+				// would apply the additionalProperties value schema to the named
+				// fields and destroy their required/type constraints. Keep the
+				// hybrid boundary intact; nested named properties may still be
+				// translated independently when their own shapes are reversible.
+				mutations = append(mutations, translateSchema(propSchema, currentPath, siteProperty)...)
+				continue
+			}
 			valueSchema, _ := propSchema["additionalProperties"].(map[string]any)
 			convertToKVArray(propSchema, valueSchema)
 			mutations = append(mutations, mutationPath{steps: currentPath})
