@@ -12,7 +12,7 @@
       "required": ["match", "mode"],
       "properties": {
         "match": {"type": "string", "description": "Case-insensitive shell-style tool-name pattern."},
-        "mode": {"type": "string", "enum": ["exact", "deterministic", "source", "keyword"]},
+        "mode": {"type": "string", "enum": ["exact", "deterministic", "keyword"]},
         "first_pass": {"type": "boolean", "default": false},
         "rerun": {"type": "string"}
       }
