@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -287,8 +288,7 @@ func TestDefaultConfigIsInert(t *testing.T) {
 
 // TestEligibleMetricFiresBeforeModeGates — deterministic and keyword
 // candidates emit torana_compact_eligible_total BEFORE their consumption
-// gates, and source candidates emit it too (matched non-exact) before the
-// fail-closed skip.
+// gates.
 func TestEligibleMetricFiresBeforeModeGates(t *testing.T) {
 	// Deterministic without first_pass, no assistant consumption after the
 	// result -> gate skips, but eligible fired.
@@ -304,27 +304,16 @@ func TestEligibleMetricFiresBeforeModeGates(t *testing.T) {
 		t.Fatal("deterministic candidate must emit the eligible metric before the gate")
 	}
 
-	// Source mode: eligible fires, then fail-closed skip.
-	h2 := newHarness(t)
-	h2.SetConfig(`{"tool_policies":[{"match":"read*","mode":"source"}]}`)
-	res2 := h2.BeforeRequest(bigToolRequest(keywordContent()))
-	if res2.Err != nil || !res2.PassedThrough {
-		t.Fatalf("source mode must fail closed, err=%v", res2.Err)
-	}
-	if !hasMetric(h2, "torana_compact_eligible_total") {
-		t.Fatal("source candidate must emit the eligible metric")
-	}
-
 	// Keyword with no consumption -> gate skips after eligible.
-	h3 := newHarness(t)
-	h3.SetConfig(keywordCfg)
+	h2 := newHarness(t)
+	h2.SetConfig(keywordCfg)
 	req3 := bigToolRequest(keywordContent())
 	req3.Messages = req3.Messages[:5]
-	res3 := h3.BeforeRequest(req3)
+	res3 := h2.BeforeRequest(req3)
 	if res3.Err != nil || !res3.PassedThrough {
 		t.Fatalf("expected the keyword gate to skip, err=%v", res3.Err)
 	}
-	if !hasMetric(h3, "torana_compact_eligible_total") {
+	if !hasMetric(h2, "torana_compact_eligible_total") {
 		t.Fatal("keyword candidate must emit the eligible metric before the gate")
 	}
 }
@@ -931,6 +920,11 @@ func TestSchemaDefaultsMatchRuntimeDefaults(t *testing.T) {
 		Properties map[string]struct {
 			Default json.RawMessage `json:"default"`
 		} `json:"properties"`
+		Defs map[string]struct {
+			Properties map[string]struct {
+				Enum []string `json:"enum"`
+			} `json:"properties"`
+		} `json:"$defs"`
 	}
 	if err := json.Unmarshal(raw, &schema); err != nil {
 		t.Fatalf("parse schema.json: %v", err)
@@ -941,6 +935,9 @@ func TestSchemaDefaultsMatchRuntimeDefaults(t *testing.T) {
 	}
 	if string(prop.Default) != "[]" {
 		t.Fatalf("schema tool_policies default=%s, want []", prop.Default)
+	}
+	if got, want := schema.Defs["policy"].Properties["mode"].Enum, []string{"exact", "deterministic", "keyword"}; !slices.Equal(got, want) {
+		t.Fatalf("schema policy modes=%v, want %v", got, want)
 	}
 	rt := parseConfig("")
 	if len(rt.ToolPolicies) != 0 {

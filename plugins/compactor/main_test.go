@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -1286,6 +1287,11 @@ func TestSchemaDefaultsMatchRuntimeDefaults(t *testing.T) {
 		Properties map[string]struct {
 			Default json.RawMessage `json:"default"`
 		} `json:"properties"`
+		Defs map[string]struct {
+			Properties map[string]struct {
+				Enum []string `json:"enum"`
+			} `json:"properties"`
+		} `json:"$defs"`
 	}
 	if err := json.Unmarshal(raw, &schema); err != nil {
 		t.Fatalf("parse schema.json: %v", err)
@@ -1302,6 +1308,9 @@ func TestSchemaDefaultsMatchRuntimeDefaults(t *testing.T) {
 	}
 	if string(schema.Properties["tool_policies"].Default) != "[]" {
 		t.Fatalf("schema tool_policies default=%s, want []", schema.Properties["tool_policies"].Default)
+	}
+	if got, want := schema.Defs["policy"].Properties["mode"].Enum, []string{"exact", "deterministic", "model"}; !slices.Equal(got, want) {
+		t.Fatalf("schema policy modes=%v, want %v", got, want)
 	}
 
 	// Runtime defaults must match: no config -> inert (0/0/nil).

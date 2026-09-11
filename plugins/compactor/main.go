@@ -184,11 +184,6 @@ func compactToolResults(ctx context.Context, req *pbv1.ChatRequest) (bool, error
 					modified = true
 				}
 				continue
-			case "source":
-				// Fail closed to exact. Live OMP dogfood showed that aged source
-				// markers can trigger unbounded different-range rereads. Re-enable
-				// only behind the economic/recovery experiment tracked by #178.
-				continue
 			case "model":
 				// A model summary is never allowed before one exact consumption.
 				if assistantAfter[mi] == 0 {

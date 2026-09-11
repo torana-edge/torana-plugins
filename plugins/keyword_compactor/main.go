@@ -160,7 +160,7 @@ func compactToolResults(req *pbv1.ChatRequest) (bool, error) {
 			// safety filters and a matched non-empty non-exact policy, BEFORE the
 			// mode-specific consumption gates — the same definition as compactor,
 			// so the metric means the same regardless of which compactor is
-			// installed. Deterministic, source, and keyword candidates all emit.
+			// installed. Deterministic and keyword candidates both emit.
 			sdk.EmitMetric("torana_compact_eligible_total", sdk.MetricCounter, 1, map[string]string{"tool": toolName})
 
 			switch rule.Mode {
@@ -175,13 +175,6 @@ func compactToolResults(req *pbv1.ChatRequest) (bool, error) {
 				if applied {
 					modified = true
 				}
-				continue
-			case "source":
-				// Fail closed to exact. Live OMP dogfood showed that replacing
-				// aged source reads makes autonomous agents reread different
-				// ranges of the same file until they hit their request limit.
-				// Source mode stays disabled until the economically gated
-				// experiment in #178 ships.
 				continue
 			case "keyword":
 				if assistantAfter[mi] == 0 {

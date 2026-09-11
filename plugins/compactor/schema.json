@@ -42,7 +42,6 @@
           "enum": [
             "exact",
             "deterministic",
-            "source",
             "model"
           ]
         },
