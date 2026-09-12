@@ -12,6 +12,7 @@ import (
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
+	"github.com/torana-edge/torana-plugin-sdk/strictjson"
 )
 
 func main() {}
@@ -107,7 +108,7 @@ type wireEnvelope struct {
 // breach, unsupported version, non-array where an array is required — is an
 // error; there is no lenient branch.
 func decodeRegistry(data []byte) (*registry, error) {
-	raw, err := decodeObjectStrict(data, map[string]bool{"version": true, "tools": true})
+	raw, err := strictjson.DecodeObjectStrict(data, "version", "tools")
 	if err != nil {
 		return nil, fmt.Errorf("registry envelope: %w", err)
 	}
@@ -124,7 +125,7 @@ func decodeRegistry(data []byte) (*registry, error) {
 		return nil, fmt.Errorf("registry envelope: missing required member %q", "tools")
 	}
 	// Duplicate tool names are duplicate object keys and were already rejected
-	// by rejectDuplicateKeys on the raw tools object.
+	// by strictjson's recursive duplicate rejection on the raw tools object.
 	var toolsMap map[string]json.RawMessage
 	if err := json.Unmarshal(toolsRaw, &toolsMap); err != nil {
 		return nil, fmt.Errorf("registry envelope: tools must be an object")
@@ -150,7 +151,7 @@ func decodeMutations(raw json.RawMessage) ([]mutationPath, error) {
 	}
 	paths := make([]mutationPath, 0, len(arr))
 	for i, m := range arr {
-		mem, err := decodeObjectStrict(m, map[string]bool{"path": true})
+		mem, err := strictjson.DecodeObjectStrict(m, "path")
 		if err != nil {
 			return nil, fmt.Errorf("mutation %d: %w", i, err)
 		}
@@ -177,7 +178,7 @@ func decodeSteps(raw json.RawMessage) ([]pathStep, error) {
 	}
 	steps := make([]pathStep, 0, len(arr))
 	for i, s := range arr {
-		mem, err := decodeObjectStrict(s, map[string]bool{"field": true, "each": true})
+		mem, err := strictjson.DecodeObjectStrict(s, "field", "each")
 		if err != nil {
 			return nil, fmt.Errorf("step %d: %w", i, err)
 		}
@@ -364,7 +365,7 @@ func translateTools(tools []*pbv1.ToolDef) (*registry, []*pbv1.ToolDef, bool) {
 			newTools = append(newTools, nt)
 			continue
 		}
-		params, err := decodeJSONObject(tool.ParametersJson)
+		params, err := strictjson.DecodeObject(tool.ParametersJson)
 		if err != nil || params == nil {
 			// Malformed, null, array, scalar, or textually invalid (bad UTF-8,
 			// lone surrogates) schema: cannot translate, not recorded, carried
@@ -658,11 +659,11 @@ func reverseTranslate(toolName string, argsJSON string, paths []mutationPath) (s
 	if len(paths) == 0 {
 		return argsJSON, false, nil
 	}
-	// Lossless decode: validateJSONText (UTF-8 + surrogate invariants),
+	// Lossless decode: strictjson's text validation (UTF-8 + surrogate invariants),
 	// duplicate-key rejection, UseNumber (number lexemes survive), and an
 	// exact one-value check. Empty bytes, null, arrays, scalars, malformed
 	// JSON, and textually invalid input all error here.
-	args, err := decodeJSONObject([]byte(argsJSON))
+	args, err := strictjson.DecodeObject([]byte(argsJSON))
 	if err != nil {
 		return "", false, fmt.Errorf("schema_translator: cannot reverse %q: %w", toolName, err)
 	}

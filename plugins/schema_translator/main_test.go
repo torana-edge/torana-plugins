@@ -671,8 +671,9 @@ func TestBeforeRequestLeavesHybridObjectBoundaryUnchanged(t *testing.T) {
 // reverse only that child without losing fixed or additional parent fields.
 func TestHybridObjectRecursesIntoReversibleNamedChild(t *testing.T) {
 	h := newHarness(t)
+	r := h.NewRequest()
 	raw := `{"type":"object","properties":{"config":{"type":"object","properties":{"label":{"type":"string","minLength":2},"env":{"type":"object","additionalProperties":{"type":"string","minLength":1}}},"required":["label","env"],"minProperties":2,"additionalProperties":{"type":"integer","minimum":0}}}}`
-	res := h.BeforeRequest(reqWithTools(raw))
+	res := r.BeforeRequest(reqWithTools(raw))
 	if res.Err != nil || res.Request == nil {
 		t.Fatalf("expected the named child to be translated, err=%v", res.Err)
 	}
@@ -700,7 +701,7 @@ func TestHybridObjectRecursesIntoReversibleNamedChild(t *testing.T) {
 	}
 
 	streamed := `{"config":{"label":"prod","env":[{"key":"REGION","value":"eu"}],"retries":3}}`
-	streamRes := streamBlock(t, h, 0, "call_1", "read", "sig-hybrid", streamed)
+	streamRes := streamBlockOn(t, r, 0, "call_1", "read", "sig-hybrid", streamed)
 	if streamRes.Err != nil {
 		t.Fatalf("stream reversal failed: %v", streamRes.Err)
 	}
@@ -830,17 +831,24 @@ func TestDuplicateToolNamesAreAllUntranslated(t *testing.T) {
 // Stream hook (assembler terminal-safety matrix)
 // ==========================================================================
 
-func streamBlock(t *testing.T, h *sdktest.Harness, index int32, id, name, sig, args string) sdktest.StreamResult {
+// streamBlockOn drives one assembled block (start/delta/stop) through a
+// CALLER-SUPPLIED request.
+//
+// The request is the caller's on purpose: a tool call is assembled across
+// chunks, and every test here also runs the request hook, whose mutations
+// envelope reaches the stream hook as request metadata. Both are request
+// scoped, exactly as in the host, so all of it has to be one request.
+func streamBlockOn(t *testing.T, r *sdktest.Request, index int32, id, name, sig, args string) sdktest.StreamResult {
 	t.Helper()
-	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+	r.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
 		ContentBlockStart: &pbv1.ContentBlockStart{Index: index, Block: &pbv1.ContentBlockStart_ToolCall{
 			ToolCall: &pbv1.ToolCallRef{Id: id, Name: name, Signature: sig},
 		}},
 	}})
-	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
+	r.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
 		ToolCallDelta: &pbv1.ToolCallDelta{Index: index, ArgumentsDelta: args},
 	}})
-	return h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+	return r.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
 		ContentBlockStop: &pbv1.ContentBlockStop{Index: index},
 	}})
 }
@@ -877,8 +885,9 @@ func emittedSig(t *testing.T, res sdktest.StreamResult) string {
 // signature preserved.
 func TestStreamPassThroughForUnrecordedTool(t *testing.T) {
 	h := newHarness(t)
-	h.BeforeRequest(reqWithTools(`{"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false}`))
-	res := streamBlock(t, h, 0, "call_1", "read", "sig-abc", `{"path":"a.go"}`)
+	r := h.NewRequest()
+	r.BeforeRequest(reqWithTools(`{"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false}`))
+	res := streamBlockOn(t, r, 0, "call_1", "read", "sig-abc", `{"path":"a.go"}`)
 	if got := emittedArgs(t, res); got != `{"path":"a.go"}` {
 		t.Fatalf("byte-identical pass expected, got %q", got)
 	}
@@ -889,27 +898,28 @@ func TestStreamPassThroughForUnrecordedTool(t *testing.T) {
 
 func TestStreamPassesFreeformToolInputWithoutJSONTranslation(t *testing.T) {
 	h := newHarness(t)
+	r := h.NewRequest()
 	req := &pbv1.ChatRequest{Tools: []*pbv1.ToolDef{{
 		Name: "shell", Description: "run shell input",
 		InvocationKind:  pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM,
 		InputFormatJson: []byte(`{"type":"grammar","syntax":"lark","definition":"start: /.+/"}`),
 	}}}
 	before := proto.Clone(req).(*pbv1.ChatRequest)
-	prepared := h.BeforeRequest(req)
+	prepared := r.BeforeRequest(req)
 	if prepared.Err != nil || !prepared.PassedThrough || !proto.Equal(req, before) {
 		t.Fatalf("free-form definition was translated: result=%+v request=%v", prepared, req)
 	}
 	input := "echo $HOME && printf '%s' done"
-	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+	r.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
 		ContentBlockStart: &pbv1.ContentBlockStart{Index: 2, Block: &pbv1.ContentBlockStart_ToolCall{ToolCall: &pbv1.ToolCallRef{
 			Id: "call_custom", Name: "shell", Signature: "sig-custom",
 			InvocationKind: pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM,
 		}}},
 	}})
-	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
+	r.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
 		ToolCallDelta: &pbv1.ToolCallDelta{Index: 2, InputTextDelta: &input},
 	}})
-	res := h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+	res := r.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
 		ContentBlockStop: &pbv1.ContentBlockStop{Index: 2},
 	}})
 	if res.Err != nil || len(res.Events) != 3 {
@@ -928,8 +938,9 @@ func TestStreamPassesFreeformToolInputWithoutJSONTranslation(t *testing.T) {
 // changed.
 func TestStreamReversesRecordedTool(t *testing.T) {
 	h := newHarness(t)
-	h.BeforeRequest(reqWithTools(`{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}}}}`))
-	res := streamBlock(t, h, 0, "call_1", "read", "sig-abc", `{"env":[{"key":"A","value":"1"}]}`)
+	r := h.NewRequest()
+	r.BeforeRequest(reqWithTools(`{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}}}}`))
+	res := streamBlockOn(t, r, 0, "call_1", "read", "sig-abc", `{"env":[{"key":"A","value":"1"}]}`)
 	if got := emittedArgs(t, res); got != `{"env":{"A":"1"}}` {
 		t.Fatalf("reversed args = %q", got)
 	}
@@ -943,8 +954,9 @@ func TestStreamReversesRecordedTool(t *testing.T) {
 // terminate.
 func TestStreamTerminalOnMissingRegistry(t *testing.T) {
 	h := newHarness(t)
-	h.BeforeRequest(&pbv1.ChatRequest{Messages: []*pbv1.Message{{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "hi"}}}}}}})
-	res := streamBlock(t, h, 0, "call_1", "read", "", `{"path":"a.go"}`)
+	r := h.NewRequest()
+	r.BeforeRequest(&pbv1.ChatRequest{Messages: []*pbv1.Message{{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "hi"}}}}}}})
+	res := streamBlockOn(t, r, 0, "call_1", "read", "", `{"path":"a.go"}`)
 	if res.Err == nil {
 		t.Fatal("a tool call without any published envelope must terminate")
 	}
@@ -955,10 +967,11 @@ func TestStreamTerminalOnMissingRegistry(t *testing.T) {
 // was translated").
 func TestStreamTerminalOnAdvisoryRegistryRead(t *testing.T) {
 	h := newHarness(t)
+	r := h.NewRequest()
 	h.StubHostCall("env.meta_get", func(args string) (string, error) {
 		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "backing store down"), nil
 	})
-	res := streamBlock(t, h, 0, "call_1", "read", "", `{"path":"a.go"}`)
+	res := streamBlockOn(t, r, 0, "call_1", "read", "", `{"path":"a.go"}`)
 	if res.Err == nil {
 		t.Fatal("advisory registry read at stream completion must terminate")
 	}
@@ -968,14 +981,15 @@ func TestStreamTerminalOnAdvisoryRegistryRead(t *testing.T) {
 // published at request time terminates if the envelope is gone at stream time.
 func TestStreamTerminalOnDeletedRegistry(t *testing.T) {
 	h := newHarness(t)
-	h.BeforeRequest(reqWithTools(`{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}}}}`))
+	r := h.NewRequest()
+	r.BeforeRequest(reqWithTools(`{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}}}}`))
 	// Simulate the envelope being lost between hooks (e.g. a different WASM
 	// instance state): overwrite the key with nothing via a stub that reports
 	// NOT_FOUND.
 	h.StubHostCall("env.meta_get", func(args string) (string, error) {
 		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_NOT_FOUND, "no such key"), nil
 	})
-	res := streamBlock(t, h, 0, "call_1", "read", "", `{"env":[{"key":"A","value":"1"}]}`)
+	res := streamBlockOn(t, r, 0, "call_1", "read", "", `{"env":[{"key":"A","value":"1"}]}`)
 	if res.Err == nil {
 		t.Fatal("a missing envelope at stream completion must terminate")
 	}
@@ -985,6 +999,7 @@ func TestStreamTerminalOnDeletedRegistry(t *testing.T) {
 // terminal, never guessed-around.
 func TestStreamTerminalOnCorruptRegistry(t *testing.T) {
 	h := newHarness(t)
+	r := h.NewRequest()
 	h.StubHostCall("env.meta_get", func(args string) (string, error) {
 		var a pbv1.MetaGetArgs
 		if err := proto.Unmarshal([]byte(args), &a); err != nil {
@@ -995,7 +1010,7 @@ func TestStreamTerminalOnCorruptRegistry(t *testing.T) {
 		}
 		return sdktest.HostResultValue(nil), nil
 	})
-	res := streamBlock(t, h, 0, "call_1", "read", "", `{"path":"a.go"}`)
+	res := streamBlockOn(t, r, 0, "call_1", "read", "", `{"path":"a.go"}`)
 	if res.Err == nil {
 		t.Fatal("a corrupt registry must terminate")
 	}
@@ -1006,8 +1021,9 @@ func TestStreamTerminalOnCorruptRegistry(t *testing.T) {
 // the wrong call.
 func TestStreamTerminalOnUnreversibleArgs(t *testing.T) {
 	h := newHarness(t)
-	h.BeforeRequest(reqWithTools(`{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}}}}`))
-	res := streamBlock(t, h, 0, "call_1", "read", "", `{"env": not-json`)
+	r := h.NewRequest()
+	r.BeforeRequest(reqWithTools(`{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}}}}`))
+	res := streamBlockOn(t, r, 0, "call_1", "read", "", `{"env": not-json`)
 	if res.Err == nil {
 		t.Fatal("unreversible arguments for a recorded tool must terminate")
 	}
@@ -1018,37 +1034,38 @@ func TestStreamTerminalOnUnreversibleArgs(t *testing.T) {
 // both complete calls reverse correctly.
 func TestStreamFragmentedAndConcurrentBlocks(t *testing.T) {
 	h := newHarness(t)
-	h.BeforeRequest(reqWithTools(`{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}}}}`))
+	r := h.NewRequest()
+	r.BeforeRequest(reqWithTools(`{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}}}}`))
 
-	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+	r.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
 		ContentBlockStart: &pbv1.ContentBlockStart{Index: 0, Block: &pbv1.ContentBlockStart_ToolCall{
 			ToolCall: &pbv1.ToolCallRef{Id: "call_0", Name: "read", Signature: "s0"},
 		}},
 	}})
-	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+	r.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
 		ContentBlockStart: &pbv1.ContentBlockStart{Index: 1, Block: &pbv1.ContentBlockStart_ToolCall{
 			ToolCall: &pbv1.ToolCallRef{Id: "call_1", Name: "read", Signature: "s1"},
 		}},
 	}})
-	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
+	r.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
 		ToolCallDelta: &pbv1.ToolCallDelta{Index: 0, ArgumentsDelta: `{"env":[{"key":"A",`},
 	}})
-	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
+	r.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
 		ToolCallDelta: &pbv1.ToolCallDelta{Index: 1, ArgumentsDelta: `{"env":[{"key":"B",`},
 	}})
-	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
+	r.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
 		ToolCallDelta: &pbv1.ToolCallDelta{Index: 0, ArgumentsDelta: `"value":"1"}]}`},
 	}})
-	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
+	r.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
 		ToolCallDelta: &pbv1.ToolCallDelta{Index: 1, ArgumentsDelta: `"value":"2"}]}`},
 	}})
-	res0 := h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+	res0 := r.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
 		ContentBlockStop: &pbv1.ContentBlockStop{Index: 0},
 	}})
 	if got := emittedArgs(t, res0); got != `{"env":{"A":"1"}}` {
 		t.Fatalf("block 0 reversed args = %q", got)
 	}
-	res1 := h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+	res1 := r.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
 		ContentBlockStop: &pbv1.ContentBlockStop{Index: 1},
 	}})
 	if got := emittedArgs(t, res1); got != `{"env":{"B":"2"}}` {
@@ -1060,8 +1077,9 @@ func TestStreamFragmentedAndConcurrentBlocks(t *testing.T) {
 // never swallowed (the assembler's contract).
 func TestStreamErrorEventPassesThrough(t *testing.T) {
 	h := newHarness(t)
-	h.BeforeRequest(reqWithTools(`{"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false}`))
-	res := h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_Error{
+	r := h.NewRequest()
+	r.BeforeRequest(reqWithTools(`{"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false}`))
+	res := r.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_Error{
 		Error: &pbv1.StreamError{Message: "upstream aborted"},
 	}})
 	if res.Err != nil {
@@ -1077,8 +1095,9 @@ func TestStreamErrorEventPassesThrough(t *testing.T) {
 // for assembly) and meta_get. No cache, state, pricing, or block traffic.
 func TestStreamNoUnauthorizedCalls(t *testing.T) {
 	h := newHarness(t)
-	h.BeforeRequest(reqWithTools(`{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}}}}`))
-	streamBlock(t, h, 0, "call_1", "read", "", `{"env":[{"key":"A","value":"1"}]}`)
+	r := h.NewRequest()
+	r.BeforeRequest(reqWithTools(`{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}}}}`))
+	streamBlockOn(t, r, 0, "call_1", "read", "", `{"env":[{"key":"A","value":"1"}]}`)
 	for _, c := range h.Calls() {
 		switch c.Command {
 		case "env.meta_set", "env.meta_get", "env.meta_append":
@@ -1118,8 +1137,9 @@ func TestHookDeterminism(t *testing.T) {
 // TestEnvLogNotUsed — the plugin never logs (env.log is not a grant it holds).
 func TestEnvLogNotUsed(t *testing.T) {
 	h := newHarness(t)
-	h.BeforeRequest(reqWithTools(`{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}}}}`))
-	streamBlock(t, h, 0, "call_1", "read", "", `{"env":[{"key":"A","value":"1"}]}`)
+	r := h.NewRequest()
+	r.BeforeRequest(reqWithTools(`{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}}}}`))
+	streamBlockOn(t, r, 0, "call_1", "read", "", `{"env":[{"key":"A","value":"1"}]}`)
 	if logs := h.Logs(); len(logs) != 0 {
 		t.Fatalf("plugin logged: %+v", logs)
 	}
@@ -1490,8 +1510,9 @@ func TestStreamStrictReversalClasses(t *testing.T) {
 	} {
 		t.Run("terminates "+name, func(t *testing.T) {
 			h := newHarness(t)
-			h.BeforeRequest(reqWithTools(translated))
-			res := streamBlock(t, h, 0, "call_1", "read", "sig", args)
+			r := h.NewRequest()
+			r.BeforeRequest(reqWithTools(translated))
+			res := streamBlockOn(t, r, 0, "call_1", "read", "sig", args)
 			if res.Err == nil {
 				t.Fatalf("must terminate: %q", args)
 			}
@@ -1499,8 +1520,9 @@ func TestStreamStrictReversalClasses(t *testing.T) {
 	}
 	t.Run("empty key preserved, signature cleared", func(t *testing.T) {
 		h := newHarness(t)
-		h.BeforeRequest(reqWithTools(translated))
-		res := streamBlock(t, h, 0, "call_1", "read", "sig", `{"env":[{"key":"","value":"v"}]}`)
+		r := h.NewRequest()
+		r.BeforeRequest(reqWithTools(translated))
+		res := streamBlockOn(t, r, 0, "call_1", "read", "sig", `{"env":[{"key":"","value":"v"}]}`)
 		if got := emittedArgs(t, res); got != `{"env":{"":"v"}}` {
 			t.Fatalf("args = %q", got)
 		}
@@ -1510,17 +1532,19 @@ func TestStreamStrictReversalClasses(t *testing.T) {
 	})
 	t.Run("empty array becomes empty object", func(t *testing.T) {
 		h := newHarness(t)
-		h.BeforeRequest(reqWithTools(translated))
-		res := streamBlock(t, h, 0, "call_1", "read", "sig", `{"env":[]}`)
+		r := h.NewRequest()
+		r.BeforeRequest(reqWithTools(translated))
+		res := streamBlockOn(t, r, 0, "call_1", "read", "sig", `{"env":[]}`)
 		if got := emittedArgs(t, res); got != `{"env":{}}` {
 			t.Fatalf("args = %q", got)
 		}
 	})
 	t.Run("semantic no-op preserves bytes and signature", func(t *testing.T) {
 		h := newHarness(t)
-		h.BeforeRequest(reqWithTools(translated))
+		r := h.NewRequest()
+		r.BeforeRequest(reqWithTools(translated))
 		args := `{ "other":"x" }`
-		res := streamBlock(t, h, 0, "call_1", "read", "sig-abc", args)
+		res := streamBlockOn(t, r, 0, "call_1", "read", "sig-abc", args)
 		if got := emittedArgs(t, res); got != args {
 			t.Fatalf("original bytes must travel unchanged, got %q", got)
 		}
@@ -1601,8 +1625,9 @@ func TestLosslessNumbersThroughHook(t *testing.T) {
 // through the real fragmented stream.
 func TestLosslessNumbersAtStreamBoundary(t *testing.T) {
 	h := newHarness(t)
-	h.BeforeRequest(reqWithTools(`{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}}}}`))
-	res := streamBlock(t, h, 0, "call_1", "read", "sig", `{"env":[{"key":"A","value":9007199254740993}]}`)
+	r := h.NewRequest()
+	r.BeforeRequest(reqWithTools(`{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}}}}`))
+	res := streamBlockOn(t, r, 0, "call_1", "read", "sig", `{"env":[{"key":"A","value":9007199254740993}]}`)
 	if got := emittedArgs(t, res); got != `{"env":{"A":9007199254740993}}` {
 		t.Fatalf("argument number rounded through the stream: %q", got)
 	}

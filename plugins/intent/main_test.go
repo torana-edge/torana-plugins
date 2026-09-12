@@ -220,33 +220,49 @@ func reqWith(toolArgs string) *pbv1.ChatRequest {
 
 // streamCall dispatches one assembled tool-call block (start/delta/stop)
 // through the real stream hook and returns the final dispatch's result.
+//
+// All three events go through ONE sdktest.Request. A tool call is assembled
+// across chunks, and request-scoped state is what holds the partial call
+// between them — the harness's convenience methods each open a fresh request,
+// so driving the three chunks through h directly resets the assembly twice and
+// the closing stop emits nothing.
 func streamCall(t *testing.T, h *sdktest.Harness, id, name, sig, args string) sdktest.StreamResult {
 	t.Helper()
-	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+	return streamCallOn(t, h.NewRequest(), id, name, sig, args)
+}
+
+// streamCallOn is streamCall on a CALLER-SUPPLIED request, for a test that
+// also drives the request hook and needs both to see the same request
+// metadata — which is where the hadI marker lives, and which sdktest scopes
+// per request exactly as the host does.
+func streamCallOn(t *testing.T, r *sdktest.Request, id, name, sig, args string) sdktest.StreamResult {
+	t.Helper()
+	r.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
 		ContentBlockStart: &pbv1.ContentBlockStart{Index: 0, Block: &pbv1.ContentBlockStart_ToolCall{
 			ToolCall: &pbv1.ToolCallRef{Id: id, Name: name, Signature: sig},
 		}},
 	}})
-	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
+	r.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
 		ToolCallDelta: &pbv1.ToolCallDelta{Index: 0, ArgumentsDelta: args},
 	}})
-	return h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+	return r.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
 		ContentBlockStop: &pbv1.ContentBlockStop{Index: 0},
 	}})
 }
 
 func streamFreeformCall(t *testing.T, h *sdktest.Harness, id, name, sig, input string) sdktest.StreamResult {
 	t.Helper()
-	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+	r := h.NewRequest()
+	r.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
 		ContentBlockStart: &pbv1.ContentBlockStart{Index: 0, Block: &pbv1.ContentBlockStart_ToolCall{
 			ToolCall: &pbv1.ToolCallRef{Id: id, Name: name, Signature: sig,
 				InvocationKind: pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM},
 		}},
 	}})
-	h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
+	r.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
 		ToolCallDelta: &pbv1.ToolCallDelta{Index: 0, InputTextDelta: &input},
 	}})
-	return h.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+	return r.StreamChunk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
 		ContentBlockStop: &pbv1.ContentBlockStop{Index: 0},
 	}})
 }
@@ -404,7 +420,7 @@ func TestRehydrationRestoresAndBridges(t *testing.T) {
 	if got := args[intentField]; got != "find the bug in server.go" {
 		t.Fatalf("restored intent=%v, want the captured value", got)
 	}
-	bridged, ok := h.Cache("intent:call_1")
+	bridged, ok := h.SharedCache("intent:call_1")
 	if !ok || bridged != "find the bug in server.go" {
 		t.Fatalf("intent was not bridged to intent:call_1 (ok=%v value=%q)", ok, bridged)
 	}
@@ -436,7 +452,7 @@ func TestRehydrationFillNeverCached(t *testing.T) {
 	if res.Err != nil || res.Request == nil {
 		t.Fatalf("expected replacement, err=%v", res.Err)
 	}
-	if _, ok := h.Cache("intent:call_1"); ok {
+	if _, ok := h.SharedCache("intent:call_1"); ok {
 		t.Fatal("a heuristic fill was cached — the intent cache must stay real-captured-only")
 	}
 	filled := false
@@ -506,7 +522,7 @@ func TestRehydrationPresentEmptyIsUnusable(t *testing.T) {
 	if want := "what server.go shows"; got != want {
 		t.Fatalf("present-empty cache entry must take the exact heuristic fill, got %q want %q", got, want)
 	}
-	if _, ok := h.Cache("intent:call_1"); ok {
+	if _, ok := h.SharedCache("intent:call_1"); ok {
 		t.Fatal("present-empty value must not be bridged")
 	}
 }
@@ -531,7 +547,11 @@ func TestNativeIFieldRecordsMarkerAndIsNotStripped(t *testing.T) {
 		Name:           "read",
 		ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"},"i":{"type":"string","description":"concise intent"}},"required":["path","i"]}`),
 	}}}
-	res := h.BeforeRequest(req)
+	// ONE request for both hooks: the hadI marker is request metadata, and a
+	// separate request would not see what the request hook recorded — which
+	// is also true of the host.
+	r := h.NewRequest()
+	res := r.BeforeRequest(req)
 	if res.Err != nil {
 		t.Fatal(res.Err)
 	}
@@ -539,7 +559,7 @@ func TestNativeIFieldRecordsMarkerAndIsNotStripped(t *testing.T) {
 	// response side can now read hadI:read. The native path is SEMANTIC
 	// pass-through: the exact original bytes and the bound signature travel
 	// unchanged.
-	res2 := streamCall(t, h, "call_1", "read", "sig", `{"path":"server.go","i":"native intent"}`)
+	res2 := streamCallOn(t, r, "call_1", "read", "sig", `{"path":"server.go","i":"native intent"}`)
 	out := emittedArgs(t, res2)
 	if out != `{"path":"server.go","i":"native intent"}` {
 		t.Fatalf("native \"i\" must pass the EXACT bytes, got %q", out)
@@ -547,7 +567,7 @@ func TestNativeIFieldRecordsMarkerAndIsNotStripped(t *testing.T) {
 	if sig := emittedSig(t, res2); sig != "sig" {
 		t.Fatalf("native pass must keep the signature, got %q", sig)
 	}
-	if got, _ := h.Cache("intent:call_1"); got != "native intent" {
+	if got, _ := h.SharedCache("intent:call_1"); got != "native intent" {
 		t.Fatalf("native intent not captured: %q", got)
 	}
 }
@@ -566,7 +586,7 @@ func TestStreamExtractsIntentStripsAndClearsSignature(t *testing.T) {
 	if _, ok := args[intentField]; ok {
 		t.Fatal("\"i\" was not stripped from the emitted call")
 	}
-	if got, _ := h.Cache("intent:call_1"); got != "find the bug" {
+	if got, _ := h.SharedCache("intent:call_1"); got != "find the bug" {
 		t.Fatalf("intent not captured under intent:call_1: %q", got)
 	}
 	if _, ok := h.Cache(contentKey("read", map[string]any{"path": "server.go"})); !ok {
@@ -598,7 +618,7 @@ func TestStreamPassPreservesSignature(t *testing.T) {
 	if sig := emittedSig(t, res); sig != "sig" {
 		t.Fatalf("an unchanged call must keep its signature, got %q", sig)
 	}
-	if _, ok := h.Cache("intent:call_1"); ok {
+	if _, ok := h.SharedCache("intent:call_1"); ok {
 		t.Fatal("nothing to capture, nothing cached")
 	}
 	absent := false
@@ -633,7 +653,7 @@ func TestStreamFailOpenOnCallbackError(t *testing.T) {
 	// The capture happens before the hadI read, so a failed
 	// strip must not retroactively uncache a valid capture — the block is
 	// what matters, and it is untouched.
-	if got, _ := h.Cache("intent:call_1"); got != "find the bug" {
+	if got, _ := h.SharedCache("intent:call_1"); got != "find the bug" {
 		t.Fatalf("a valid capture made before the failure must stand, got %q", got)
 	}
 	// Exactly one meta_get was attempted — no retry.
@@ -767,15 +787,17 @@ func TestStreamSemanticHandlingTable(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
+			r := h.NewRequest()
 			if tc.native {
-				// Drive the request side so hadI:read=true is recorded on this
-				// harness (the marker lives in the harness's meta store).
-				h.BeforeRequest(&pbv1.ChatRequest{Tools: []*pbv1.ToolDef{{
+				// Drive the request side so hadI:read=true is recorded for
+				// THIS request: the marker is request metadata, and the stream
+				// hook below must run in the same request to see it.
+				r.BeforeRequest(&pbv1.ChatRequest{Tools: []*pbv1.ToolDef{{
 					Name:           "read",
 					ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"},"i":{"type":"string"}},"required":["path","i"]}`),
 				}}})
 			}
-			res := streamCall(t, h, "call_1", "read", "sig", tc.args)
+			res := streamCallOn(t, r, "call_1", "read", "sig", tc.args)
 			if res.Err != nil {
 				t.Fatalf("dispatch error: %v", res.Err)
 			}
@@ -934,7 +956,7 @@ func TestRehydrationProvenanceAwareWrites(t *testing.T) {
 			use("c3", "grep", `{"pattern":"x"}`, "call-sig-3"),
 		}},
 	}
-	h.SeedCache("intent:c1", "find the bug in server")
+	h.SeedSharedCache("intent:c1", "find the bug in server")
 	var modified bool
 	var err error
 	h.Run(func() { modified, err = rehydrateHistoryIntents(req) })

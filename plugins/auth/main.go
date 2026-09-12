@@ -8,6 +8,7 @@ import (
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
+	"github.com/torana-edge/torana-plugin-sdk/strictjson"
 )
 
 func main() {}
@@ -132,13 +133,13 @@ func init() {
 // into ToranaMeta under _request_headers (only when the env.request_headers
 // grant is held). Malformed host-provided metadata — including textually
 // invalid JSON — is a protocol defect, and the decode is lossless
-// (decodeJSONObject) so no header byte is normalized before the token
+// (strictjson.DecodeObject) so no header byte is normalized before the token
 // grammar sees it.
 func requestHeaders(req *pbv1.ChatRequest) (map[string]any, error) {
 	if len(req.ToranaMetaJson) == 0 {
 		return nil, nil
 	}
-	meta, err := decodeJSONObject(req.ToranaMetaJson)
+	meta, err := strictjson.DecodeObject(req.ToranaMetaJson)
 	if err != nil {
 		return nil, fmt.Errorf("auth: malformed ToranaMetaJson: %w", err)
 	}
@@ -302,10 +303,8 @@ func verifyVirtualKey(token string) (string, verifyOutcome, error) {
 //   - `rejected`: tenant/team/user FORBIDDEN; message optional, bounded at
 //     maxVerifyMessageBytes decoded UTF-8 bytes.
 func decodeVerifyResponse(res []byte) (VerifyResponse, error) {
-	raw, err := decodeObjectStrict(res, map[string]bool{
-		"status": true, "message": true,
-		"tenant_id": true, "team_id": true, "user_id": true,
-	})
+	raw, err := strictjson.DecodeObjectStrict(res,
+		"status", "message", "tenant_id", "team_id", "user_id")
 	if err != nil {
 		return VerifyResponse{}, err
 	}
