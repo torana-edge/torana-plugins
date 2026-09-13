@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"sync"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
@@ -18,6 +19,26 @@ import (
 )
 
 func main() {}
+
+// Keep one parsed configuration per guest instance. Keying by the exact config
+// also handles native tests or a host that updates configuration in place.
+var loadedPolicy struct {
+	sync.Mutex
+	ready bool
+	raw   string
+	value policy
+	err   error
+}
+
+func configuredPolicy(raw string) (policy, error) {
+	loadedPolicy.Lock()
+	defer loadedPolicy.Unlock()
+	if !loadedPolicy.ready || loadedPolicy.raw != raw {
+		loadedPolicy.value, loadedPolicy.err = parsePolicy([]byte(raw))
+		loadedPolicy.raw, loadedPolicy.ready = raw, true
+	}
+	return loadedPolicy.value, loadedPolicy.err
+}
 
 type replacement struct {
 	description *string
@@ -35,7 +56,7 @@ type policy struct {
 
 func init() {
 	sdk.OnBeforeRequest(func(_ context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
-		p, err := parsePolicy([]byte(sdk.PluginConfig()))
+		p, err := configuredPolicy(sdk.PluginConfig())
 		if err != nil {
 			return sdk.RequestResult{}, fmt.Errorf("tool_governor: invalid configuration: %w", err)
 		}
