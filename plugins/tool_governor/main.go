@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"sync"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
@@ -18,6 +19,28 @@ import (
 )
 
 func main() {}
+
+// Keep one parsed configuration per WASM guest instance. Native/in-process
+// harnesses share this package-level slot; exact keys preserve correctness
+// when those harnesses interleave configs. The host fetch still runs per hook
+// so in-place changes are observed; only parsing/validation is cached.
+var loadedPolicy struct {
+	sync.Mutex
+	ready bool
+	raw   string
+	value policy
+	err   error
+}
+
+func configuredPolicy(raw string) (policy, error) {
+	loadedPolicy.Lock()
+	defer loadedPolicy.Unlock()
+	if !loadedPolicy.ready || loadedPolicy.raw != raw {
+		loadedPolicy.value, loadedPolicy.err = parsePolicy([]byte(raw))
+		loadedPolicy.raw, loadedPolicy.ready = raw, true
+	}
+	return loadedPolicy.value, loadedPolicy.err
+}
 
 type replacement struct {
 	description *string
@@ -35,7 +58,17 @@ type policy struct {
 
 func init() {
 	sdk.OnBeforeRequest(func(_ context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
-		p, err := parsePolicy([]byte(sdk.PluginConfig()))
+		raw, hostErr, err := sdk.HostCall("env.plugin_config", nil)
+		if err != nil {
+			return sdk.RequestResult{}, fmt.Errorf("tool_governor: configuration fetch failed: %w", err)
+		}
+		if hostErr != nil {
+			return sdk.RequestResult{}, fmt.Errorf("tool_governor: configuration fetch refused: %v", hostErr)
+		}
+		if len(bytes.TrimSpace(raw)) == 0 {
+			return sdk.RequestResult{}, fmt.Errorf("tool_governor: empty configuration response")
+		}
+		p, err := configuredPolicy(string(raw))
 		if err != nil {
 			return sdk.RequestResult{}, fmt.Errorf("tool_governor: invalid configuration: %w", err)
 		}
