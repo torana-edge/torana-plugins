@@ -26,8 +26,14 @@ fi
 workspace_dir=$(mktemp -d)
 trap 'rm -rf "$workspace_dir"' EXIT
 
-if [[ -d "$root/../torana-plugin-sdk" ]]; then
-  modules=("$root/../torana-plugin-sdk")
+sdk_dir="${TORANA_SDK_DIR:-$root/../torana-plugin-sdk}"
+if [[ -n "${TORANA_SDK_DIR:-}" && ( ! -d "$sdk_dir" || ! -f "$sdk_dir/go.mod" ) ]]; then
+  echo "SDK directory is missing or has no go.mod: $sdk_dir" >&2
+  exit 1
+fi
+if [[ -d "$sdk_dir" && -f "$sdk_dir/go.mod" ]]; then
+  sdk_dir=$(cd "$sdk_dir" && pwd)
+  modules=("$sdk_dir")
   for module in "$root"/plugins/*; do modules+=("$module"); done
   (cd "$workspace_dir" && go work init "${modules[@]}")
   export GOWORK="$workspace_dir/go.work"
@@ -36,7 +42,6 @@ if [[ -d "$root/../torana-plugin-sdk" ]]; then
   # at v0.1.1 -- the build kept working via the module list above, so nothing
   # ever reported that half the setup was dead. Assert the outcome instead of
   # trusting the plumbing.
-  sdk_dir=$(cd "$root/../torana-plugin-sdk" && pwd)
   # Any plugin module will do — the workspace resolves the SDK the same way for
   # all of them. Naming one made the check fail with "did not resolve the
   # sibling SDK" if that plugin were ever renamed, which is not what went wrong.
