@@ -11,7 +11,7 @@
 // without this the model imitates its "i"-stripped history and emission
 // collapses per tool (see rehydrateHistoryIntents). Response side, it
 // extracts the "i" value from the streamed tool call into the shared
-// cross-request cache (keyed by tool_call_id AND by tool name+args), and
+// cross-request cache (bound to conversation, call ID, and inputs), and
 // strips "i" back off so the agent harness never sees it.
 //
 // It exists as its own plugin so the compactors are independent consumers:
@@ -101,6 +101,9 @@ func init() {
 		if !hasFunctionTool(req) {
 			return sdk.PassRequest(), nil
 		}
+		if herr, err := sdk.MetaSet("intent:conversation", conversationID(req)); err != nil || herr != nil {
+			return sdk.RequestResult{}, fmt.Errorf("intent: capture context refused: %v %v", herr, err)
+		}
 		modified, err := injectIntentSchema(req)
 		if err != nil {
 			return sdk.RequestResult{}, err
@@ -175,11 +178,10 @@ func handleToolCall(call sdk.ToolCall) (sdk.ToolCallAction, error) {
 	rawI, hasIntent := args[intentField]
 	intent, usable := rawI.(string)
 	if usable && intent != "" {
-		// Key by tool_call_id (works when the harness echoes IDs, e.g. most
-		// OpenAI clients) AND by tool name+args content. The content key
-		// survives harnesses that reassign tool_call_ids across turns (Claude
-		// Code does), which is the only key rehydration can rely on since the
-		// response-stream ID never reappears in later request history.
+		// Keep the shared compactor protocol, but restore history only from
+		// a conversation- and occurrence-bound private entry. Equal tool
+		// arguments do not imply equal intent. Remapped IDs safely take the
+		// request side's configured heuristic/off behavior.
 		//
 		// CacheSet is best-effort: a refusal affects FUTURE compaction, not
 		// the validity of this response, so it is logged and the current
@@ -187,8 +189,13 @@ func handleToolCall(call sdk.ToolCall) (sdk.ToolCallAction, error) {
 		if herr, err := sdk.SharedCacheSet(intentCacheKey+":"+call.ID, intent); err != nil || herr != nil {
 			sdk.Log(fmt.Sprintf("intent: cache_set %s:%s refused: %v %v", intentCacheKey, call.ID, herr, err), sdk.LogLevelInfo)
 		}
-		if herr, err := sdk.CacheSet(contentKey(call.Name, args), intent); err != nil || herr != nil {
-			sdk.Log(fmt.Sprintf("intent: cache_set content key refused: %v %v", herr, err), sdk.LogLevelInfo)
+		conversation, herr, err := sdk.MetaGet("intent:conversation")
+		if err == nil && herr == nil {
+			if key := occurrenceKey(conversation, call.ID, call.Name, args); key != "" {
+				if herr, err := sdk.CacheSet(key, intent); err != nil || herr != nil {
+					sdk.Log(fmt.Sprintf("intent: cache_set occurrence refused: %v %v", herr, err), sdk.LogLevelInfo)
+				}
+			}
 		}
 		sdk.EmitMetric("torana_intent_captured_total", sdk.MetricCounter, 1, labels)
 		// Debug visibility for dogfooding: intent QUALITY (goal vs action
@@ -294,21 +301,23 @@ func rehydrateHistoryIntents(req *pbv1.ChatRequest) (bool, error) {
 				present++
 				continue // already carries "i"
 			}
-			// Look up by the content key (tool name + args). This is the only
-			// key that survives harnesses reassigning tool_call_ids across
-			// turns — the response-stream ID we cached under never reappears
-			// in later request history.
-			intent, herr, err := sdk.CacheGet(contentKey(tc.Name, args))
-			if err != nil {
-				return false, fmt.Errorf("intent: cache_get %q: %w", contentKey(tc.Name, args), err)
-			}
-			if herr != nil && !sdk.IsNotFound(herr) {
-				return false, fmt.Errorf("intent: cache_get %q refused: %s", contentKey(tc.Name, args), herr.Message)
+			// Missing/remapped identity declines to heuristic/off. A
+			// tool-arguments-only fallback can rewrite unrelated old history.
+			key := occurrenceKey(conversationID(req), tc.Id, tc.Name, args)
+			intent := ""
+			var herr *pbv1.HostError
+			if key != "" {
+				var err error
+				intent, herr, err = sdk.CacheGet(key)
+				if err != nil {
+					return false, fmt.Errorf("intent: cache_get %q: %w", key, err)
+				}
+				if herr != nil && !sdk.IsNotFound(herr) {
+					return false, fmt.Errorf("intent: cache_get %q refused: %s", key, herr.Message)
+				}
 			}
 			if herr == nil && intent != "" {
-				// Bridge the real intent to this request's own tool_call_id so
-				// the compactors' intent:<tool_call_id> lookup (keyed off the
-				// tool RESULT message) works on harnesses that reassign IDs.
+				// Publish the verified occurrence's captured intent for compactors.
 				if herr, err := sdk.SharedCacheSet(intentCacheKey+":"+tc.Id, intent); err != nil || herr != nil {
 					return false, fmt.Errorf("intent: cache_set %s:%s refused: %v %v", intentCacheKey, tc.Id, herr, err)
 				}
@@ -395,8 +404,8 @@ func truncateRunes(s string, n int) string {
 // canonical before ContentAddressedCacheKey hashes it: the response side
 // (which strips "i") and the request side (where "i" is already absent)
 // produce the same key for the same logical call.
-// Collisions (same tool + args, different intent) resolve last-write-wins,
-// which is acceptable for a hint.
+// This is only the input-binding component of an occurrence key; it is never
+// sufficient by itself to identify an intent.
 func contentKey(name string, args map[string]any) string {
 	cp := make(map[string]any, len(args))
 	for k, v := range args {
@@ -411,6 +420,26 @@ func contentKey(name string, args map[string]any) string {
 	// size accounting.
 	b, _ := json.Marshal([]any{name, cp})
 	return sdk.ContentAddressedCacheKey("intent/content/v1", string(b))
+}
+
+func conversationID(req *pbv1.ChatRequest) string {
+	var meta struct {
+		ConversationID string `json:"_conversation_id"`
+	}
+	if json.Unmarshal(req.ToranaMetaJson, &meta) != nil {
+		return ""
+	}
+	return meta.ConversationID
+}
+
+// Without conversation and call identity a cached value cannot safely be
+// attributed to this historical occurrence. Bind inputs too, so reusing an ID
+// for a different tool or arguments cannot restore an unrelated intent.
+func occurrenceKey(conversation, id, name string, args map[string]any) string {
+	if conversation == "" || id == "" {
+		return ""
+	}
+	return sdk.ContentAddressedCacheKey("intent/occurrence/v2", conversation, id, contentKey(name, args))
 }
 
 // decodeJSONObject preserves every JSON number lexeme as json.Number. These
