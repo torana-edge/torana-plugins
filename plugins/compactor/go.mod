@@ -2,6 +2,6 @@ module github.com/torana-edge/torana-plugins/plugins/compactor
 
 go 1.25.0
 
-require github.com/torana-edge/torana-plugin-sdk v0.4.2
+require github.com/torana-edge/torana-plugin-sdk v0.4.3-0.20260914113223-3eed3394e409
 
 require google.golang.org/protobuf v1.36.11

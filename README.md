@@ -21,14 +21,16 @@ executable release inventory.
 ```
 
 The workspace resolves `../torana-plugin-sdk` during local development. An
-external plugin should depend on the released SDK module instead:
+external plugin should pin the SDK matching its target host:
 
 ```bash
-go get github.com/torana-edge/torana-plugin-sdk@v0.3.0
+go get github.com/torana-edge/torana-plugin-sdk@v0.4.3-0.20260914113223-3eed3394e409
 ```
 
-`v0.3.0` is Plugin ABI v1 — the contract the current host speaks. Anything
-older is a different ABI and the host will refuse to load it.
+This foundation uses ABI v1 contract revision 1. Package versions and ABI
+revisions are distinct; older bundles must be rebuilt against this SDK for
+the coordinated Edge upgrade. `torana plugin new` generates a project pinned
+to the SDK used by that host.
 
 Build artifacts are written to `dist/` and are deliberately not committed.
 
@@ -104,3 +106,17 @@ TORANA_SDK_DIR=/path/to/torana-plugin-sdk ./scripts/build.sh pii
 
 Release builds continue to use the SDK revision pinned by each plugin's
 `go.mod`.
+
+### Coordinated SDK and host reviews
+
+Every module pins the same SDK revision recorded in `SDK_REF`. For coordinated
+PRs, the Go pseudo-version and full SDK commit make that revision fetchable
+before a release. PR CI checks out that exact commit with `--review`; default
+and release checkouts still require the SDK revision to be reachable from main.
+
+`EDGE_REVIEW_REF`, when present, pins the corresponding Edge commit for PR
+integration tests. CI on main always uses Edge main. Update or remove the review
+pin when rebasing the coordinated change. To reproduce the PR locally, check out
+those two revisions as `../torana-plugin-sdk` and `../torana-edge`, then run
+`./scripts/test.sh`, build every bundle with `./scripts/build.sh`, and run
+`./scripts/verify-behaviour.sh ../torana-edge dist`.

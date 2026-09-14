@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# != 1 ]]; then
-  echo "usage: $0 <sdk-checkout>" >&2
+if [[ $# != 1 && ( $# != 2 || "$2" != "--review" ) ]]; then
+  echo "usage: $0 <sdk-checkout> [--review]" >&2
   exit 2
 fi
 
@@ -23,7 +23,14 @@ if ! git -C "$sdk" cat-file -e "$ref^{commit}" 2>/dev/null; then
   echo "SDK_REF $ref is not present in the SDK checkout" >&2
   exit 1
 fi
-if ! git -C "$sdk" merge-base --is-ancestor "$ref" refs/remotes/origin/main; then
+# Release/default checkouts require merged history. Coordinated PR validation
+# can use an immutable review commit without pretending it has been released.
+if [[ "${2:-}" == "--review" ]]; then
+  if [[ ! "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "review SDK_REF must be a full commit SHA" >&2
+    exit 1
+  fi
+elif ! git -C "$sdk" merge-base --is-ancestor "$ref" refs/remotes/origin/main; then
   echo "SDK_REF $ref is not reachable from torana-plugin-sdk main" >&2
   exit 1
 fi
