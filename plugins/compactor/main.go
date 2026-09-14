@@ -160,7 +160,7 @@ func compactToolResults(ctx context.Context, req *pbv1.ChatRequest) (bool, error
 			} else if view.InvocationKind == pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM {
 				toolArgs = toolInvocationInputIdentity(view.InvocationKind, sdk.ToolCallView{}, false)
 			}
-			if toolName == "" || view.MustStayExact(toolName, text) {
+			if view.MustStayExact(toolName, text) {
 				continue
 			}
 			rule, matched := sdk.MatchToolPolicy(toolPolicies, toolName)
