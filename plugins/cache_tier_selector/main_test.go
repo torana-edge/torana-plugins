@@ -323,7 +323,7 @@ func TestAutoModeDeclinesUnknownEconomicsBeforeState(t *testing.T) {
 }
 
 // TestStoredDecisionReappliedByteIdentically — an unexpired stored decision
-// re-applies the marker verbatim with no new decision write and no counter;
+// re-applies the marker verbatim with only a lifetime refresh and no counter;
 // two fresh clones produce byte-identical output.
 func TestStoredDecisionReappliedByteIdentically(t *testing.T) {
 	h := newHarness(t)
@@ -352,9 +352,9 @@ func TestStoredDecisionReappliedByteIdentically(t *testing.T) {
 	if countCommand(h, "torana_plugin_counter") != 0 {
 		t.Fatal("a stored decision must not re-decide (no counter)")
 	}
-	// No new decision write.
-	if n := countCommand(h, "env.state_set"); n != 0 {
-		t.Fatalf("a stored decision must not rewrite state, got %d writes", n)
+	// Refresh the lifetime without changing the tier or recording a new decision.
+	if n := countCommand(h, "env.state_set"); n != 1 {
+		t.Fatalf("a stored decision must refresh its lifetime once, got %d writes", n)
 	}
 
 	// Byte-identical across fresh clones.

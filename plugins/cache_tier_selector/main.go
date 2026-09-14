@@ -76,6 +76,14 @@ type decision struct {
 	TierTTL int `json:"tier_ttl_seconds"`
 	// DecidedAtMillis is when the choice was made.
 	DecidedAtMillis int64 `json:"decided_at_millis"`
+	// RefreshedAtMillis records use under a refresh-on-read policy. Keeping it
+	// separate preserves the original decision time. RefreshOnRead is part of
+	// scopedDecisionKey: switching it off selects a new absolute-TTL decision
+	// rather than inheriting these refresh timestamps.
+	RefreshedAtMillis int64 `json:"refreshed_at_millis,omitempty"`
+	// Cover the next TTL/10 of reads to coalesce writes. This can retain an idle
+	// choice slightly longer, but cannot expire a live prefix early after restart.
+	RefreshThroughMillis int64 `json:"refresh_through_millis,omitempty"`
 }
 
 // activity is the per-conversation gap history the decision is based on.
@@ -251,6 +259,15 @@ func init() {
 				}
 				return sdk.PassRequest(), nil
 			case !decisionExpired(prior, now):
+				if policy.RefreshOnRead && now > prior.RefreshThroughMillis {
+					prior.RefreshedAtMillis = now
+					prior.RefreshThroughMillis = now + max(1, int64(prior.TierTTL)*100)
+					// Refresh persistence is bookkeeping. Initial choices still
+					// require successful persistence; an existing marker is safe.
+					if err := sdk.StateSetJSON(decisionKey, prior); err != nil {
+						sdk.Log(fmt.Sprintf("cache_tier_selector: refresh persistence failed: %v", err), sdk.LogLevelInfo)
+					}
+				}
 				if changed, err := replaceMarker(req, prior.Marker); err != nil {
 					return sdk.RequestResult{}, err
 				} else if changed {
@@ -442,7 +459,8 @@ func decisionExpired(value decision, now int64) bool {
 	if now <= 0 || value.DecidedAtMillis <= 0 || value.TierTTL <= 0 {
 		return false
 	}
-	return now >= value.DecidedAtMillis+int64(value.TierTTL)*1000
+	lastUse := max(value.DecidedAtMillis, value.RefreshedAtMillis, value.RefreshThroughMillis)
+	return now-lastUse >= int64(value.TierTTL)*1000
 }
 
 // cleanupExpiredState runs at most hourly and deletes a bounded number of keys
