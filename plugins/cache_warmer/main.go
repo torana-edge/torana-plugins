@@ -140,7 +140,13 @@ func parseConfig(raw string) config {
 	return cfg
 }
 
-func loadConfig() config { return parseConfig(sdk.PluginConfig()) }
+func loadConfig() config {
+	raw, err := sdk.PluginConfig()
+	if err != nil {
+		return config{}
+	}
+	return parseConfig(raw)
+}
 
 // warms reports whether this conversation is opted in.
 func (c config) warms(conversationID string) bool {
@@ -314,15 +320,9 @@ func init() {
 	// write-ahead spend reservation (see refreshOne).
 	sdk.OnTick(func(ctx context.Context, tick *pbv1.TickRequest) (sdk.TickResult, error) {
 		cfg := loadConfig()
-		keys, herr, err := sdk.StateKeys()
+		keys, err := sdk.StateKeys()
 		if err != nil {
 			return sdk.TickResult{}, err
-		}
-		if herr != nil {
-			if herr.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED || herr.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE {
-				return sdk.TickIdle(), nil
-			}
-			return sdk.TickResult{}, fmt.Errorf("cache_warmer: state_keys refused: %s", herr.Message)
 		}
 
 		refreshed := 0
@@ -339,16 +339,15 @@ func init() {
 			// StateGetJSON would collapse frame and decode errors into one
 			// plain-error channel, so the raw typed read is used here.
 			var entry warmEntry
-			raw, herr, err := sdk.StateGet(key)
+			raw, found, err := sdk.StateGet(key)
 			switch {
 			case err != nil:
+				if isAdvisory(err) {
+					continue
+				}
 				return sdk.TickResult{}, err
-			case herr != nil && sdk.IsNotFound(herr):
+			case !found:
 				continue
-			case herr != nil && (herr.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED || herr.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE):
-				continue
-			case herr != nil:
-				return sdk.TickResult{}, fmt.Errorf("cache_warmer: state_get %s refused: %s", key, herr.Message)
 			case json.Unmarshal([]byte(raw), &entry) != nil:
 				continue // corrupt stored JSON: key-local
 			}
@@ -359,7 +358,7 @@ func init() {
 			}
 			if !cfg.warms(entry.ConversationID) {
 				// Opted out since the entry was written: delete it (best-effort).
-				_, _ = sdk.StateDelete(key)
+				_ = sdk.StateDelete(key)
 				continue
 			}
 			// Durable-state shape validation is the FIRST step after decoding
@@ -472,7 +471,7 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 	}
 
 	// No-spend gates next: nothing durable happens until every one passes.
-	policy, refusal, err := sdk.GetPromptCachePolicy("warm-cache")
+	policy, err := sdk.GetPromptCachePolicy("warm-cache")
 	if err != nil {
 		if isAdvisory(err) {
 			entry.Stopped = "pricing unavailable"
@@ -480,14 +479,6 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 			return false, fmt.Sprintf("%s: stopped, pricing unavailable", short(entry.ConversationID)), nil
 		}
 		return false, "", err
-	}
-	if refusal != nil {
-		if refusal.Code != pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED && refusal.Code != pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE {
-			return false, "", fmt.Errorf("cache_warmer: prompt cache policy refused: %s", refusal.Message)
-		}
-		entry.Stopped = "pricing unavailable"
-		persistStop(key, entry)
-		return false, fmt.Sprintf("%s: stopped, pricing unavailable", short(entry.ConversationID)), nil
 	}
 	if !policy.RefreshOnRead {
 		// Automatic prefix caching: no lifetime the caller owns, so nothing a
