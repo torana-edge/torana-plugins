@@ -58,17 +58,17 @@ type policy struct {
 
 func init() {
 	sdk.OnBeforeRequest(func(_ context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
-		raw, hostErr, err := sdk.HostCall("env.plugin_config", nil)
+		raw, hostErr, err := sdk.PluginConfigStrict()
 		if err != nil {
 			return sdk.RequestResult{}, fmt.Errorf("tool_governor: configuration fetch failed: %w", err)
 		}
 		if hostErr != nil {
 			return sdk.RequestResult{}, fmt.Errorf("tool_governor: configuration fetch refused: %v", hostErr)
 		}
-		if len(bytes.TrimSpace(raw)) == 0 {
-			return sdk.RequestResult{}, fmt.Errorf("tool_governor: empty configuration response")
-		}
-		p, err := configuredPolicy(string(raw))
+		// A successful unset value is the SDK's explicit {} default. Refusals
+		// and malformed envelopes above still fail closed; policy JSON below
+		// retains this plugin's strict validation and exact-string cache key.
+		p, err := configuredPolicy(raw)
 		if err != nil {
 			return sdk.RequestResult{}, fmt.Errorf("tool_governor: invalid configuration: %w", err)
 		}
