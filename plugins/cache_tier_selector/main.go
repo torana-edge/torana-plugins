@@ -79,6 +79,9 @@ type decision struct {
 	// RefreshedAtMillis records use under a refresh-on-read policy. Keeping it
 	// separate preserves the original decision time and absolute-TTL behavior.
 	RefreshedAtMillis int64 `json:"refreshed_at_millis,omitempty"`
+	// Cover the next TTL/10 of reads to coalesce writes. This can retain an idle
+	// choice slightly longer, but cannot expire a live prefix early after restart.
+	RefreshThroughMillis int64 `json:"refresh_through_millis,omitempty"`
 }
 
 // activity is the per-conversation gap history the decision is based on.
@@ -254,13 +257,13 @@ func init() {
 				}
 				return sdk.PassRequest(), nil
 			case !decisionExpired(prior, now):
-				if policy.RefreshOnRead && now > prior.RefreshedAtMillis {
+				if policy.RefreshOnRead && now > prior.RefreshThroughMillis {
 					prior.RefreshedAtMillis = now
-					// Persist refreshes so reloads/restarts cannot expire a live
-					// prefix at its original creation deadline. An advisory write
-					// failure still permits reapplying the existing sticky bytes.
-					if err := sdk.StateSetJSON(decisionKey, prior); err != nil && !isAdvisory(err) {
-						return sdk.RequestResult{}, err
+					prior.RefreshThroughMillis = now + max(1, int64(prior.TierTTL)*100)
+					// Refresh persistence is bookkeeping. Initial choices still
+					// require successful persistence; an existing marker is safe.
+					if err := sdk.StateSetJSON(decisionKey, prior); err != nil {
+						sdk.Log(fmt.Sprintf("cache_tier_selector: refresh persistence failed: %v", err), sdk.LogLevelInfo)
 					}
 				}
 				if changed, err := replaceMarker(req, prior.Marker); err != nil {
@@ -454,8 +457,8 @@ func decisionExpired(value decision, now int64) bool {
 	if now <= 0 || value.DecidedAtMillis <= 0 || value.TierTTL <= 0 {
 		return false
 	}
-	lastUse := max(value.DecidedAtMillis, value.RefreshedAtMillis)
-	return now >= lastUse && now-lastUse >= int64(value.TierTTL)*1000
+	lastUse := max(value.DecidedAtMillis, value.RefreshedAtMillis, value.RefreshThroughMillis)
+	return now-lastUse >= int64(value.TierTTL)*1000
 }
 
 // cleanupExpiredState runs at most hourly and deletes a bounded number of keys
