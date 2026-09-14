@@ -24,7 +24,7 @@ The workspace resolves `../torana-plugin-sdk` during local development. An
 external plugin should pin the SDK matching its target host:
 
 ```bash
-go get github.com/torana-edge/torana-plugin-sdk@v0.4.3-0.20260914113223-3eed3394e409
+go get github.com/torana-edge/torana-plugin-sdk@v0.5.0
 ```
 
 This foundation uses ABI v1 contract revision 1. Package versions and ABI
