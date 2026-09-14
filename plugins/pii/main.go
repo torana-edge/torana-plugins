@@ -55,13 +55,13 @@ type piiConfig struct {
 }
 
 var (
-	cfgOnce sync.Once
-	cfg     piiConfig
+	cfgMu     sync.Mutex
+	cfgLoaded bool
+	cfg       piiConfig
 )
 
-// parseConfig is the pure config decoder; loadConfig installs its result into
-// the process-global state exactly once. The host validates config against
-// schema.json at write time.
+// parseConfig is the pure config decoder. loadConfig publishes its result
+// after the first successful host read and retries refused/failed reads.
 func parseConfig(raw string) piiConfig {
 	c := piiConfig{OnError: "block"}
 	if raw != "" {
@@ -77,20 +77,25 @@ func modelMessage(role, text string) *pbv1.Message {
 	return &pbv1.Message{Role: role, Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: text}}}}}
 }
 
-func loadConfig() {
-	cfgOnce.Do(func() {
-		raw, err := sdk.PluginConfig()
-		if err != nil {
-			raw = "{}"
-		}
-		cfg = parseConfig(raw)
-	})
+func loadConfig() error {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
+	if cfgLoaded {
+		return nil
+	}
+	raw, err := sdk.PluginConfig()
+	if err != nil {
+		return fmt.Errorf("pii: load plugin config: %w", err)
+	}
+	cfg = parseConfig(raw)
+	cfgLoaded = true
+	return nil
 }
 
 // resetConfigForTest restores every config global so a test row can install a
-// fresh config. Production never calls it; the once-only loader is unchanged.
+// fresh config. Production never calls it.
 func resetConfigForTest() {
-	cfgOnce = sync.Once{}
+	cfgLoaded = false
 	cfg = piiConfig{}
 }
 
@@ -153,7 +158,9 @@ func extractScannable(view sdk.ToolResultView) extraction {
 
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
-		loadConfig()
+		if err := loadConfig(); err != nil {
+			return sdk.RequestResult{}, err
+		}
 
 		// tool_call_id → tool name (the ordered tool-use blocks), so the
 		// allowlist can be applied even when the tool-result block itself

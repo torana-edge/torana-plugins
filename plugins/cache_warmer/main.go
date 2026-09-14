@@ -140,12 +140,12 @@ func parseConfig(raw string) config {
 	return cfg
 }
 
-func loadConfig() config {
+func loadConfig() (config, error) {
 	raw, err := sdk.PluginConfig()
 	if err != nil {
-		return config{}
+		return config{}, fmt.Errorf("cache_warmer: load plugin config: %w", err)
 	}
-	return parseConfig(raw)
+	return parseConfig(raw), nil
 }
 
 // warms reports whether this conversation is opted in.
@@ -234,7 +234,10 @@ func init() {
 	// opted in. This hook only observes and stores — it never modifies the
 	// request, so it cannot affect the prefix it is trying to preserve.
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
-		cfg := loadConfig()
+		cfg, err := loadConfig()
+		if err != nil {
+			return sdk.RequestResult{}, err
+		}
 		if !cfg.any() {
 			return sdk.PassRequest(), nil
 		}
@@ -319,7 +322,10 @@ func init() {
 	// Tick path: refresh whatever is still worth refreshing, under the
 	// write-ahead spend reservation (see refreshOne).
 	sdk.OnTick(func(ctx context.Context, tick *pbv1.TickRequest) (sdk.TickResult, error) {
-		cfg := loadConfig()
+		cfg, err := loadConfig()
+		if err != nil {
+			return sdk.TickResult{}, err
+		}
 		keys, err := sdk.StateKeys()
 		if err != nil {
 			return sdk.TickResult{}, err

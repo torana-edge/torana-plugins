@@ -60,14 +60,14 @@ const (
 // arguments and the current task; "off" leaves it untouched. Loaded once from
 // plugins.config.intent.
 var (
-	cfgOnce  sync.Once
-	fillMode = "heuristic"
+	cfgMu     sync.Mutex
+	cfgLoaded bool
+	fillMode  = "heuristic"
 )
 
-// parseConfig is the pure config decoder; loadConfig installs its result into
-// the process-global state exactly once. The host validates config against
-// schema.json at write time, so an unmarshal failure here is unreachable in
-// practice and falls back to defaults.
+// parseConfig is the pure config decoder. loadConfig publishes its result
+// after the first successful host read and retries refused/failed reads. The
+// host validates config against schema.json at write time.
 func parseConfig(raw string) (fill string) {
 	if raw == "" {
 		return "heuristic"
@@ -84,20 +84,25 @@ func parseConfig(raw string) (fill string) {
 	return "heuristic"
 }
 
-func loadConfig() {
-	cfgOnce.Do(func() {
-		raw, err := sdk.PluginConfig()
-		if err != nil {
-			raw = "{}"
-		}
-		fillMode = parseConfig(raw)
-	})
+func loadConfig() error {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
+	if cfgLoaded {
+		return nil
+	}
+	raw, err := sdk.PluginConfig()
+	if err != nil {
+		return fmt.Errorf("intent: load plugin config: %w", err)
+	}
+	fillMode = parseConfig(raw)
+	cfgLoaded = true
+	return nil
 }
 
 // resetConfigForTest restores every config global so a test row can install a
-// fresh config. Production never calls it; the once-only loader is unchanged.
+// fresh config. Production never calls it.
 func resetConfigForTest() {
-	cfgOnce = sync.Once{}
+	cfgLoaded = false
 	fillMode = "heuristic"
 }
 
@@ -106,6 +111,12 @@ func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
 		if !hasFunctionTool(req) {
 			return sdk.PassRequest(), nil
+		}
+		// Resolve configuration before metadata writes or in-memory mutation.
+		// A refusal must leave this invocation with no observable side effects;
+		// loadConfig caches only successful reads, so a later request can retry.
+		if err := loadConfig(); err != nil {
+			return sdk.RequestResult{}, err
 		}
 		if err := sdk.MetaSet("intent:conversation", conversationID(req)); err != nil {
 			sdk.Log(fmt.Sprintf("intent: capture context unavailable: %v", err), sdk.LogLevelInfo)
@@ -281,7 +292,9 @@ func handleToolCall(call sdk.ToolCall) (sdk.ToolCallAction, error) {
 // or a malformed reply is a contract/configuration defect and returns an
 // error so failure_mode applies and the host records the failure.
 func rehydrateHistoryIntents(req *pbv1.ChatRequest) (bool, error) {
-	loadConfig()
+	if err := loadConfig(); err != nil {
+		return false, err
+	}
 	restored, filled, present := 0, 0, 0
 	conversation, identityReason := conversationIdentity(req)
 	missingID, lookupMiss := 0, 0

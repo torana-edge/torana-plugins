@@ -66,9 +66,10 @@ const (
 // tool output is sent. A positive value is opt-in via
 // plugins.config.compactor and retains head+tail within that many bytes (the
 // truncation marker is ADDITIONAL framing, not part of the budget). Loaded
-// once, lazily, from the plugin config.
+// lazily after the first successful plugin-config read.
 var (
-	cfgOnce                 sync.Once
+	cfgMu                   sync.Mutex
+	cfgLoaded               bool
 	maxSummarizerInputBytes int
 	toolPolicies            []sdk.ToolPolicyRule
 	expectedApplications    int64
@@ -81,10 +82,9 @@ type config struct {
 	ExpectedApplications    int64                `json:"expected_applications"`
 }
 
-// parseConfig is the pure config decoder; loadConfig installs its result into
-// the process-global state exactly once. The host validates config against
-// schema.json at write time, so an unmarshal failure here is unreachable in
-// practice and falls back to defaults.
+// parseConfig is the pure config decoder. loadConfig publishes its result
+// after the first successful host read and retries refused/failed reads. The
+// host validates config against schema.json at write time.
 func parseConfig(raw string) config {
 	var c config
 	if raw != "" {
@@ -103,23 +103,28 @@ func modelMessage(role, text string) *pbv1.Message {
 	return &pbv1.Message{Role: role, Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: text}}}}}
 }
 
-func loadConfig() {
-	cfgOnce.Do(func() {
-		raw, err := sdk.PluginConfig()
-		if err != nil {
-			raw = "{}"
-		}
-		c := parseConfig(raw)
-		maxSummarizerInputBytes = c.MaxSummarizerInputBytes
-		toolPolicies = c.ToolPolicies
-		expectedApplications = c.ExpectedApplications
-	})
+func loadConfig() error {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
+	if cfgLoaded {
+		return nil
+	}
+	raw, err := sdk.PluginConfig()
+	if err != nil {
+		return fmt.Errorf("compactor: load plugin config: %w", err)
+	}
+	c := parseConfig(raw)
+	maxSummarizerInputBytes = c.MaxSummarizerInputBytes
+	toolPolicies = c.ToolPolicies
+	expectedApplications = c.ExpectedApplications
+	cfgLoaded = true
+	return nil
 }
 
 // resetConfigForTest restores every config global so a test row can install a
-// fresh config. Production never calls it; the once-only loader is unchanged.
+// fresh config. Production never calls it.
 func resetConfigForTest() {
-	cfgOnce = sync.Once{}
+	cfgLoaded = false
 	maxSummarizerInputBytes = 0
 	toolPolicies = nil
 	expectedApplications = 0
@@ -145,7 +150,9 @@ func init() {
 // ==========================================================================
 
 func compactToolResults(ctx context.Context, req *pbv1.ChatRequest) (bool, error) {
-	loadConfig()
+	if err := loadConfig(); err != nil {
+		return false, err
+	}
 	modified := false
 	var modelWorks []modelWork
 	assistantAfter := assistantMessageCountsAfter(req.Messages)

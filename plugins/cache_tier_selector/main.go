@@ -122,12 +122,12 @@ func parseConfig(raw string) config {
 	return cfg
 }
 
-func loadConfig() config {
+func loadConfig() (config, error) {
 	raw, err := sdk.PluginConfig()
 	if err != nil {
-		return config{}
+		return config{}, fmt.Errorf("cache_tier_selector: load plugin config: %w", err)
 	}
-	return parseConfig(raw)
+	return parseConfig(raw), nil
 }
 
 // isAdvisory reports whether err is an advisory refusal (NOT_CONFIGURED or
@@ -146,7 +146,10 @@ func isAdvisory(err error) bool {
 
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
-		cfg := loadConfig()
+		cfg, err := loadConfig()
+		if err != nil {
+			return sdk.RequestResult{}, err
+		}
 		if cfg.Mode == "off" {
 			return sdk.PassRequest(), nil
 		}

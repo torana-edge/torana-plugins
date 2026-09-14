@@ -821,7 +821,7 @@ func TestRehydrationUnrepresentableArgumentsNoPanic(t *testing.T) {
 	}
 	for _, raw := range cases {
 		t.Run(raw, func(t *testing.T) {
-			newHarness(t) // resets the process-global config for each row
+			h := newHarness(t) // resets the process-global config for each row
 			req := &pbv1.ChatRequest{Tools: []*pbv1.ToolDef{{
 				Name:           "read",
 				ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"}}}`),
@@ -831,7 +831,9 @@ func TestRehydrationUnrepresentableArgumentsNoPanic(t *testing.T) {
 				{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "call_1", Name: "read", ArgumentsJson: []byte(raw)}}}}},
 			}
 			before := proto.Clone(req).(*pbv1.ChatRequest)
-			modified, err := rehydrateHistoryIntents(req)
+			var modified bool
+			var err error
+			h.Run(func() { modified, err = rehydrateHistoryIntents(req) })
 			if err != nil {
 				t.Fatalf("hook error (must not panic): %v", err)
 			}

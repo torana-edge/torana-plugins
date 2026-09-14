@@ -71,7 +71,8 @@ const (
 )
 
 var (
-	cfgOnce      sync.Once
+	cfgMu        sync.Mutex
+	cfgLoaded    bool
 	toolPolicies []sdk.ToolPolicyRule
 )
 
@@ -80,10 +81,9 @@ type config struct {
 	ToolPolicies []sdk.ToolPolicyRule `json:"tool_policies"`
 }
 
-// parseConfig is the pure config decoder; loadConfig installs its result into
-// the process-global state exactly once. The host validates config against
-// schema.json at write time, so an unmarshal failure here is unreachable in
-// practice and falls back to defaults.
+// parseConfig is the pure config decoder. loadConfig publishes its result
+// after the first successful host read and retries refused/failed reads. The
+// host validates config against schema.json at write time.
 func parseConfig(raw string) config {
 	var c config
 	if raw != "" {
@@ -92,21 +92,26 @@ func parseConfig(raw string) config {
 	return c
 }
 
-func loadConfig() {
-	cfgOnce.Do(func() {
-		raw, err := sdk.PluginConfig()
-		if err != nil {
-			raw = "{}"
-		}
-		c := parseConfig(raw)
-		toolPolicies = c.ToolPolicies
-	})
+func loadConfig() error {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
+	if cfgLoaded {
+		return nil
+	}
+	raw, err := sdk.PluginConfig()
+	if err != nil {
+		return fmt.Errorf("keyword_compactor: load plugin config: %w", err)
+	}
+	c := parseConfig(raw)
+	toolPolicies = c.ToolPolicies
+	cfgLoaded = true
+	return nil
 }
 
 // resetConfigForTest restores every config global so a test row can install a
-// fresh config. Production never calls it; the once-only loader is unchanged.
+// fresh config. Production never calls it.
 func resetConfigForTest() {
-	cfgOnce = sync.Once{}
+	cfgLoaded = false
 	toolPolicies = nil
 }
 
@@ -130,7 +135,9 @@ func init() {
 // ==========================================================================
 
 func compactToolResults(req *pbv1.ChatRequest) (bool, error) {
-	loadConfig()
+	if err := loadConfig(); err != nil {
+		return false, err
+	}
 	modified := false
 	assistantAfter := assistantMessageCountsAfter(req.Messages)
 	toolNames := sdk.ToolNamesByCallID(req.Messages)
