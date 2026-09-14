@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
 	"unicode/utf8"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
@@ -84,8 +85,29 @@ const modelConfig = `{"tool_policies":[{"match":"read*","mode":"model"}],"expect
 
 func modelStub(completion string) func(*pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
 	return func(*pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
-		return &pbv1.ModelCompleteResult{Content: completion, ReportedModel: "small-model", Usage: &pbv1.Usage{InputTokens: 100, OutputTokens: 50}}, nil, nil
+		return modelResult(completion, &pbv1.Usage{InputTokens: 100, OutputTokens: 50}), nil, nil
 	}
+}
+
+func modelResult(text string, usage *pbv1.Usage) *pbv1.ModelCompleteResult {
+	return &pbv1.ModelCompleteResult{Message: &pbv1.ResponseMessage{Blocks: []*pbv1.ResponseBlock{{Kind: &pbv1.ResponseBlock_Text{Text: &pbv1.ResponseTextBlock{Text: text}}}}}, FinishReason: "stop", ReportedModel: "small-model", Usage: usage}
+}
+
+func TestStrictModelTextRejectsUnsupportedBlocks(t *testing.T) {
+	tool := &pbv1.ResponseBlock{Kind: &pbv1.ResponseBlock_ToolCall{ToolCall: &pbv1.ToolCall{Name: "read", ArgumentsJson: []byte(`{}`)}}}
+	mixed := &pbv1.ModelCompleteResult{Message: &pbv1.ResponseMessage{Blocks: []*pbv1.ResponseBlock{
+		{Kind: &pbv1.ResponseBlock_Text{Text: &pbv1.ResponseTextBlock{Text: "summary"}}}, tool,
+	}}}
+	if _, err := strictModelText(mixed); err == nil {
+		t.Fatal("mixed text/tool response must be rejected rather than partially applied")
+	}
+	if _, err := strictModelText(&pbv1.ModelCompleteResult{Message: &pbv1.ResponseMessage{Blocks: []*pbv1.ResponseBlock{tool}}}); err == nil {
+		t.Fatal("tool-only response must be rejected")
+	}
+}
+
+func modelMessageText(m *pbv1.Message) string {
+	return sdk.Text(m)
 }
 
 func applyStub(apply bool) func(args string) (string, error) {
@@ -300,6 +322,20 @@ func TestDeterministicFirstPassAppliesAndCachesThenReuses(t *testing.T) {
 	if countCommand(h, "env.cache_set") != 1 {
 		t.Fatalf("turn 1 must cache the replacement, cache_set calls=%d", countCommand(h, "env.cache_set"))
 	}
+	for _, call := range h.Calls() {
+		if call.Command != "torana_record_savings" {
+			continue
+		}
+		var report struct {
+			PricingResource string `json:"pricing_resource"`
+		}
+		if err := json.Unmarshal([]byte(call.Args), &report); err != nil {
+			t.Fatalf("savings args not JSON: %v (%s)", err, call.Args)
+		}
+		if report.PricingResource != "target" {
+			t.Fatalf("savings pricing resource = %q, want target", report.PricingResource)
+		}
+	}
 
 	// Turn 2: a FRESH CLONE of the original request on the SAME harness (the
 	// cache store is per-harness). Reusing the mutated request would trip
@@ -373,10 +409,10 @@ func TestModelPathAppliesWithNamedService(t *testing.T) {
 	if modelArgs == nil || modelArgs.Service != "summarizer" || len(modelArgs.Messages) != 2 {
 		t.Fatalf("named model request = %+v", modelArgs)
 	}
-	if !strings.Contains(modelArgs.Messages[1].Content, "find the bug in server.go") {
+	if !strings.Contains(modelMessageText(modelArgs.Messages[1]), "find the bug in server.go") {
 		t.Fatal("model request missing the intent")
 	}
-	if strings.Contains(modelArgs.Messages[1].Content, "[truncated]") {
+	if strings.Contains(modelMessageText(modelArgs.Messages[1]), "[truncated]") {
 		t.Fatal("default max_summarizer_input_bytes=0 must send the FULL output, not a truncated one")
 	}
 	if hasMetric(h, "torana_intent_missing_total") {
@@ -479,7 +515,7 @@ func TestMissingUsageDeclinesEconomicApplication(t *testing.T) {
 	h.SetConfig(modelConfig)
 	h.SeedSharedCache("intent:call_1", "find the bug")
 	h.StubModelComplete(func(*pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
-		return &pbv1.ModelCompleteResult{Content: "summary"}, nil, nil
+		return modelResult("summary", nil), nil, nil
 	})
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	res := h.BeforeRequest(bigToolRequest(bigContent()))
@@ -664,7 +700,7 @@ func TestIntentMissUsesBoundedFallback(t *testing.T) {
 				t.Fatalf("eligible metric = %v, want 1", got)
 			}
 			const wantIntent = `torana-derived-intent-v1:{"user_request":"find the bug","tool_name":"read","tool_arguments":"{\"path\":\"server.go\"}"}`
-			if modelArgs == nil || len(modelArgs.Messages) != 2 || !strings.HasPrefix(modelArgs.Messages[1].Content, "Intent: "+wantIntent+"\n\n") {
+			if modelArgs == nil || len(modelArgs.Messages) != 2 || !strings.HasPrefix(modelMessageText(modelArgs.Messages[1]), "Intent: "+wantIntent+"\n\n") {
 				t.Fatalf("model prompt lacks exact derived intent %q: %+v", wantIntent, modelArgs)
 			}
 			wantCalls := map[string]int{
@@ -889,7 +925,7 @@ func TestTruncationMarkerInSummarizerPayload(t *testing.T) {
 	if res.Err != nil || res.Request == nil {
 		t.Fatalf("expected replacement, err=%v", res.Err)
 	}
-	if modelArgs == nil || len(modelArgs.Messages) != 2 || !strings.Contains(modelArgs.Messages[1].Content, "... [truncated] ...") {
+	if modelArgs == nil || len(modelArgs.Messages) != 2 || !strings.Contains(modelMessageText(modelArgs.Messages[1]), "... [truncated] ...") {
 		t.Fatal("configured cap must truncate the summarizer payload head+tail")
 	}
 	if len(toolText(t, res.Request, 3)) >= len(bigContent()) {
@@ -920,7 +956,9 @@ func TestCacheSetRefusalIsBestEffort(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
 	h.SeedSharedCache("intent:call_1", "find the bug")
-	h.DenyPermission("env.cache_set")
+	h.StubHostCall("env.cache_set", func(string) (string, error) {
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "cache unavailable"), nil
+	})
 	h.StubModelComplete(modelStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	res := h.BeforeRequest(bigToolRequest(bigContent()))
@@ -944,7 +982,7 @@ func TestSavingsReportRefusalDoesNotChangeReplacement(t *testing.T) {
 	h.StubModelComplete(modelStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	h.StubHostCall("torana_record_savings", func(string) (string, error) {
-		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub refusal"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "stub refusal"), nil
 	})
 	res := h.BeforeRequest(bigToolRequest(bigContent()))
 	if res.Err != nil {

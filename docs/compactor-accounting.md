@@ -9,6 +9,13 @@ in the `plugin-egress` request feed, including paid unusable completions and
 batches declined by the economic gate. Model-service input/cache usage must be
 normalized into disjoint billable buckets by the host.
 
+`keyword_compactor` also reports savings against model cost. Its manifest
+therefore declares the required pricing resource named `target`. Operators must
+bind that slot to the provider and model pricing for the request path where the
+plugin runs. The host resolves the binding through `env.model_pricing`; plugin
+activation fails when the required slot is absent. This binding is attribution
+data only: the plugin remains deterministic and does not call a model service.
+
 ## Workload-level accounting
 
 Summing applied-compaction net savings is not the net result for a workload:

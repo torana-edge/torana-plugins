@@ -58,12 +58,9 @@ type policy struct {
 
 func init() {
 	sdk.OnBeforeRequest(func(_ context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
-		raw, hostErr, err := sdk.PluginConfigStrict()
+		raw, err := sdk.PluginConfig()
 		if err != nil {
 			return sdk.RequestResult{}, fmt.Errorf("tool_governor: configuration fetch failed: %w", err)
-		}
-		if hostErr != nil {
-			return sdk.RequestResult{}, fmt.Errorf("tool_governor: configuration fetch refused: %v", hostErr)
 		}
 		// A successful unset value is the SDK's explicit {} default. Refusals
 		// and malformed envelopes above still fail closed; policy JSON below

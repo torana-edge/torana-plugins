@@ -1025,7 +1025,7 @@ func TestCarrierHookRows(t *testing.T) {
 // NO host calls beyond the mode read (env.plugin_config), and the request
 // is byte/structurally unchanged.
 func TestDeclineProofsZeroCallsNoMutation(t *testing.T) {
-	invalid := &pbv1.ChatRequest{Model: "m", Messages: []*pbv1.Message{{Role: "user", Blocks: nil}}}
+	invalid := &pbv1.ChatRequest{Model: "m", Messages: []*pbv1.Message{{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "out-of-domain"}}}}}}}
 	noMarker := &pbv1.ChatRequest{Model: "m", Messages: []*pbv1.Message{{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "hi"}}}}}}}
 	rows := []struct {
 		name string

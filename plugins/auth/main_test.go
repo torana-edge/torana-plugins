@@ -476,6 +476,28 @@ func TestHostErrorTable(t *testing.T) {
 	}
 }
 
+func TestVerdictAndIdentityFailuresCannotReturnSuccess(t *testing.T) {
+	t.Run("identity denied", func(t *testing.T) {
+		h := newHarness(t)
+		stubVerify(t, h, wantIdentity(""))
+		h.DenyPermission("env.set_identity")
+		res := h.BeforeRequest(reqWithHeaders(map[string]string{"Authorization": "Bearer sk-torana-abc"}))
+		if res.Err == nil || res.PassedThrough {
+			t.Fatalf("denied identity must fail the hook, passed=%v err=%v", res.PassedThrough, res.Err)
+		}
+	})
+
+	t.Run("block denied", func(t *testing.T) {
+		h := newHarness(t)
+		stubVerify(t, h, func(string) (string, bool) { return valueReply(`{"status":"rejected"}`), true })
+		h.DenyPermission("env.block_request")
+		res := h.BeforeRequest(reqWithHeaders(map[string]string{"Authorization": "Bearer sk-torana-abc"}))
+		if res.Err == nil || res.PassedThrough {
+			t.Fatalf("denied block must fail the hook, passed=%v err=%v", res.PassedThrough, res.Err)
+		}
+	})
+}
+
 // TestPrecedenceAuthorizationWins — a virtual key in Authorization beats one
 // in X-Api-Key, and verification happens EXACTLY ONCE (same-token duplication
 // included).

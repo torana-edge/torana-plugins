@@ -23,11 +23,11 @@ func TestBatchCostIncludesDiscardedCompletions(t *testing.T) {
 					return modelStub("useful summary")(args)
 				}
 				if mode == "nil" {
-					return nil, nil, nil
+					return modelResult("", nil), nil, nil
 				}
-				result := &pbv1.ModelCompleteResult{Usage: &pbv1.Usage{InputTokens: 10000, OutputTokens: 50}}
+				result := modelResult("", &pbv1.Usage{InputTokens: 10000, OutputTokens: 50})
 				if mode == "longer" {
-					result.Content = strings.Repeat("no reduction", 10000)
+					result = modelResult(strings.Repeat("no reduction", 10000), result.Usage)
 				}
 				if mode == "unknown" {
 					result.Usage = nil
@@ -88,7 +88,7 @@ func TestUnusablePaidBatchDoesNotClaimAnAppliedCompaction(t *testing.T) {
 		h.SetConfig(modelConfig)
 		h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 		h.StubModelComplete(func(*pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
-			return &pbv1.ModelCompleteResult{Content: content, Usage: &pbv1.Usage{InputTokens: 100, OutputTokens: 20}}, nil, nil
+			return modelResult(content, &pbv1.Usage{InputTokens: 100, OutputTokens: 20}), nil, nil
 		})
 		res := h.BeforeRequest(bigToolRequest(bigContent()))
 		if res.Err != nil || !res.PassedThrough {

@@ -31,6 +31,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -43,6 +44,14 @@ import (
 )
 
 func main() {}
+
+func isAdvisory(err error) bool {
+	var refusal *sdk.HostCallRefusalError
+	if !errors.As(err, &refusal) {
+		return false
+	}
+	return refusal.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED || refusal.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE
+}
 
 const (
 	minContentLength      = 2000     // below this, content is already small enough
@@ -62,7 +71,8 @@ const (
 )
 
 var (
-	cfgOnce      sync.Once
+	cfgMu        sync.Mutex
+	cfgLoaded    bool
 	toolPolicies []sdk.ToolPolicyRule
 )
 
@@ -71,10 +81,9 @@ type config struct {
 	ToolPolicies []sdk.ToolPolicyRule `json:"tool_policies"`
 }
 
-// parseConfig is the pure config decoder; loadConfig installs its result into
-// the process-global state exactly once. The host validates config against
-// schema.json at write time, so an unmarshal failure here is unreachable in
-// practice and falls back to defaults.
+// parseConfig is the pure config decoder. loadConfig publishes its result
+// after the first successful host read and retries refused/failed reads. The
+// host validates config against schema.json at write time.
 func parseConfig(raw string) config {
 	var c config
 	if raw != "" {
@@ -83,17 +92,26 @@ func parseConfig(raw string) config {
 	return c
 }
 
-func loadConfig() {
-	cfgOnce.Do(func() {
-		c := parseConfig(sdk.PluginConfig())
-		toolPolicies = c.ToolPolicies
-	})
+func loadConfig() error {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
+	if cfgLoaded {
+		return nil
+	}
+	raw, err := sdk.PluginConfig()
+	if err != nil {
+		return fmt.Errorf("keyword_compactor: load plugin config: %w", err)
+	}
+	c := parseConfig(raw)
+	toolPolicies = c.ToolPolicies
+	cfgLoaded = true
+	return nil
 }
 
 // resetConfigForTest restores every config global so a test row can install a
-// fresh config. Production never calls it; the once-only loader is unchanged.
+// fresh config. Production never calls it.
 func resetConfigForTest() {
-	cfgOnce = sync.Once{}
+	cfgLoaded = false
 	toolPolicies = nil
 }
 
@@ -117,7 +135,9 @@ func init() {
 // ==========================================================================
 
 func compactToolResults(req *pbv1.ChatRequest) (bool, error) {
-	loadConfig()
+	if err := loadConfig(); err != nil {
+		return false, err
+	}
 	modified := false
 	assistantAfter := assistantMessageCountsAfter(req.Messages)
 	toolNames := sdk.ToolNamesByCallID(req.Messages)
@@ -187,33 +207,29 @@ func compactToolResults(req *pbv1.ChatRequest) (bool, error) {
 			// Retrieve the optional model-authored intent for this tool call.
 			// NOT_FOUND and present-empty both use the bounded fallback; any other
 			// refusal or malformed reply is a contract defect — error the hook.
-			intent, herr, err := sdk.SharedCacheGet(intentCacheKey + ":" + view.ToolCallId)
+			intent, found, err := sdk.SharedCacheGet(intentCacheKey + ":" + view.ToolCallId)
 			if err != nil {
 				return false, fmt.Errorf("keyword_compactor: cache_get %s:%s: %w", intentCacheKey, view.ToolCallId, err)
 			}
-			if herr != nil && !sdk.IsNotFound(herr) {
-				return false, fmt.Errorf("keyword_compactor: cache_get %s:%s refused: %s", intentCacheKey, view.ToolCallId, herr.Message)
-			}
-			derived := herr != nil || intent == ""
+			derived := !found || intent == ""
 			if derived {
 				sdk.EmitMetric("torana_intent_missing_total", sdk.MetricCounter, 1, map[string]string{"tool": toolName})
 				intent = deriveCompactionIntent(req.Messages, mi, view.Block, toolName, toolArgs)
 			}
 
 			keywordKey := keywordResultCacheKey(toolName, toolArgs, text, intent, derived)
-			cached, herr, err := sdk.CacheGet(keywordKey)
+			cached, found, err := sdk.CacheGet(keywordKey)
 			if err != nil {
 				return false, fmt.Errorf("keyword_compactor: cache_get keyword key: %w", err)
-			}
-			if herr != nil && !sdk.IsNotFound(herr) {
-				return false, fmt.Errorf("keyword_compactor: cache_get keyword key refused: %s", herr.Message)
 			}
 			// Reuse only a non-empty value that is SHORTER than the original.
 			// Missing, present-empty, and non-shorter values are unusable and
 			// recomputed locally — the value is a pure function of the inputs, so
 			// a stale or corrupt entry must never be applied or cached forever.
-			if herr == nil && cached != "" && len(cached) < len(text) {
-				recordSavings(len(text), len(cached), "cache_reuse")
+			if found && cached != "" && len(cached) < len(text) {
+				if err := recordSavings(len(text), len(cached), "cache_reuse"); err != nil {
+					return false, err
+				}
 				if _, err := sdk.ReplaceToolResultText(msg, view.Block, cached); err != nil {
 					return false, fmt.Errorf("keyword_compactor: apply cached replacement: %w", err)
 				}
@@ -231,14 +247,18 @@ func compactToolResults(req *pbv1.ChatRequest) (bool, error) {
 				continue
 			}
 
-			recordSavings(len(text), len(compacted), "transformation")
+			if err := recordSavings(len(text), len(compacted), "transformation"); err != nil {
+				return false, err
+			}
 			if _, err := sdk.ReplaceToolResultText(msg, view.Block, compacted); err != nil {
 				return false, fmt.Errorf("keyword_compactor: apply replacement: %w", err)
 			}
 			modified = true
 			// Best-effort: the replacement is already applied in memory; a
 			// refused write cannot corrupt it, and the host logs the refusal.
-			_, _ = sdk.CacheSet(keywordKey, compacted)
+			if err := sdk.CacheSet(keywordKey, compacted); err != nil && !isAdvisory(err) {
+				return false, fmt.Errorf("keyword_compactor: cache write: %w", err)
+			}
 		}
 	}
 	return modified, nil
@@ -345,15 +365,14 @@ func assistantMessageCountsAfter(messages []*pbv1.Message) []int {
 func applyDeterministicPolicy(msg *pbv1.Message, block int, text, toolName, toolArgs string, rule sdk.ToolPolicyRule) (bool, error) {
 	cacheKey := sdk.ContentAddressedCacheKey(policyCompactionCache,
 		"policy-v1", toolName, toolArgs, text, rule.Mode, rule.Rerun)
-	cached, herr, err := sdk.CacheGet(cacheKey)
+	cached, found, err := sdk.CacheGet(cacheKey)
 	if err != nil {
 		return false, fmt.Errorf("keyword_compactor: policy cache_get: %w", err)
 	}
-	if herr != nil && !sdk.IsNotFound(herr) {
-		return false, fmt.Errorf("keyword_compactor: policy cache_get refused: %s", herr.Message)
-	}
-	if herr == nil && cached != "" && len(cached) < len(text) {
-		recordSavings(len(text), len(cached), "cache_reuse")
+	if found && cached != "" && len(cached) < len(text) {
+		if err := recordSavings(len(text), len(cached), "cache_reuse"); err != nil {
+			return false, err
+		}
 		if _, err := sdk.ReplaceToolResultText(msg, block, cached); err != nil {
 			return false, fmt.Errorf("keyword_compactor: apply policy replacement: %w", err)
 		}
@@ -363,24 +382,39 @@ func applyDeterministicPolicy(msg *pbv1.Message, block int, text, toolName, tool
 	if len(replacement) >= len(text) {
 		return false, nil
 	}
-	recordSavings(len(text), len(replacement), "transformation")
+	if err := recordSavings(len(text), len(replacement), "transformation"); err != nil {
+		return false, err
+	}
 	if _, err := sdk.ReplaceToolResultText(msg, block, replacement); err != nil {
 		return false, fmt.Errorf("keyword_compactor: apply policy replacement: %w", err)
 	}
-	_, _ = sdk.CacheSet(cacheKey, replacement)
+	if err := sdk.CacheSet(cacheKey, replacement); err != nil && !isAdvisory(err) {
+		return false, fmt.Errorf("keyword_compactor: cache write: %w", err)
+	}
 	return true, nil
 }
 
 // recordSavings reports compaction byte savings to /stats via the host.
-// Best-effort by contract: it runs after the mutation and must never change
-// the applied replacement.
-func recordSavings(originalBytes, finalBytes int, source string) {
-	payload, _ := json.Marshal(map[string]any{
-		"original_bytes": originalBytes,
-		"final_bytes":    finalBytes,
-		"source":         source,
+// Advisory reporting refusal does not prevent a replacement; protocol,
+// transport, and contract failures surface to the hook.
+func recordSavings(originalBytes, finalBytes int, source string) error {
+	payload, err := json.Marshal(map[string]any{
+		"original_bytes":   originalBytes,
+		"final_bytes":      finalBytes,
+		"source":           source,
+		"pricing_resource": "target",
 	})
-	_, _, _ = sdk.HostCallExtension("torana_record_savings", payload)
+	if err != nil {
+		return fmt.Errorf("keyword_compactor: encode savings report: %w", err)
+	}
+	_, err = sdk.HostCallExtension("torana_record_savings", payload)
+	if err != nil && isAdvisory(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("keyword_compactor: record savings: %w", err)
+	}
+	return nil
 }
 
 // compactDeterministic extracts lines matching intent keywords, keeping the

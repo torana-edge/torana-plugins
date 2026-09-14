@@ -122,7 +122,13 @@ func parseConfig(raw string) config {
 	return cfg
 }
 
-func loadConfig() config { return parseConfig(sdk.PluginConfig()) }
+func loadConfig() (config, error) {
+	raw, err := sdk.PluginConfig()
+	if err != nil {
+		return config{}, fmt.Errorf("cache_tier_selector: load plugin config: %w", err)
+	}
+	return parseConfig(raw), nil
+}
 
 // isAdvisory reports whether err is an advisory refusal (NOT_CONFIGURED or
 // UNAVAILABLE) — the operator/transient class a plugin may decline safely.
@@ -140,7 +146,10 @@ func isAdvisory(err error) bool {
 
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
-		cfg := loadConfig()
+		cfg, err := loadConfig()
+		if err != nil {
+			return sdk.RequestResult{}, err
+		}
 		if cfg.Mode == "off" {
 			return sdk.PassRequest(), nil
 		}
@@ -166,7 +175,7 @@ func init() {
 		if meta.Provider == "" {
 			return sdk.PassRequest(), nil
 		}
-		policy, refusal, err := sdk.GetPromptCachePolicy("request-cache")
+		policy, err := sdk.GetPromptCachePolicy("request-cache")
 		if err != nil {
 			// Authoritative read: advisory pricing declines (unknown
 			// economics — guessing spends the operator's money on a hunch);
@@ -175,12 +184,6 @@ func init() {
 				return sdk.PassRequest(), nil
 			}
 			return sdk.RequestResult{}, err
-		}
-		if refusal != nil {
-			if refusal.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED || refusal.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE {
-				return sdk.PassRequest(), nil
-			}
-			return sdk.RequestResult{}, fmt.Errorf("cache_tier_selector: prompt cache policy refused: %s", refusal.Message)
 		}
 		if cfg.Mode == "auto" && !autoEconomicsKnown(policy) {
 			return sdk.PassRequest(), nil
@@ -207,38 +210,28 @@ func init() {
 		// key-local data error (decline for this key only, never absence).
 		// StateGetJSON would collapse the frame error and the decode error
 		// into one plain-error channel, so the raw typed read is used here.
-		raw, herr, err := sdk.StateGet(decisionKey)
-		found := false
-		switch {
-		case err != nil:
+		raw, found, err := sdk.StateGet(decisionKey)
+		if err != nil {
+			if isAdvisory(err) {
+				return sdk.PassRequest(), nil
+			}
 			return sdk.RequestResult{}, err
-		case herr != nil && sdk.IsNotFound(herr):
-			// fresh
-		case herr != nil && (herr.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED || herr.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE):
-			return sdk.PassRequest(), nil
-		case herr != nil:
-			return sdk.RequestResult{}, fmt.Errorf("cache_tier_selector: state_get %s refused: %s", decisionKey, herr.Message)
-		case json.Unmarshal([]byte(raw), &prior) != nil:
+		}
+		if found && json.Unmarshal([]byte(raw), &prior) != nil {
 			// Corrupt stored JSON: key-local data error — decline for this
 			// key without poisoning unrelated ones and without treating it
 			// as absence.
 			return sdk.PassRequest(), nil
-		default:
-			found = true
 		}
 		if found && !decisionMatchesPolicy(prior, policy) {
 			// Corrupt or foreign state must never reintroduce a marker the
 			// current policy does not offer, even if it was planted under the
 			// current scoped key.
-			if herr, err := sdk.StateDelete(decisionKey); err != nil || herr != nil {
-				if err != nil {
-					return sdk.RequestResult{}, err
+			if err := sdk.StateDelete(decisionKey); err != nil {
+				if isAdvisory(err) {
+					return sdk.PassRequest(), nil
 				}
-				if !sdk.IsNotFound(herr) && herr.Code != pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED &&
-					herr.Code != pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE {
-					return sdk.RequestResult{}, fmt.Errorf("cache_tier_selector: delete invalid %s refused: %s", decisionKey, herr.Message)
-				}
-				return sdk.PassRequest(), nil
+				return sdk.RequestResult{}, err
 			}
 			found = false
 		}
@@ -277,20 +270,11 @@ func init() {
 			}
 			// The provider tier has elapsed; the decision may be reconsidered.
 			// Deleting is governed by env.state_set (StateDeletePermission).
-			if herr, err := sdk.StateDelete(decisionKey); err != nil || herr != nil {
-				if err != nil {
-					return sdk.RequestResult{}, err
-				}
-				if herr.Code == pbv1.ErrorCode_ERROR_CODE_NOT_FOUND {
-					// Already gone — fine.
-				} else if herr.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED ||
-					herr.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE {
-					// Advisory: decline (an expired decision held in place is
-					// harmless — the marker stays sticky).
+			if err := sdk.StateDelete(decisionKey); err != nil {
+				if isAdvisory(err) {
 					return sdk.PassRequest(), nil
-				} else {
-					return sdk.RequestResult{}, fmt.Errorf("cache_tier_selector: delete expired %s refused: %s", decisionKey, herr.Message)
 				}
+				return sdk.RequestResult{}, err
 			}
 		}
 
@@ -333,9 +317,12 @@ func init() {
 			}
 			return sdk.RequestResult{}, err
 		}
-		// Best-effort observability; the decision is already durable.
+		// Best-effort observability; advisory unavailability is safe after the
+		// durable decision, while contract defects still fail the hook.
 		payload, _ := json.Marshal(map[string]any{"counter": "tier_decisions", "delta": 1})
-		_, _, _ = sdk.HostCallExtension("torana_plugin_counter", payload)
+		if _, err := sdk.HostCallExtension("torana_plugin_counter", payload); err != nil && !isAdvisory(err) {
+			return sdk.RequestResult{}, fmt.Errorf("cache_tier_selector: counter: %w", err)
+		}
 
 		if changed, err := replaceMarker(req, marker); err != nil {
 			return sdk.RequestResult{}, err
@@ -421,17 +408,15 @@ func recordActivity(convKey string, now int64) (activity, error) {
 		return act, nil
 	}
 	key := "activity/" + convKey
-	raw, herr, err := sdk.StateGet(key)
+	raw, found, err := sdk.StateGet(key)
 	switch {
 	case err != nil:
-		return act, err // transport/protocol/frame
-	case herr != nil && !sdk.IsNotFound(herr):
-		if herr.Code != pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED && herr.Code != pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE {
-			return act, fmt.Errorf("cache_tier_selector: state_get %s refused: %s", key, herr.Message)
+		if !isAdvisory(err) {
+			return act, err
 		}
 		// Advisory: proceed with fresh history; the decision persist gates
 		// any mutation.
-	case herr == nil && json.Unmarshal([]byte(raw), &act) != nil:
+	case found && json.Unmarshal([]byte(raw), &act) != nil:
 		// Corrupt stored JSON: key-local — proceed with fresh history.
 	}
 
@@ -480,8 +465,8 @@ func cleanupExpiredState(now int64, cfg config) {
 	} else if found && now-last < cleanupInterval {
 		return
 	}
-	keys, herr, err := sdk.StateKeys()
-	if err != nil || herr != nil {
+	keys, err := sdk.StateKeys()
+	if err != nil {
 		logStateError("list state for cleanup", err)
 		return
 	}
@@ -511,7 +496,7 @@ func cleanupExpiredState(now int64, cfg config) {
 			expired = found && value.LastSeenMillis > 0 && now-value.LastSeenMillis >= retentionMillis
 		}
 		if expired {
-			if herr, err := sdk.StateDelete(key); err != nil || herr != nil {
+			if err := sdk.StateDelete(key); err != nil {
 				logStateError("delete "+key, err)
 				continue
 			}

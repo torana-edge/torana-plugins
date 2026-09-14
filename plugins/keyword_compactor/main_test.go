@@ -778,9 +778,11 @@ func TestBestEffortWritesAndSavings(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(keywordCfg)
 	h.SeedSharedCache("intent:call_1", "find the bug in server")
-	h.DenyPermission("env.cache_set")
+	h.StubHostCall("env.cache_set", func(string) (string, error) {
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "cache unavailable"), nil
+	})
 	h.StubHostCall("torana_record_savings", func(string) (string, error) {
-		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "stub"), nil
 	})
 	res := h.BeforeRequest(bigToolRequest(keywordContent()))
 	if res.Err != nil {
@@ -1163,9 +1165,10 @@ func TestKeywordOrderedSeamRows(t *testing.T) {
 		// one cache_reuse — the count alone would not prove the shared-key
 		// reuse path.
 		type savingsPayload struct {
-			OriginalBytes int    `json:"original_bytes"`
-			FinalBytes    int    `json:"final_bytes"`
-			Source        string `json:"source"`
+			OriginalBytes   int    `json:"original_bytes"`
+			FinalBytes      int    `json:"final_bytes"`
+			Source          string `json:"source"`
+			PricingResource string `json:"pricing_resource"`
 		}
 		sources := map[string]int{}
 		var sawOriginal bool
@@ -1179,6 +1182,9 @@ func TestKeywordOrderedSeamRows(t *testing.T) {
 			}
 			if p.OriginalBytes == len(content) {
 				sawOriginal = true
+			}
+			if p.PricingResource != "target" {
+				t.Fatalf("savings pricing resource = %q, want target", p.PricingResource)
 			}
 			sources[p.Source]++
 		}

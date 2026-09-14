@@ -107,7 +107,7 @@ func withLabel(base map[string]string, key, value string) map[string]string {
 // emission is one metric series, built but not yet sent.
 type emission struct {
 	Name   string
-	Kind   int32
+	Kind   sdk.MetricKind
 	Value  float64
 	Labels map[string]string
 }

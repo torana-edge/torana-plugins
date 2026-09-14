@@ -23,18 +23,25 @@ jobs:
       - name: GitHub Actions use immutable commits
         working-directory: torana-plugins
         run: ./scripts/check-actions-pinned.sh
-      # Fetch merged SDK history first. The next step validates that SDK_REF is
-      # reachable from main before checking it out, so a retained PR/object SHA
-      # cannot become an untraceable release dependency.
+      # Main and releases require SDK ancestry; PRs may validate an exact
+      # unmerged SDK commit for a coordinated contract change.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: torana-edge/torana-plugin-sdk
           ref: main
           fetch-depth: 0
           path: torana-plugin-sdk
-      - name: Check out the merged SDK revision
+      - name: Check out the SDK revision
         working-directory: torana-plugins
-        run: ./scripts/checkout_sdk_ref.sh ../torana-plugin-sdk
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == pull_request ]] && [[ $(cat SDK_REF) =~ ^[0-9a-f]{40}$ ]]; then
+            git -C ../torana-plugin-sdk fetch origin "$(cat SDK_REF)"
+            ./scripts/checkout_sdk_ref.sh ../torana-plugin-sdk --review
+          else
+            ./scripts/checkout_sdk_ref.sh ../torana-plugin-sdk
+          fi
       # The proxy tracks main rather than a commit, because the question this
       # job exists to answer is "do these plugins work with the current host".
       # A pinned SHA answers it about a host nobody is running: both refs here
@@ -48,17 +55,16 @@ jobs:
           repository: torana-edge/torana-edge
           ref: main
           path: torana-edge
-      # Coordinated host/plugin changes use the same branch name in both
-      # repositories. A plugin PR tests that Edge branch when it exists;
-      # unrelated PRs and every push to main keep testing Edge main. This avoids
-      # a permanent feature-branch pin while still allowing an unmerged
-      # cross-repository contract change to prove itself end to end.
-      - name: Use coordinated Edge branch when present
+      # EDGE_REVIEW_REF optionally names an immutable host commit for this
+      # PR's integration tests. Main always tests current Edge main.
+      - name: Use the coordinated Edge review revision
         if: github.event_name == 'pull_request'
         working-directory: torana-edge
         run: |
-          if git ls-remote --exit-code origin "refs/heads/${GITHUB_HEAD_REF}" >/dev/null; then
-            git fetch --depth 1 origin "refs/heads/${GITHUB_HEAD_REF}"
+          if [[ -f ../torana-plugins/EDGE_REVIEW_REF ]]; then
+            ref=$(cat ../torana-plugins/EDGE_REVIEW_REF)
+            [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || { echo "EDGE_REVIEW_REF must be a full commit SHA" >&2; exit 1; }
+            git fetch --depth 1 origin "$ref"
             git checkout --detach FETCH_HEAD
           fi
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -74,6 +80,11 @@ jobs:
             torana-plugins/plugins/*/go.sum
             torana-plugin-sdk/go.sum
             torana-edge/go.sum
+      - name: Install Rust and protobuf for cross-language behaviour gates
+        run: |
+          rustup toolchain install 1.85.1 --profile minimal --target wasm32-wasip1
+          sudo apt-get update
+          sudo apt-get install --yes protobuf-compiler
       - working-directory: torana-plugins
         run: ./scripts/test.sh
       - name: Vet every plugin module
@@ -117,6 +128,9 @@ jobs:
       # green build, and pii would stop being tested without anyone noticing.
       - name: Official-plugin behaviour suite
         working-directory: torana-plugins
+        env:
+          RUSTUP_TOOLCHAIN: 1.85.1
+          TORANA_SDK_DIR: ../torana-plugin-sdk
         run: ./scripts/verify-behaviour.sh ../torana-edge dist
       # Torana binds an operator's approval to a digest over the bundle. If the
       # same source can produce two different .wasm files, reinstalling

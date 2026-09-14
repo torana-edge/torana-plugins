@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strconv"
 	"time"
 
@@ -58,10 +57,8 @@ func init() {
 			return sdk.PassResponse(), err
 		}
 		line = append(line, '\n')
-		if refusal, err := sdk.AppendFile(usagePath, line); err != nil {
+		if err := sdk.AppendFile(usagePath, line); err != nil {
 			return sdk.PassResponse(), err
-		} else if refusal != nil {
-			return sdk.PassResponse(), fmt.Errorf("usage log append refused: %s", refusal.Code)
 		}
 		return sdk.PassResponse(), nil
 	})

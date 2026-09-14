@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -113,7 +114,9 @@ func init() {
 		}
 		switch outcome {
 		case verifyOK:
-			sdk.SetIdentity(id)
+			if err := sdk.SetIdentity(id); err != nil {
+				return sdk.RequestResult{}, fmt.Errorf("auth: set identity: %w", err)
+			}
 			return sdk.PassRequest(), nil
 		case verifyRejected:
 			// A domain rejection is an authoritative answer about the presented
@@ -121,7 +124,9 @@ func init() {
 			// turn an explicitly revoked/invalid Torana key into authenticated
 			// access. Keep the verifier's optional diagnostic private and return a
 			// stable, value-free denial.
-			sdk.BlockRequest(401, "virtual_key_rejected", "The Torana virtual key was rejected.")
+			if err := sdk.BlockRequest(401, "virtual_key_rejected", "The Torana virtual key was rejected."); err != nil {
+				return sdk.RequestResult{}, fmt.Errorf("auth: block rejected virtual key: %w", err)
+			}
 			return sdk.PassRequest(), nil
 		default: // verifyNoIdentity: advisory unwired/unavailable verifier.
 			return sdk.PassRequest(), nil
@@ -254,12 +259,10 @@ func verifyVirtualKey(token string) (string, verifyOutcome, error) {
 	if err != nil {
 		return "", verifyNoIdentity, fmt.Errorf("auth: cannot encode verify request: %w", err)
 	}
-	res, herr, err := sdk.HostCallExtension("verify_virtual_key", payload)
-	if err != nil {
-		return "", verifyNoIdentity, fmt.Errorf("auth: verify_virtual_key call failed: %w", err)
-	}
-	if herr != nil {
-		switch herr.Code {
+	res, err := sdk.HostCallExtension("verify_virtual_key", payload)
+	var refusal *sdk.HostCallRefusalError
+	if errors.As(err, &refusal) {
+		switch refusal.Code {
 		case pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE:
 			// The verifier is unwired or temporarily unavailable: advisory.
 			// No identity is possible — this plugin is the only source.
@@ -272,8 +275,11 @@ func verifyVirtualKey(token string) (string, verifyOutcome, error) {
 			// interpolated: a private verifier could embed the token or
 			// tenant data in it, and Edge captures hook errors (review
 			// round-1 F7). The error is classified by code only.
-			return "", verifyNoIdentity, fmt.Errorf("auth: verify_virtual_key refused (code=%s)", herr.Code)
+			return "", verifyNoIdentity, fmt.Errorf("auth: verify_virtual_key refused (code=%s)", refusal.Code)
 		}
+	}
+	if err != nil {
+		return "", verifyNoIdentity, fmt.Errorf("auth: verify_virtual_key call failed: %w", err)
 	}
 
 	resp, err := decodeVerifyResponse(res)

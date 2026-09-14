@@ -21,6 +21,10 @@ func TestManifestPermissionSetExact(t *testing.T) {
 		Permissions      []struct {
 			Name string `json:"name"`
 		} `json:"permissions"`
+		PricingResources []struct {
+			Name     string `json:"name"`
+			Required bool   `json:"required"`
+		} `json:"pricing_resources"`
 	}
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatal(err)
@@ -46,6 +50,7 @@ func TestManifestPermissionSetExact(t *testing.T) {
 		"env.cache_set",
 		"env.emit_metric",
 		"env.host_call.torana_record_savings",
+		"env.model_pricing",
 		"env.plugin_config",
 		"env.shared_cache_get",
 		"ir.tool_results.write",
@@ -57,5 +62,8 @@ func TestManifestPermissionSetExact(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("permissions = %v, want %v", got, want)
 		}
+	}
+	if len(m.PricingResources) != 1 || m.PricingResources[0].Name != "target" || !m.PricingResources[0].Required {
+		t.Fatalf("pricing_resources = %+v, want one required target resource", m.PricingResources)
 	}
 }

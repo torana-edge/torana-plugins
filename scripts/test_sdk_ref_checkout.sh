@@ -35,3 +35,13 @@ if [[ $(git -C "$repo" rev-parse HEAD) != "$merged" ]]; then
   echo "SDK ref checkout test: failed validation mutated the checkout" >&2
   exit 1
 fi
+
+# Explicit review mode accepts the exact unmerged object; default/release mode
+# above still refuses it without changing the checkout.
+SDK_REF_FILE="$ref_file" "$root/scripts/checkout_sdk_ref.sh" "$repo" --review >/dev/null
+[[ $(git -C "$repo" rev-parse HEAD) == "$divergent" ]]
+printf '%s\n' "${divergent:0:12}" > "$ref_file"
+if SDK_REF_FILE="$ref_file" "$root/scripts/checkout_sdk_ref.sh" "$repo" --review >/dev/null 2>&1; then
+  echo "SDK ref checkout test: abbreviated review revision was accepted" >&2
+  exit 1
+fi

@@ -140,7 +140,13 @@ func parseConfig(raw string) config {
 	return cfg
 }
 
-func loadConfig() config { return parseConfig(sdk.PluginConfig()) }
+func loadConfig() (config, error) {
+	raw, err := sdk.PluginConfig()
+	if err != nil {
+		return config{}, fmt.Errorf("cache_warmer: load plugin config: %w", err)
+	}
+	return parseConfig(raw), nil
+}
 
 // warms reports whether this conversation is opted in.
 func (c config) warms(conversationID string) bool {
@@ -228,7 +234,10 @@ func init() {
 	// opted in. This hook only observes and stores — it never modifies the
 	// request, so it cannot affect the prefix it is trying to preserve.
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
-		cfg := loadConfig()
+		cfg, err := loadConfig()
+		if err != nil {
+			return sdk.RequestResult{}, err
+		}
 		if !cfg.any() {
 			return sdk.PassRequest(), nil
 		}
@@ -313,16 +322,13 @@ func init() {
 	// Tick path: refresh whatever is still worth refreshing, under the
 	// write-ahead spend reservation (see refreshOne).
 	sdk.OnTick(func(ctx context.Context, tick *pbv1.TickRequest) (sdk.TickResult, error) {
-		cfg := loadConfig()
-		keys, herr, err := sdk.StateKeys()
+		cfg, err := loadConfig()
 		if err != nil {
 			return sdk.TickResult{}, err
 		}
-		if herr != nil {
-			if herr.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED || herr.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE {
-				return sdk.TickIdle(), nil
-			}
-			return sdk.TickResult{}, fmt.Errorf("cache_warmer: state_keys refused: %s", herr.Message)
+		keys, err := sdk.StateKeys()
+		if err != nil {
+			return sdk.TickResult{}, err
 		}
 
 		refreshed := 0
@@ -339,16 +345,15 @@ func init() {
 			// StateGetJSON would collapse frame and decode errors into one
 			// plain-error channel, so the raw typed read is used here.
 			var entry warmEntry
-			raw, herr, err := sdk.StateGet(key)
+			raw, found, err := sdk.StateGet(key)
 			switch {
 			case err != nil:
+				if isAdvisory(err) {
+					continue
+				}
 				return sdk.TickResult{}, err
-			case herr != nil && sdk.IsNotFound(herr):
+			case !found:
 				continue
-			case herr != nil && (herr.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED || herr.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE):
-				continue
-			case herr != nil:
-				return sdk.TickResult{}, fmt.Errorf("cache_warmer: state_get %s refused: %s", key, herr.Message)
 			case json.Unmarshal([]byte(raw), &entry) != nil:
 				continue // corrupt stored JSON: key-local
 			}
@@ -358,8 +363,11 @@ func init() {
 				continue
 			}
 			if !cfg.warms(entry.ConversationID) {
-				// Opted out since the entry was written: delete it (best-effort).
-				_, _ = sdk.StateDelete(key)
+				// Opted out since the entry was written: delete it. Advisory
+				// unavailability can be retried next tick; contract defects surface.
+				if err := sdk.StateDelete(key); err != nil && !isAdvisory(err) {
+					return sdk.TickResult{}, err
+				}
 				continue
 			}
 			// Durable-state shape validation is the FIRST step after decoding
@@ -367,7 +375,9 @@ func init() {
 			// entries must never reach a pricing call or a send.
 			entry.Stopped = validateEntry(&entry, key)
 			if entry.Stopped != "" {
-				persistStop(key, &entry)
+				if err := persistStop(key, &entry); err != nil {
+					return sdk.TickResult{}, err
+				}
 				notes = append(notes, fmt.Sprintf("%s: stopped, %s", short(entry.ConversationID), entry.Stopped))
 				continue
 			}
@@ -391,12 +401,18 @@ func init() {
 	})
 }
 
-// persistStop writes a terminal stop reason. Best-effort: if the write fails
-// the durable entry remains PENDING (Stopped="refresh outcome unknown" was
-// already written before the send), which still guarantees zero further
-// sends.
-func persistStop(key string, entry *warmEntry) {
-	_ = sdk.StateSetJSON(key, entry)
+// persistStop writes a terminal stop reason. Advisory state unavailability can
+// be retried on a later tick; contract, protocol, and transport defects surface.
+func persistStop(key string, entry *warmEntry) error {
+	err := sdk.StateSetJSON(key, entry)
+	if err != nil && isAdvisory(err) {
+		return nil
+	}
+	return err
+}
+
+func stopped(key string, entry *warmEntry, action bool, note string) (bool, string, error) {
+	return action, note, persistStop(key, entry)
 }
 
 // refreshOne decides and, if warranted, sends — under the write-ahead
@@ -424,96 +440,75 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 	req, err := sdk.DecodeRequest(entry.PrefixPB)
 	if err != nil {
 		entry.Stopped = "stored prefix is unreadable"
-		persistStop(key, entry)
-		return false, "", nil
+		return stopped(key, entry, false, "")
 	}
 	if req.Model != entry.Model {
 		entry.Stopped = "stored prefix model mismatch"
-		persistStop(key, entry)
-		return false, "", nil
+		return stopped(key, entry, false, "")
 	}
 	// SDK replacement domain + marker presence (the projection is the same
 	// identity oracle the request path used).
 	prefix, hasBreakpoint, err := pbv1.RequestObservablePrefix(req)
 	if err != nil {
 		entry.Stopped = "stored prefix is out of domain"
-		persistStop(key, entry)
-		return false, "", nil
+		return stopped(key, entry, false, "")
 	}
 	if !hasBreakpoint {
 		entry.Stopped = "stored prefix has no cache breakpoint"
-		persistStop(key, entry)
-		return false, "", nil
+		return stopped(key, entry, false, "")
 	}
 	// The warmed identity must be the priced identity: the recomputed
 	// domain-separated fingerprint has to equal the stored one.
 	if prefixFingerprint(prefix) != entry.PrefixFingerprint {
 		entry.Stopped = "stored prefix drifted"
-		persistStop(key, entry)
-		return false, "", nil
+		return stopped(key, entry, false, "")
 	}
 	// Defensive durable-state validation (the request path already declined
 	// terminal suffixes before storing): a prefix ending on an unanswered
 	// tool call is not sendable on its own.
 	if endsWithUnansweredToolCall(req) {
 		entry.Stopped = "prefix ends on an unanswered tool call"
-		persistStop(key, entry)
-		return false, fmt.Sprintf("%s: stopped, prefix ends on an unanswered tool call", short(entry.ConversationID)), nil
+		return stopped(key, entry, false, fmt.Sprintf("%s: stopped, prefix ends on an unanswered tool call", short(entry.ConversationID)))
 	}
 	switch classifyThinkingReplay(req) {
 	case thinkingReplayManualBudget:
 		entry.Stopped = "manual thinking budget is not warmable"
-		persistStop(key, entry)
-		return false, fmt.Sprintf("%s: stopped, manual thinking budget is not warmable", short(entry.ConversationID)), nil
+		return stopped(key, entry, false, fmt.Sprintf("%s: stopped, manual thinking budget is not warmable", short(entry.ConversationID)))
 	case thinkingReplayUnsupported:
 		entry.Stopped = "unsupported thinking configuration"
-		persistStop(key, entry)
-		return false, fmt.Sprintf("%s: stopped, unsupported thinking configuration", short(entry.ConversationID)), nil
+		return stopped(key, entry, false, fmt.Sprintf("%s: stopped, unsupported thinking configuration", short(entry.ConversationID)))
 	}
 
 	// No-spend gates next: nothing durable happens until every one passes.
-	policy, refusal, err := sdk.GetPromptCachePolicy("warm-cache")
+	policy, err := sdk.GetPromptCachePolicy("warm-cache")
 	if err != nil {
 		if isAdvisory(err) {
 			entry.Stopped = "pricing unavailable"
-			persistStop(key, entry)
-			return false, fmt.Sprintf("%s: stopped, pricing unavailable", short(entry.ConversationID)), nil
+			return stopped(key, entry, false, fmt.Sprintf("%s: stopped, pricing unavailable", short(entry.ConversationID)))
 		}
 		return false, "", err
-	}
-	if refusal != nil {
-		if refusal.Code != pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED && refusal.Code != pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE {
-			return false, "", fmt.Errorf("cache_warmer: prompt cache policy refused: %s", refusal.Message)
-		}
-		entry.Stopped = "pricing unavailable"
-		persistStop(key, entry)
-		return false, fmt.Sprintf("%s: stopped, pricing unavailable", short(entry.ConversationID)), nil
 	}
 	if !policy.RefreshOnRead {
 		// Automatic prefix caching: no lifetime the caller owns, so nothing a
 		// request can keep alive.
 		entry.Stopped = "provider cache does not refresh on read"
-		persistStop(key, entry)
-		return false, fmt.Sprintf("%s: stopped, %s cache cannot be refreshed", short(entry.ConversationID), entry.Provider), nil
+		return stopped(key, entry, false, fmt.Sprintf("%s: stopped, %s cache cannot be refreshed", short(entry.ConversationID), entry.Provider))
 	}
 	shortestTTL, hasTTL := sdk.ShortestPromptCacheTTL(policy)
 	breakEvenRefreshes, hasEconomics := sdk.PromptCacheBreakEvenRefreshes(policy)
 	if !hasTTL || !hasEconomics {
 		entry.Stopped = "pricing unavailable"
-		persistStop(key, entry)
-		return false, fmt.Sprintf("%s: stopped, pricing unavailable", short(entry.ConversationID)), nil
+		return stopped(key, entry, false, fmt.Sprintf("%s: stopped, pricing unavailable", short(entry.ConversationID)))
 	}
 
 	if entry.DeadlineMillis > 0 && now >= entry.DeadlineMillis {
 		entry.Stopped = "deadline reached"
-		persistStop(key, entry)
-		return false, fmt.Sprintf("%s: stopped, deadline reached", short(entry.ConversationID)), nil
+		return stopped(key, entry, false, fmt.Sprintf("%s: stopped, deadline reached", short(entry.ConversationID)))
 	}
 	if entry.RefreshesSpent >= breakEvenRefreshes {
 		entry.Stopped = "break-even reached"
-		persistStop(key, entry)
-		return false, fmt.Sprintf("%s: stopped after %d refreshes, past break-even",
-			short(entry.ConversationID), entry.RefreshesSpent), nil
+		return stopped(key, entry, false, fmt.Sprintf("%s: stopped after %d refreshes, past break-even",
+			short(entry.ConversationID), entry.RefreshesSpent))
 	}
 
 	// An interval override at or beyond the provider's shortest cache
@@ -523,9 +518,8 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 	if cfg.IntervalSecondsOverride > 0 &&
 		cfg.IntervalSecondsOverride >= int(shortestTTL) {
 		entry.Stopped = "refresh interval exceeds cache lifetime"
-		persistStop(key, entry)
-		return false, fmt.Sprintf("%s: stopped, refresh interval %ds not below the %ds cache lifetime",
-			short(entry.ConversationID), cfg.IntervalSecondsOverride, shortestTTL), nil
+		return stopped(key, entry, false, fmt.Sprintf("%s: stopped, refresh interval %ds not below the %ds cache lifetime",
+			short(entry.ConversationID), cfg.IntervalSecondsOverride, shortestTTL))
 	}
 	interval := int64(policy.GetWarmIntervalSeconds()) * 1000
 	if cfg.IntervalSecondsOverride > 0 {
@@ -533,8 +527,7 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 	}
 	if interval <= 0 {
 		entry.Stopped = "no refresh interval available"
-		persistStop(key, entry)
-		return false, "", nil
+		return stopped(key, entry, false, "")
 	}
 	last := entry.LastRefreshMillis
 	if last == 0 {
@@ -574,8 +567,7 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 		case errors.As(err, &refusal):
 			if isAdvisory(err) {
 				entry.Stopped = "refresh failed"
-				persistStop(key, entry)
-				return false, fmt.Sprintf("%s: stopped, refresh failed", short(entry.ConversationID)), nil
+				return stopped(key, entry, false, fmt.Sprintf("%s: stopped, refresh failed", short(entry.ConversationID)))
 			}
 			// Contract/protocol refusal: surface on the tick. The durable
 			// pending reservation still prevents replay. Not a completed
@@ -586,8 +578,7 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 			// carries the status; no string branching. Not a completed
 			// action.
 			entry.Stopped = "refresh failed"
-			persistStop(key, entry)
-			return false, fmt.Sprintf("%s: stopped, refresh failed (HTTP %d)", short(entry.ConversationID), res.HTTPStatus), nil
+			return stopped(key, entry, false, fmt.Sprintf("%s: stopped, refresh failed (HTTP %d)", short(entry.ConversationID), res.HTTPStatus))
 		default:
 			// Local/protocol decode defect.
 			return false, "", err
@@ -598,8 +589,7 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 	case res.CacheRebuilt():
 		// The entry had already lapsed and this refresh paid to recreate it.
 		entry.Stopped = "cache had already expired"
-		persistStop(key, entry)
-		return true, fmt.Sprintf("%s: stopped, cache had already expired", short(entry.ConversationID)), nil
+		return stopped(key, entry, true, fmt.Sprintf("%s: stopped, cache had already expired", short(entry.ConversationID)))
 	case res.CacheHit():
 		// The ONLY confirmed outcome allowed to clear the pending state — and
 		// only if the final persistence succeeds (otherwise the durable
@@ -620,8 +610,7 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 		// the stopped/pending state and never retry automatically. Not a
 		// completed action.
 		entry.Stopped = "refresh outcome unknown"
-		persistStop(key, entry)
-		return false, fmt.Sprintf("%s: stopped, refresh outcome unknown", short(entry.ConversationID)), nil
+		return stopped(key, entry, false, fmt.Sprintf("%s: stopped, refresh outcome unknown", short(entry.ConversationID)))
 	}
 }
 

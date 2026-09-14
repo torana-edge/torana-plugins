@@ -1393,9 +1393,8 @@ func TestReverseTranslateStrictClasses(t *testing.T) {
 	}
 }
 
-// TestNonObjectSchemasDoNotPanic — null, array, scalar, malformed, and empty
-// schema bodies, plus nil ToolDef entries, never panic; each is carried
-// untranslated with the empty envelope published (F4).
+// TestNonObjectSchemasDoNotPanic — ABI v1 rejects invalid replacement input
+// before dispatch rather than allowing a plugin to carry invalid schemas.
 func TestNonObjectSchemasDoNotPanic(t *testing.T) {
 	for name, params := range map[string]string{
 		"null":      `null`,
@@ -1407,11 +1406,8 @@ func TestNonObjectSchemasDoNotPanic(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)
 			res := h.BeforeRequest(&pbv1.ChatRequest{Tools: []*pbv1.ToolDef{{Name: "t", ParametersJson: []byte(params)}}})
-			if !res.PassedThrough || res.Err != nil {
-				t.Fatalf("expected pass-through, err=%v", res.Err)
-			}
-			if env := publishedEnvelope(t, h); env != `{"version":1,"tools":{}}` {
-				t.Fatalf("envelope = %s", env)
+			if res.Err == nil || res.PassedThrough {
+				t.Fatalf("invalid ABI input must fail before dispatch, passed=%v err=%v", res.PassedThrough, res.Err)
 			}
 		})
 	}
@@ -1421,11 +1417,8 @@ func TestNonObjectSchemasDoNotPanic(t *testing.T) {
 			nil,
 			{Name: "ok", ParametersJson: []byte(`{"additionalProperties":false,"properties":{"p":{"type":"string"}},"type":"object"}`)},
 		}})
-		if !res.PassedThrough || res.Err != nil {
-			t.Fatalf("expected pass-through without panic, err=%v", res.Err)
-		}
-		if env := publishedEnvelope(t, h); env != `{"version":1,"tools":{}}` {
-			t.Fatalf("envelope = %s", env)
+		if res.Err == nil || res.PassedThrough {
+			t.Fatalf("nil tool must fail ABI validation, passed=%v err=%v", res.PassedThrough, res.Err)
 		}
 	})
 }
@@ -1677,10 +1670,9 @@ func TestTextualBoundaries(t *testing.T) {
 	}
 }
 
-// TestTextuallyInvalidSchemasAreCarriedUnchanged — invalid UTF-8 or lone
-// surrogates in a schema make it untranslatable (never panicking, never
-// normalized); the raw bytes travel byte-identical.
-func TestTextuallyInvalidSchemasAreCarriedUnchanged(t *testing.T) {
+// TestTextuallyInvalidSchemasAreRejected — ABI v1 validates UTF-8 and JSON
+// text before plugin dispatch.
+func TestTextuallyInvalidSchemasAreRejected(t *testing.T) {
 	for name, params := range map[string]string{
 		"raw invalid UTF-8 in property": "{\"type\":\"object\",\"properties\":{\"k\xff\":{\"type\":\"object\"}}}",
 		"lone surrogate in property":    `{"type":"object","properties":{"\ud800":{"type":"object"}}}`,
@@ -1689,14 +1681,8 @@ func TestTextuallyInvalidSchemasAreCarriedUnchanged(t *testing.T) {
 			h := newHarness(t)
 			req := &pbv1.ChatRequest{Tools: []*pbv1.ToolDef{{Name: "t", ParametersJson: []byte(params)}}}
 			res := h.BeforeRequest(req)
-			if !res.PassedThrough || res.Err != nil {
-				t.Fatalf("expected pass-through, err=%v", res.Err)
-			}
-			if env := publishedEnvelope(t, h); env != `{"version":1,"tools":{}}` {
-				t.Fatalf("envelope = %s", env)
-			}
-			if string(req.Tools[0].ParametersJson) != params {
-				t.Fatal("the raw schema bytes were normalized")
+			if res.Err == nil || res.PassedThrough {
+				t.Fatalf("invalid schema text must fail ABI validation, passed=%v err=%v", res.PassedThrough, res.Err)
 			}
 		})
 	}

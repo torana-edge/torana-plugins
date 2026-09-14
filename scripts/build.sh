@@ -13,15 +13,20 @@ source="$root/plugins/$plugin"
 mkdir -p "$root/dist/$plugin"
 workspace_dir=$(mktemp -d)
 trap 'rm -rf "$workspace_dir"' EXIT
-if [[ -d "$root/../torana-plugin-sdk" ]]; then
-  (cd "$workspace_dir" && go work init "$root/../torana-plugin-sdk" "$source")
+sdk_dir="${TORANA_SDK_DIR:-$root/../torana-plugin-sdk}"
+if [[ -n "${TORANA_SDK_DIR:-}" && ( ! -d "$sdk_dir" || ! -f "$sdk_dir/go.mod" ) ]]; then
+  echo "SDK directory is missing or has no go.mod: $sdk_dir" >&2
+  exit 1
+fi
+if [[ -d "$sdk_dir" && -f "$sdk_dir/go.mod" ]]; then
+  sdk_dir=$(cd "$sdk_dir" && pwd)
+  (cd "$workspace_dir" && go work init "$sdk_dir" "$source")
   export GOWORK="$workspace_dir/go.work"
   # Prove the workspace actually resolved the sibling SDK. A version-pinned
   # `go work edit -replace` used to sit here and had silently stopped matching
   # at v0.1.1 -- the build kept working via the module list above, so nothing
   # ever reported that half the setup was dead. Assert the outcome instead of
   # trusting the plumbing.
-  sdk_dir=$(cd "$root/../torana-plugin-sdk" && pwd)
   resolved=$(cd "$source" && go list -m -f '{{.Dir}}' github.com/torana-edge/torana-plugin-sdk 2>/dev/null || true)
   case "$resolved" in
     "$sdk_dir"*) ;;

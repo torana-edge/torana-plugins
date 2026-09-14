@@ -34,6 +34,10 @@
       "description": "Compaction eligibility and intent-miss metrics"
     },
     {
+      "name": "env.model_pricing",
+      "description": "Resolve the operator-bound target pricing resource used for savings attribution"
+    },
+    {
       "name": "env.host_call.torana_record_savings",
       "description": "Report compaction byte savings to /stats"
     },
@@ -44,6 +48,13 @@
     {
       "name": "ir.tool_results.write",
       "description": "Position-keyed tool-result text value changes (keyword compaction)"
+    }
+  ],
+  "pricing_resources": [
+    {
+      "name": "target",
+      "description": "Pricing attribution for compaction savings reports",
+      "required": true
     }
   ]
 }

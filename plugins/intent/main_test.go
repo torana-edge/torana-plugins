@@ -643,15 +643,8 @@ func TestStreamFailOpenOnCallbackError(t *testing.T) {
 	// hadI meta_get refusal (non-NOT_FOUND) makes the callback error.
 	h.DenyPermission("env.meta_get")
 	res := streamCall(t, h, "call_1", "read", "sig", `{"path":"server.go","i":"find the bug"}`)
-	if res.Err != nil {
-		t.Fatalf("callback errors must be consumed for fail-open, got %v", res.Err)
-	}
-	out := emittedArgs(t, res)
-	if out != `{"path":"server.go","i":"find the bug"}` {
-		t.Fatalf("fail-open must re-emit the original arguments, got %q", out)
-	}
-	if sig := emittedSig(t, res); sig != "sig" {
-		t.Fatalf("fail-open must preserve the signature, got %q", sig)
+	if res.Err == nil {
+		t.Fatal("callback errors must propagate so failure_mode applies")
 	}
 	// The capture happens before the hadI read, so a failed
 	// strip must not retroactively uncache a valid capture — the block is
@@ -828,7 +821,7 @@ func TestRehydrationUnrepresentableArgumentsNoPanic(t *testing.T) {
 	}
 	for _, raw := range cases {
 		t.Run(raw, func(t *testing.T) {
-			newHarness(t) // resets the process-global config for each row
+			h := newHarness(t) // resets the process-global config for each row
 			req := &pbv1.ChatRequest{Tools: []*pbv1.ToolDef{{
 				Name:           "read",
 				ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"}}}`),
@@ -838,7 +831,9 @@ func TestRehydrationUnrepresentableArgumentsNoPanic(t *testing.T) {
 				{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "call_1", Name: "read", ArgumentsJson: []byte(raw)}}}}},
 			}
 			before := proto.Clone(req).(*pbv1.ChatRequest)
-			modified, err := rehydrateHistoryIntents(req)
+			var modified bool
+			var err error
+			h.Run(func() { modified, err = rehydrateHistoryIntents(req) })
 			if err != nil {
 				t.Fatalf("hook error (must not panic): %v", err)
 			}

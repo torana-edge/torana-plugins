@@ -82,16 +82,17 @@ case "$pin" in
     ;;
 esac
 
-# Resolve the agreed pin through Go module resolution (GOWORK=off) from a
-# plugin module: a CLEAN checkout must work without a pre-warmed cache — the
-# resolver downloads the declared dependency and returns its module directory.
-first_module=$(echo "$plugins_dir"/*/go.mod | awk '{print $1}')
-module_dir=$(dirname "$first_module")
-# go mod download -json downloads the declared dependency (a clean
-# GOMODCACHE works) and reports its module directory.
-sdk=$(cd "$module_dir" && GOWORK=off go mod download -json github.com/torana-edge/torana-plugin-sdk 2>/dev/null | awk -F'"' '/"Dir"/{print $4; exit}')
-if [[ -z "$sdk" || ! -f "$sdk/capabilities.go" || ! -f "$sdk/capabilities_write.go" ]]; then
-  echo "capability sync: pinned SDK $pin could not be resolved (go mod download from $module_dir)" >&2
+# SDK_DIR is used by release preparation to check an unreleased SDK checkout
+# before plugin module pins can move. The default remains the clean-checkout,
+# published-module proof above.
+sdk="${SDK_DIR:-}"
+if [[ -z "$sdk" ]]; then
+  first_module=$(echo "$plugins_dir"/*/go.mod | awk '{print $1}')
+  module_dir=$(dirname "$first_module")
+  sdk=$(cd "$module_dir" && GOWORK=off go mod download -json github.com/torana-edge/torana-plugin-sdk 2>/dev/null | awk -F'"' '/"Dir"/{print $4; exit}')
+fi
+if [[ -z "$sdk" || ! -f "$sdk/capabilities.json" ]]; then
+  echo "capability sync: SDK capability catalog could not be resolved at ${sdk:-<empty>}" >&2
   exit 1
 fi
 
@@ -105,24 +106,23 @@ block() { # file var
     | grep -o '"[^"]*"' | tr -d '"' | sort -u
 }
 
-# The SDK's Permissions is `var Permissions = append([]string{...},
-# WritePermissions...)`: the inner list closes with `}, WritePermissions...)`
-# and the write grants live in capabilities_write.go. Extract the direct
-# Permissions block (the env half) separately from the WritePermissions var,
-# require BOTH non-empty, and union them.
-env_block() { # file
-  awk '/^var Permissions = append\(\[\]string\{/{f=1;next} f&&/^}, WritePermissions\.\.\.\)/{f=0} f' "$1" \
-    | sed 's|//.*||' \
-    | grep -o '"[^"]*"' | tr -d '"' | sort -u
+# Read a string array from the canonical JSON catalog without requiring jq.
+json_array() { # file key
+  awk -v key="\"$2\"" '$0 ~ key "[[:space:]]*:" && $0 ~ /\[/ {f=1; next} f && /]/ {exit} f' "$1" \
+    | grep -o '"[^"]*"' | tr -d '"'
 }
 
-env_perms=$(env_block "$sdk/capabilities.go")
-write_perms=$(block "$sdk/capabilities_write.go" WritePermissions)
-if [[ -z "$env_perms" || -z "$write_perms" ]]; then
-  echo "capability sync: could not read the SDK's Permissions or WritePermissions — the declaration shape changed" >&2
+catalog="$sdk/capabilities.json"
+command_perms=$(grep -o '"permission"[[:space:]]*:[[:space:]]*"[^"]*"' "$catalog" | sed 's/.*"\([^"]*\)"$/\1/')
+hook_perms=$(awk '/"hook_grants"[[:space:]]*:/ {f=1; next} f && /}/ {exit} f' "$catalog" | grep -o '"env\.[^"]*"' | tr -d '"')
+metadata_perms=$(json_array "$catalog" metadata_grants)
+write_perms=$(json_array "$catalog" write_permissions)
+if [[ -z "$command_perms" || -z "$hook_perms" || -z "$metadata_perms" || -z "$write_perms" ]]; then
+  echo "capability sync: could not read the SDK capability catalog — its schema changed" >&2
   exit 1
 fi
-sdk_perms=$( { echo "$env_perms"; echo "$write_perms"; } | sort -u )
+sdk_perms=$( { echo "$command_perms"; echo "$hook_perms"; echo "$metadata_perms"; echo "$write_perms"; } | sort -u )
+hooks_sdk=$(json_array "$catalog" hooks | sort -u)
 validator_perms=$(block "$validator" knownPermissions | sort -u)
 
 if ! diff <(echo "$sdk_perms") <(echo "$validator_perms") >/dev/null; then
@@ -131,7 +131,6 @@ if ! diff <(echo "$sdk_perms") <(echo "$validator_perms") >/dev/null; then
   exit 1
 fi
 
-hooks_sdk=$(block "$sdk/capabilities.go" Hooks)
 hooks_validator=$(block "$validator" knownHooks)
 if [[ -z "$hooks_sdk" || -z "$hooks_validator" ]]; then
   echo "capability sync: could not read Hooks or knownHooks — the declaration shape changed" >&2
@@ -143,4 +142,8 @@ if ! diff <(echo "$hooks_sdk") <(echo "$hooks_validator") >/dev/null; then
   exit 1
 fi
 
-echo "capability sync: validator matches the SDK ($pin at $sdk)"
+if [[ -n "${SDK_DIR:-}" ]]; then
+  echo "capability sync: validator matches SDK checkout $sdk (published pins remain $pin)"
+else
+  echo "capability sync: validator matches the published SDK $pin"
+fi

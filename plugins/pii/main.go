@@ -55,13 +55,13 @@ type piiConfig struct {
 }
 
 var (
-	cfgOnce sync.Once
-	cfg     piiConfig
+	cfgMu     sync.Mutex
+	cfgLoaded bool
+	cfg       piiConfig
 )
 
-// parseConfig is the pure config decoder; loadConfig installs its result into
-// the process-global state exactly once. The host validates config against
-// schema.json at write time.
+// parseConfig is the pure config decoder. loadConfig publishes its result
+// after the first successful host read and retries refused/failed reads.
 func parseConfig(raw string) piiConfig {
 	c := piiConfig{OnError: "block"}
 	if raw != "" {
@@ -73,14 +73,29 @@ func parseConfig(raw string) piiConfig {
 	return c
 }
 
-func loadConfig() {
-	cfgOnce.Do(func() { cfg = parseConfig(sdk.PluginConfig()) })
+func modelMessage(role, text string) *pbv1.Message {
+	return &pbv1.Message{Role: role, Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: text}}}}}
+}
+
+func loadConfig() error {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
+	if cfgLoaded {
+		return nil
+	}
+	raw, err := sdk.PluginConfig()
+	if err != nil {
+		return fmt.Errorf("pii: load plugin config: %w", err)
+	}
+	cfg = parseConfig(raw)
+	cfgLoaded = true
+	return nil
 }
 
 // resetConfigForTest restores every config global so a test row can install a
-// fresh config. Production never calls it; the once-only loader is unchanged.
+// fresh config. Production never calls it.
 func resetConfigForTest() {
-	cfgOnce = sync.Once{}
+	cfgLoaded = false
 	cfg = piiConfig{}
 }
 
@@ -143,7 +158,9 @@ func extractScannable(view sdk.ToolResultView) extraction {
 
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
-		loadConfig()
+		if err := loadConfig(); err != nil {
+			return sdk.RequestResult{}, err
+		}
 
 		// tool_call_id → tool name (the ordered tool-use blocks), so the
 		// allowlist can be applied even when the tool-result block itself
@@ -185,16 +202,20 @@ func init() {
 				// misconfigured — on_error governs the UNAVAILABLE contextual
 				// scan, never a deterministic finding already made.
 				if f := regexScan(ex.text); len(f) > 0 {
-					sdk.BlockRequest(422, "pii_detected", blockMessage(toolName, f))
+					if err := sdk.BlockRequest(422, "pii_detected", blockMessage(toolName, f)); err != nil {
+						return sdk.RequestResult{}, fmt.Errorf("pii: block detected: %w", err)
+					}
 					return sdk.PassRequest(), nil
 				}
 				if !ex.complete {
 					// Incomplete extraction: never model-scanned, never cached;
 					// on_error governs the uninspectable remainder.
 					if failClosed() {
-						sdk.BlockRequest(422, "pii_scan_failed",
+						if err := sdk.BlockRequest(422, "pii_scan_failed",
 							fmt.Sprintf("PII scan unavailable for %s; request blocked (fail-closed). Retry, or set pii.on_error=\"allow\" to forward unscanned.",
-								toolLabel(toolName)))
+								toolLabel(toolName))); err != nil {
+							return sdk.RequestResult{}, fmt.Errorf("pii: block scan failure: %w", err)
+						}
 						return sdk.PassRequest(), nil
 					}
 					continue
@@ -204,17 +225,15 @@ func init() {
 				}
 				// Skip results cleared on a prior turn (avoids re-scanning history).
 				cacheKey := piiCleanCacheKey(view, toolName)
-				cached, herr, err := sdk.CacheGet(cacheKey)
+				cached, found, err := sdk.CacheGet(cacheKey)
 				if err != nil {
-					return sdk.RequestResult{}, err
-				}
-				if herr != nil && !sdk.IsNotFound(herr) {
-					if herr.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED || herr.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE {
-						// Advisory: decline the cache, still scan.
-					} else {
-						return sdk.RequestResult{}, fmt.Errorf("pii: cache_get refused: %s", herr.Message)
+					var refusal *sdk.HostCallRefusalError
+					if !errors.As(err, &refusal) || (refusal.Code != pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED && refusal.Code != pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE) {
+						return sdk.RequestResult{}, err
 					}
-				} else if herr == nil && cached != "" {
+					found = false
+				}
+				if found && cached != "" {
 					continue
 				}
 
@@ -230,21 +249,35 @@ func init() {
 					if cfg.OnError == "allow" {
 						continue
 					}
-					sdk.BlockRequest(422, "pii_scan_failed",
+					if err := sdk.BlockRequest(422, "pii_scan_failed",
 						fmt.Sprintf("PII scan unavailable for %s; request blocked (fail-closed). Retry, or set pii.on_error=\"allow\" to forward unscanned.",
-							toolLabel(toolName)))
+							toolLabel(toolName))); err != nil {
+						return sdk.RequestResult{}, fmt.Errorf("pii: block scan failure: %w", err)
+					}
 					return sdk.PassRequest(), nil
 				}
 				if len(findings) > 0 {
-					sdk.BlockRequest(422, "pii_detected", blockMessage(toolName, findings))
+					if err := sdk.BlockRequest(422, "pii_detected", blockMessage(toolName, findings)); err != nil {
+						return sdk.RequestResult{}, fmt.Errorf("pii: block detected: %w", err)
+					}
 					return sdk.PassRequest(), nil
 				}
 				// Complete extraction was scannable and clean: cache the verdict.
-				_, _ = sdk.CacheSet(cacheKey, "1")
+				if err := sdk.CacheSet(cacheKey, "1"); err != nil && !isAdvisory(err) {
+					return sdk.RequestResult{}, fmt.Errorf("pii: cache clean result: %w", err)
+				}
 			}
 		}
 		return sdk.PassRequest(), nil
 	})
+}
+
+func isAdvisory(err error) bool {
+	var refusal *sdk.HostCallRefusalError
+	if !errors.As(err, &refusal) {
+		return false
+	}
+	return refusal.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED || refusal.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE
 }
 
 func failClosed() bool { return cfg.OnError != "allow" }
@@ -367,29 +400,18 @@ func modelScan(content, toolName string) ([]finding, error) {
 	}
 	maxTokens := uint32(512)
 	temperature := 0.0
-	res, herr, err := sdk.ModelComplete(&pbv1.ModelCompleteArgs{
-		Service: "scanner",
-		Messages: []*pbv1.ModelMessage{
-			{Role: "system", Content: piiSystemPrompt},
-			{Role: "user", Content: "Tool: " + toolName + "\n\nOutput to scan:\n" + scanContent},
-		},
+	res, err := sdk.ModelComplete(&pbv1.ModelCompleteArgs{
+		Service:     "scanner",
+		Messages:    []*pbv1.Message{modelMessage("system", piiSystemPrompt), modelMessage("user", "Tool: "+toolName+"\n\nOutput to scan:\n"+scanContent)},
 		MaxTokens:   &maxTokens,
 		Temperature: &temperature,
 	})
 	if err != nil {
-		// Malformed frame / transport / protocol defect: hook error.
-		return nil, err
-	}
-	if herr != nil {
-		// Advisory refusals are a scanner failure (on_error decides);
-		// contract refusals are the caller's/host's defect — the hook errors
-		// regardless of on_error.
-		switch herr.Code {
-		case pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE:
-			return nil, &scannerFailure{"pii scan failed: " + herr.Message}
-		default:
-			return nil, fmt.Errorf("pii model service refused: %s", herr.Message)
+		var refusal *sdk.HostCallRefusalError
+		if errors.As(err, &refusal) && (refusal.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED || refusal.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE) {
+			return nil, &scannerFailure{"pii scan failed"}
 		}
+		return nil, err
 	}
 	// The typed model result carries NO status field; refusals arrive only in
 	// the framed error arm. An undecodable value arm is a protocol defect.
@@ -401,7 +423,11 @@ func modelScan(content, toolName string) ([]finding, error) {
 		PII      json.RawMessage `json:"pii"`
 		Findings json.RawMessage `json:"findings"`
 	}
-	if json.Unmarshal([]byte(extractJSON(res.Content)), &verdict) != nil {
+	completion, err := strictModelText(res)
+	if err != nil {
+		return nil, fmt.Errorf("pii: scanner response: %w", err)
+	}
+	if json.Unmarshal([]byte(extractJSON(completion)), &verdict) != nil {
 		return nil, &scannerFailure{"pii scan: unparseable verdict"}
 	}
 	if len(verdict.PII) == 0 || string(verdict.PII) == "null" {
@@ -458,6 +484,20 @@ func modelScan(content, toolName string) ([]finding, error) {
 		out = append(out, finding{Type: "unspecified"})
 	}
 	return out, nil
+}
+
+func strictModelText(result *pbv1.ModelCompleteResult) (string, error) {
+	if result == nil || result.Message == nil {
+		return "", nil
+	}
+	var out strings.Builder
+	for i, block := range result.Message.Blocks {
+		if block == nil || block.GetText() == nil {
+			return "", fmt.Errorf("response block %d is not text", i)
+		}
+		out.WriteString(block.GetText().Text)
+	}
+	return out.String(), nil
 }
 
 // extractJSON pulls the first complete {...} object out of a model reply that
