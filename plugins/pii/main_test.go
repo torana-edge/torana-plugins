@@ -50,8 +50,12 @@ func markerArm() *pbv1.ToolResultContentBlock {
 
 func modelStub(content string) func(*pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
 	return func(*pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
-		return &pbv1.ModelCompleteResult{Content: content}, nil, nil
+		return modelResult(content), nil, nil
 	}
+}
+
+func modelResult(content string) *pbv1.ModelCompleteResult {
+	return &pbv1.ModelCompleteResult{Message: &pbv1.ResponseMessage{Blocks: []*pbv1.ResponseBlock{{Kind: &pbv1.ResponseBlock_Text{Text: &pbv1.ResponseTextBlock{Text: content}}}}}, FinishReason: "stop"}
 }
 
 func countCommand(h *sdktest.Harness, cmd string) int {
@@ -734,7 +738,7 @@ func TestMaxScanBytesTruncation(t *testing.T) {
 			var request *pbv1.ModelCompleteArgs
 			h.StubModelComplete(func(args *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
 				request = args
-				return &pbv1.ModelCompleteResult{Content: `{"pii":false,"findings":[]}`}, nil, nil
+				return modelResult(`{"pii":false,"findings":[]}`), nil, nil
 			})
 			content := strings.Repeat("日本語", 500)
 			res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm(content))))
@@ -745,11 +749,11 @@ func TestMaxScanBytesTruncation(t *testing.T) {
 				t.Fatalf("model request = %+v, want two messages", request)
 			}
 			const marker = "Output to scan:\n"
-			idx := strings.Index(request.Messages[1].Content, marker)
+			idx := strings.Index(sdk.Text(request.Messages[1]), marker)
 			if idx < 0 {
-				t.Fatalf("model user message missing scan marker: %q", request.Messages[1].Content)
+				t.Fatalf("model user message missing scan marker: %q", sdk.Text(request.Messages[1]))
 			}
-			scanned := request.Messages[1].Content[idx+len(marker):]
+			scanned := sdk.Text(request.Messages[1])[idx+len(marker):]
 			if len(scanned) > 100 {
 				t.Fatalf("scanned bytes=%d exceed the 100-byte budget", len(scanned))
 			}
@@ -775,7 +779,7 @@ func TestScannerModelServiceContract(t *testing.T) {
 	var got *pbv1.ModelCompleteArgs
 	h.StubModelComplete(func(args *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
 		got = args
-		return &pbv1.ModelCompleteResult{Content: `{"pii":false,"findings":[]}`}, nil, nil
+		return modelResult(`{"pii":false,"findings":[]}`), nil, nil
 	})
 	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("clean text"))))
 	if res.Err != nil || !res.PassedThrough {
@@ -784,10 +788,10 @@ func TestScannerModelServiceContract(t *testing.T) {
 	if got == nil || got.Service != "scanner" || len(got.Messages) != 2 {
 		t.Fatalf("model request = %+v", got)
 	}
-	if got.Messages[0].Role != "system" || got.Messages[0].Content != piiSystemPrompt {
+	if got.Messages[0].Role != "system" || sdk.Text(got.Messages[0]) != piiSystemPrompt {
 		t.Fatalf("system message = %+v", got.Messages[0])
 	}
-	if got.Messages[1].Role != "user" || !strings.Contains(got.Messages[1].Content, "clean text") {
+	if got.Messages[1].Role != "user" || !strings.Contains(sdk.Text(got.Messages[1]), "clean text") {
 		t.Fatalf("user message = %+v", got.Messages[1])
 	}
 	if got.MaxTokens == nil || *got.MaxTokens != 512 || got.Temperature == nil || *got.Temperature != 0 {

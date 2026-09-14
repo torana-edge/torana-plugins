@@ -73,8 +73,18 @@ func parseConfig(raw string) piiConfig {
 	return c
 }
 
+func modelMessage(role, text string) *pbv1.Message {
+	return &pbv1.Message{Role: role, Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: text}}}}}
+}
+
 func loadConfig() {
-	cfgOnce.Do(func() { cfg = parseConfig(sdk.PluginConfig()) })
+	cfgOnce.Do(func() {
+		raw, err := sdk.PluginConfig()
+		if err != nil {
+			raw = "{}"
+		}
+		cfg = parseConfig(raw)
+	})
 }
 
 // resetConfigForTest restores every config global so a test row can install a
@@ -204,17 +214,15 @@ func init() {
 				}
 				// Skip results cleared on a prior turn (avoids re-scanning history).
 				cacheKey := piiCleanCacheKey(view, toolName)
-				cached, herr, err := sdk.CacheGet(cacheKey)
+				cached, found, err := sdk.CacheGet(cacheKey)
 				if err != nil {
-					return sdk.RequestResult{}, err
-				}
-				if herr != nil && !sdk.IsNotFound(herr) {
-					if herr.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED || herr.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE {
-						// Advisory: decline the cache, still scan.
-					} else {
-						return sdk.RequestResult{}, fmt.Errorf("pii: cache_get refused: %s", herr.Message)
+					var refusal *sdk.HostCallRefusalError
+					if !errors.As(err, &refusal) || (refusal.Code != pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED && refusal.Code != pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE) {
+						return sdk.RequestResult{}, err
 					}
-				} else if herr == nil && cached != "" {
+					found = false
+				}
+				if found && cached != "" {
 					continue
 				}
 
@@ -240,7 +248,7 @@ func init() {
 					return sdk.PassRequest(), nil
 				}
 				// Complete extraction was scannable and clean: cache the verdict.
-				_, _ = sdk.CacheSet(cacheKey, "1")
+				_ = sdk.CacheSet(cacheKey, "1")
 			}
 		}
 		return sdk.PassRequest(), nil
@@ -367,29 +375,18 @@ func modelScan(content, toolName string) ([]finding, error) {
 	}
 	maxTokens := uint32(512)
 	temperature := 0.0
-	res, herr, err := sdk.ModelComplete(&pbv1.ModelCompleteArgs{
-		Service: "scanner",
-		Messages: []*pbv1.ModelMessage{
-			{Role: "system", Content: piiSystemPrompt},
-			{Role: "user", Content: "Tool: " + toolName + "\n\nOutput to scan:\n" + scanContent},
-		},
+	res, err := sdk.ModelComplete(&pbv1.ModelCompleteArgs{
+		Service:     "scanner",
+		Messages:    []*pbv1.Message{modelMessage("system", piiSystemPrompt), modelMessage("user", "Tool: "+toolName+"\n\nOutput to scan:\n"+scanContent)},
 		MaxTokens:   &maxTokens,
 		Temperature: &temperature,
 	})
 	if err != nil {
-		// Malformed frame / transport / protocol defect: hook error.
-		return nil, err
-	}
-	if herr != nil {
-		// Advisory refusals are a scanner failure (on_error decides);
-		// contract refusals are the caller's/host's defect — the hook errors
-		// regardless of on_error.
-		switch herr.Code {
-		case pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE:
-			return nil, &scannerFailure{"pii scan failed: " + herr.Message}
-		default:
-			return nil, fmt.Errorf("pii model service refused: %s", herr.Message)
+		var refusal *sdk.HostCallRefusalError
+		if errors.As(err, &refusal) && (refusal.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED || refusal.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE) {
+			return nil, &scannerFailure{"pii scan failed"}
 		}
+		return nil, err
 	}
 	// The typed model result carries NO status field; refusals arrive only in
 	// the framed error arm. An undecodable value arm is a protocol defect.
@@ -401,7 +398,15 @@ func modelScan(content, toolName string) ([]finding, error) {
 		PII      json.RawMessage `json:"pii"`
 		Findings json.RawMessage `json:"findings"`
 	}
-	if json.Unmarshal([]byte(extractJSON(res.Content)), &verdict) != nil {
+	completion := ""
+	if res != nil && res.Message != nil {
+		for _, block := range res.Message.Blocks {
+			if text := block.GetText(); text != nil {
+				completion += text.Text
+			}
+		}
+	}
+	if json.Unmarshal([]byte(extractJSON(completion)), &verdict) != nil {
 		return nil, &scannerFailure{"pii scan: unparseable verdict"}
 	}
 	if len(verdict.PII) == 0 || string(verdict.PII) == "null" {
