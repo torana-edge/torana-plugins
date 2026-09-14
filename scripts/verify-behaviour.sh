@@ -17,6 +17,7 @@
 
 set -euo pipefail
 
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 edge_dir=${1:?usage: verify-behaviour.sh <torana-edge dir> <bundles dir>}
 bundles=${2:?usage: verify-behaviour.sh <torana-edge dir> <bundles dir>}
 
@@ -34,10 +35,19 @@ echo "built bundles: $(ls -d "$bundles"/*/ | wc -l)"
 # real drift — torana-edge renaming the variable its helper reads — rather than
 # a caller who simply forgot to set it.
 export TORANA_PLUGIN_BUNDLES_DIR="$bundles"
+export TORANA_PLUGIN_SOURCE_DIR="$root/plugins"
 
 log=$(mktemp)
 fixture_log=$(mktemp)
-trap 'rm -f "$log" "$fixture_log"' EXIT
+suite_tmp=$(mktemp -d)
+trap 'rm -f "$log" "$fixture_log"; rm -rf "$suite_tmp"' EXIT
+
+# Reuse compiled wazero modules across the broad suite. Callers may provide a
+# durable CI cache; standalone runs get a request-local cache with the same
+# semantics instead of recompiling every guest for every test process.
+export TORANA_CI_CACHE=${TORANA_CI_CACHE:-"$suite_tmp/wazero-cache"}
+mkdir -p "$TORANA_CI_CACHE"
+export TORANA_E2E=1
 
 # torana-edge's OWN fixtures are build artifacts and are deliberately not
 # committed, so they have to be built before its suite will run. Without this
@@ -52,6 +62,46 @@ echo "building torana-edge test fixtures"
   tail -80 "$fixture_log" >&2
   exit 1
 }
+
+# Resolve the exact SDK source Edge is compiled against. An explicit checkout
+# is accepted only when its HEAD is that same module revision; otherwise use
+# the immutable extracted module directory returned by the Go tool.
+sdk_module=github.com/torana-edge/torana-plugin-sdk
+sdk_version=$(cd "$edge_dir" && GOWORK=off go list -m -f '{{.Version}}' "$sdk_module")
+sdk_metadata=$(cd "$edge_dir" && GOWORK=off go mod download -json "$sdk_module@$sdk_version")
+resolved_sdk_dir=$(printf '%s' "$sdk_metadata" | jq -r '.Dir // empty')
+sdk_revision=$(printf '%s' "$sdk_metadata" | jq -r '.Origin.Hash // empty')
+if [[ -z "$resolved_sdk_dir" || -z "$sdk_revision" ]]; then
+  echo "resolved SDK metadata lacks its source directory or VCS revision" >&2
+  exit 1
+fi
+if [[ -n "${TORANA_SDK_DIR:-}" ]]; then
+  provided_sdk_dir=$(cd "$TORANA_SDK_DIR" && pwd)
+  provided_revision=$(git -C "$provided_sdk_dir" rev-parse HEAD)
+  if [[ "$provided_revision" != "$sdk_revision" ]]; then
+    echo "TORANA_SDK_DIR is $provided_revision, but Edge resolves SDK $sdk_revision" >&2
+    exit 1
+  fi
+  export TORANA_SDK_DIR="$provided_sdk_dir"
+else
+  export TORANA_SDK_DIR="$resolved_sdk_dir"
+fi
+
+# The behaviour suite contains the production Edge roundtrip and both Rust
+# scaffold acceptance paths. Build the exact SDK guest rather than allowing
+# those tests to skip because no artifact happened to be present.
+rust_target="$suite_tmp/rust-target"
+PROTOC=${PROTOC:-$(command -v protoc)} \
+  CARGO_TARGET_DIR="$rust_target" \
+  cargo build --locked --target wasm32-wasip1 \
+    --manifest-path "$TORANA_SDK_DIR/conformance/guests/rust-allhooks/Cargo.toml" \
+    >"$fixture_log" 2>&1 || {
+      echo "failed to build the exact SDK Rust conformance guest" >&2
+      tail -80 "$fixture_log" >&2
+      exit 1
+    }
+export TORANA_RUST_CONFORMANCE=1
+export TORANA_RUST_GUEST="$rust_target/wasm32-wasip1/debug/torana-rust-allhooks.wasm"
 
 # -v so the marker and skip reasons reach the log; -count=1 to defeat caching,
 # which would otherwise let a stale pass stand in for a run that never happened.
