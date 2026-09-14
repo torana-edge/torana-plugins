@@ -12,7 +12,7 @@ import (
 // A paid but unusable response still belongs in the final batch's cost, and
 // unknown usage must decline the entire batch instead of looking free.
 func TestBatchCostIncludesDiscardedCompletions(t *testing.T) {
-	for _, mode := range []string{"empty", "longer", "unknown"} {
+	for _, mode := range []string{"empty", "longer", "unknown", "nil"} {
 		t.Run(mode, func(t *testing.T) {
 			h := newHarness(t)
 			h.SetConfig(modelConfig)
@@ -21,6 +21,9 @@ func TestBatchCostIncludesDiscardedCompletions(t *testing.T) {
 				calls++
 				if calls == 1 {
 					return modelStub("useful summary")(args)
+				}
+				if mode == "nil" {
+					return nil, nil, nil
 				}
 				result := &pbv1.ModelCompleteResult{Usage: &pbv1.Usage{InputTokens: 10000, OutputTokens: 50}}
 				if mode == "longer" {
@@ -51,7 +54,7 @@ func TestBatchCostIncludesDiscardedCompletions(t *testing.T) {
 			if calls != 2 {
 				t.Fatalf("model calls = %d", calls)
 			}
-			if mode == "unknown" {
+			if mode == "unknown" || mode == "nil" {
 				if !res.PassedThrough || countCommand(h, "torana_record_savings") != 0 {
 					t.Fatal("unknown attempt cost allowed compaction")
 				}
@@ -76,5 +79,26 @@ func TestBatchCostIncludesDiscardedCompletions(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestUnusablePaidBatchDoesNotClaimAnAppliedCompaction(t *testing.T) {
+	for _, content := range []string{"", strings.Repeat("no reduction", 10000)} {
+		h := newHarness(t)
+		h.SetConfig(modelConfig)
+		h.StubHostCall("torana_evaluate_compaction", applyStub(true))
+		h.StubModelComplete(func(*pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
+			return &pbv1.ModelCompleteResult{Content: content, Usage: &pbv1.Usage{InputTokens: 100, OutputTokens: 20}}, nil, nil
+		})
+		res := h.BeforeRequest(bigToolRequest(bigContent()))
+		if res.Err != nil || !res.PassedThrough {
+			t.Fatalf("unusable output changed request: %v", res.Err)
+		}
+		if countCommand(h, "env.model_complete") != 1 {
+			t.Fatal("missing paid attempt")
+		}
+		if countCommand(h, "torana_record_savings") != 0 {
+			t.Fatal("unapplied batch claimed a compaction")
+		}
 	}
 }

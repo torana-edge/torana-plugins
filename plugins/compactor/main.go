@@ -307,13 +307,14 @@ func deriveCompactionIntent(messages []*pbv1.Message, resultIndex, resultBlock i
 	return derivedIntentPrefix + string(payload)
 }
 
+// Model-service usage is priced as disjoint input/cache buckets. The host
+// normalizes the bound provider; the guest has no provider-format authority.
 type tokenUsage struct {
-	Reported               bool  `json:"reported"`
-	InputTokens            int64 `json:"input_tokens,omitempty"`
-	OutputTokens           int64 `json:"output_tokens,omitempty"`
-	CacheReadTokens        int64 `json:"cache_read_tokens,omitempty"`
-	CacheWriteTokens       int64 `json:"cache_write_tokens,omitempty"`
-	InputIncludesCacheRead bool  `json:"input_includes_cache_read,omitempty"`
+	Reported         bool  `json:"reported"`
+	InputTokens      int64 `json:"input_tokens,omitempty"`
+	OutputTokens     int64 `json:"output_tokens,omitempty"`
+	CacheReadTokens  int64 `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int64 `json:"cache_write_tokens,omitempty"`
 }
 
 type modelWork struct {
@@ -398,7 +399,8 @@ func prepareAndApplyModelBatch(req *pbv1.ChatRequest, works []modelWork) (bool, 
 			}
 		}
 		// Every successful service response is an attempt, even if its output
-		// is unusable. Missing usage makes the whole batch cost unknown.
+		// is unusable. A nil result (including a successful empty frame) or
+		// missing usage makes the whole batch cost unknown: never treat it as free.
 		usage := tokenUsage{}
 		if result != nil && result.Usage != nil {
 			usage = tokenUsage{Reported: true, InputTokens: int64(result.Usage.InputTokens), OutputTokens: int64(result.Usage.OutputTokens), CacheReadTokens: int64(result.Usage.CacheReadTokens), CacheWriteTokens: int64(result.Usage.CacheWriteTokens)}
@@ -413,6 +415,10 @@ func prepareAndApplyModelBatch(req *pbv1.ChatRequest, works []modelWork) (bool, 
 		})
 	}
 	if len(candidates) == 0 {
+		// The host already records every service response as plugin-egress,
+		// including usage for empty/non-shorter output. record_savings denotes
+		// applied compactions; a synthetic cost-only report would increment
+		// compaction counters and cannot produce a valid savings estimate.
 		return false, nil
 	}
 	report, ok := modelBatchReport(req, candidates, attempts)
@@ -509,7 +515,6 @@ func modelBatchReport(req *pbv1.ChatRequest, candidates []modelCandidate, attemp
 			usage.OutputTokens += attempt.OutputTokens
 			usage.CacheReadTokens += attempt.CacheReadTokens
 			usage.CacheWriteTokens += attempt.CacheWriteTokens
-			usage.InputIncludesCacheRead = usage.InputIncludesCacheRead || attempt.InputIncludesCacheRead
 		}
 		if !usage.Reported {
 			return nil, false
