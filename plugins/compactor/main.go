@@ -28,6 +28,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -90,9 +91,17 @@ func parseConfig(raw string) config {
 	return c
 }
 
+func modelMessage(role, text string) *pbv1.Message {
+	return &pbv1.Message{Role: role, Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: text}}}}}
+}
+
 func loadConfig() {
 	cfgOnce.Do(func() {
-		c := parseConfig(sdk.PluginConfig())
+		raw, err := sdk.PluginConfig()
+		if err != nil {
+			raw = "{}"
+		}
+		c := parseConfig(raw)
 		maxSummarizerInputBytes = c.MaxSummarizerInputBytes
 		toolPolicies = c.ToolPolicies
 		expectedApplications = c.ExpectedApplications
@@ -196,14 +205,11 @@ func compactToolResults(ctx context.Context, req *pbv1.ChatRequest) (bool, error
 			// Get the optional model-authored intent. NOT_FOUND and present-empty
 			// both use the bounded fallback; any other refusal or malformed reply
 			// is a contract defect — error the hook.
-			intent, herr, err := sdk.SharedCacheGet(intentCacheKey + ":" + view.ToolCallId)
+			intent, found, err := sdk.SharedCacheGet(intentCacheKey + ":" + view.ToolCallId)
 			if err != nil {
 				return false, fmt.Errorf("compactor: cache_get %s:%s: %w", intentCacheKey, view.ToolCallId, err)
 			}
-			if herr != nil && !sdk.IsNotFound(herr) {
-				return false, fmt.Errorf("compactor: cache_get %s:%s refused: %s", intentCacheKey, view.ToolCallId, herr.Message)
-			}
-			derived := herr != nil || intent == ""
+			derived := !found || intent == ""
 			if derived {
 				// A missing model-authored intent lowers relevance but no longer
 				// disables an otherwise safe/economical candidate. Derive a bounded,
@@ -215,20 +221,15 @@ func compactToolResults(ctx context.Context, req *pbv1.ChatRequest) (bool, error
 			// Include every semantic input in the cache identity. A harness may
 			// reuse tool_call_ids, and intents can change across rehydrated rounds.
 			modelCacheKey := modelResultCacheKey(toolName, toolArgs, text, intent, derived)
-			cached, herr, err := sdk.CacheGet(modelCacheKey)
+			cached, found, err := sdk.CacheGet(modelCacheKey)
 			if err != nil {
 				return false, fmt.Errorf("compactor: cache_get model key: %w", err)
-			}
-			if herr != nil && !sdk.IsNotFound(herr) {
-				return false, fmt.Errorf("compactor: cache_get model key refused: %s", herr.Message)
 			}
 			// A hit whose value is non-empty AND shorter than the original is
 			// reused without summarizer; a value >= the original leaves the result
 			// untouched; a miss or present-empty value is recomputed.
-			if (herr != nil || cached == "") || len(cached) < len(text) {
-				modelWorks = append(modelWorks, modelWork{
-					message: msg, index: mi, block: view.Block, text: text, intent: intent, cacheKey: modelCacheKey, cached: cached,
-				})
+			if !found || cached == "" || len(cached) < len(text) {
+				modelWorks = append(modelWorks, modelWork{message: msg, index: mi, block: view.Block, text: text, intent: intent, cacheKey: modelCacheKey, cached: cached})
 			}
 		}
 	}
@@ -367,7 +368,7 @@ func prepareAndApplyModelBatch(req *pbv1.ChatRequest, works []modelWork) (bool, 
 	var candidates []modelCandidate
 	var attempts []tokenUsage
 	for _, work := range works {
-		if work.cached != "" {
+		if work.cached != "" && len(work.cached) < len(work.text) {
 			candidates = append(candidates, modelCandidate{
 				message: work.message, index: work.index, block: work.block, originalBytes: len(work.text), replacement: work.cached,
 				source: "cache_reuse", cacheKey: work.cacheKey,
@@ -376,27 +377,17 @@ func prepareAndApplyModelBatch(req *pbv1.ChatRequest, works []modelWork) (bool, 
 		}
 		ctxStr := extractConversationContext(req.Messages)
 		maxTokens := uint32(512)
-		result, herr, err := sdk.ModelComplete(&pbv1.ModelCompleteArgs{
-			Service: "summarizer",
-			Messages: []*pbv1.ModelMessage{
-				{Role: "system", Content: "You are a tool output summarizer. Given a tool output and an extraction intent, return ONLY the relevant parts. Be concise. Do not add commentary."},
-				{Role: "user", Content: fmt.Sprintf("Intent: %s\n\nConversation context:\n%s\n\nTool output:\n%s\n\nExtract only the parts relevant to the intent.",
-					work.intent, ctxStr, truncateForPrompt(work.text, maxSummarizerInputBytes))},
-			},
+		result, err := sdk.ModelComplete(&pbv1.ModelCompleteArgs{
+			Service:   "summarizer",
+			Messages:  []*pbv1.Message{modelMessage("system", "You are a tool output summarizer. Given a tool output and an extraction intent, return ONLY the relevant parts. Be concise. Do not add commentary."), modelMessage("user", fmt.Sprintf("Intent: %s\n\nConversation context:\n%s\n\nTool output:\n%s\n\nExtract only the parts relevant to the intent.", work.intent, ctxStr, truncateForPrompt(work.text, maxSummarizerInputBytes)))},
 			MaxTokens: &maxTokens,
 		})
 		if err != nil {
-			return false, fmt.Errorf("compactor: summarizer: %w", err)
-		}
-		if herr != nil {
-			switch herr.Code {
-			case pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE:
-				// Advisory: operator/transient. Skip this candidate; do NOT
-				// retry in the same request (duplicate spend).
+			var refusal *sdk.HostCallRefusalError
+			if errors.As(err, &refusal) && (refusal.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED || refusal.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE) {
 				continue
-			default:
-				return false, fmt.Errorf("compactor: summarizer refused: %s", herr.Message)
 			}
+			return false, fmt.Errorf("compactor: summarizer: %w", err)
 		}
 		// Every successful service response is an attempt, even if its output
 		// is unusable. A nil result (including a successful empty frame) or
@@ -406,11 +397,19 @@ func prepareAndApplyModelBatch(req *pbv1.ChatRequest, works []modelWork) (bool, 
 			usage = tokenUsage{Reported: true, InputTokens: int64(result.Usage.InputTokens), OutputTokens: int64(result.Usage.OutputTokens), CacheReadTokens: int64(result.Usage.CacheReadTokens), CacheWriteTokens: int64(result.Usage.CacheWriteTokens)}
 		}
 		attempts = append(attempts, usage)
-		if result == nil || result.Content == "" || len(result.Content) >= len(work.text) {
+		completion := ""
+		if result != nil && result.Message != nil {
+			for _, block := range result.Message.Blocks {
+				if text := block.GetText(); text != nil {
+					completion += text.Text
+				}
+			}
+		}
+		if completion == "" || len(completion) >= len(work.text) {
 			continue
 		}
 		candidates = append(candidates, modelCandidate{
-			message: work.message, index: work.index, block: work.block, originalBytes: len(work.text), replacement: result.Content,
+			message: work.message, index: work.index, block: work.block, originalBytes: len(work.text), replacement: completion,
 			source: "transformation", cacheKey: work.cacheKey,
 		})
 	}
@@ -442,13 +441,13 @@ func prepareAndApplyModelBatch(req *pbv1.ChatRequest, works []modelWork) (bool, 
 		if candidate.source == "transformation" {
 			// Best-effort: the replacement is already applied in memory; a
 			// refused write cannot corrupt it, and the host logs the refusal.
-			_, _ = sdk.CacheSet(candidate.cacheKey, candidate.replacement)
+			_ = sdk.CacheSet(candidate.cacheKey, candidate.replacement)
 		}
 	}
 	payload, _ := json.Marshal(report)
 	// Best-effort observability: the batch is applied; rolling back after
 	// cache/report side effects would be worse. The host logs refusals.
-	_, _, _ = sdk.HostCallExtension("torana_record_savings", payload)
+	_, _ = sdk.HostCallExtension("torana_record_savings", payload)
 	return true, nil
 }
 
@@ -529,17 +528,13 @@ func modelBatchReport(req *pbv1.ChatRequest, candidates []modelCandidate, attemp
 // refusals error the hook.
 func evaluateModelReport(report map[string]any) (bool, error) {
 	payload, _ := json.Marshal(report)
-	result, herr, err := sdk.HostCallExtension("torana_evaluate_compaction", payload)
+	result, err := sdk.HostCallExtension("torana_evaluate_compaction", payload)
 	if err != nil {
-		return false, fmt.Errorf("compactor: evaluate_compaction: %w", err)
-	}
-	if herr != nil {
-		switch herr.Code {
-		case pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE:
+		var refusal *sdk.HostCallRefusalError
+		if errors.As(err, &refusal) && (refusal.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED || refusal.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE) {
 			return false, nil
-		default:
-			return false, fmt.Errorf("compactor: evaluate_compaction refused: %s", herr.Message)
 		}
+		return false, fmt.Errorf("compactor: evaluate_compaction: %w", err)
 	}
 	var decision struct {
 		Apply bool `json:"apply"`
@@ -572,19 +567,16 @@ func assistantMessageCountsAfter(messages []*pbv1.Message) []int {
 func applyDeterministicPolicy(msg *pbv1.Message, block int, text, toolName, toolArgs string, rule sdk.ToolPolicyRule) (bool, error) {
 	cacheKey := sdk.ContentAddressedCacheKey(policyCompactionCache,
 		"policy-v1", toolName, toolArgs, text, rule.Mode, rule.Rerun)
-	cached, herr, err := sdk.CacheGet(cacheKey)
+	cached, found, err := sdk.CacheGet(cacheKey)
 	if err != nil {
 		return false, fmt.Errorf("compactor: policy cache_get: %w", err)
-	}
-	if herr != nil && !sdk.IsNotFound(herr) {
-		return false, fmt.Errorf("compactor: policy cache_get refused: %s", herr.Message)
 	}
 	// Trust the cached value only when it is non-empty AND shorter than the
 	// original. Missing, present-empty, and NON-SHORTER values are unusable
 	// and recomputed locally — the replacement is a pure function of the
 	// inputs, so a corrupt or stale entry must never be applied (applying a
 	// non-shorter value would expand the request) or cached forever.
-	if herr == nil && cached != "" && len(cached) < len(text) {
+	if found && cached != "" && len(cached) < len(text) {
 		recordSavings(len(text), len(cached), "cache_reuse")
 		if _, err := sdk.ReplaceToolResultText(msg, block, cached); err != nil {
 			return false, fmt.Errorf("compactor: apply policy replacement: %w", err)
@@ -601,7 +593,7 @@ func applyDeterministicPolicy(msg *pbv1.Message, block int, text, toolName, tool
 	}
 	// Best-effort: the replacement is already applied; a refused write cannot
 	// corrupt it, and the host logs the refusal.
-	_, _ = sdk.CacheSet(cacheKey, replacement)
+	_ = sdk.CacheSet(cacheKey, replacement)
 	return true, nil
 }
 
@@ -614,7 +606,7 @@ func recordSavings(originalBytes, finalBytes int, source string) {
 		"final_bytes":    finalBytes,
 		"source":         source,
 	})
-	_, _, _ = sdk.HostCallExtension("torana_record_savings", payload)
+	_, _ = sdk.HostCallExtension("torana_record_savings", payload)
 }
 
 func extractConversationContext(msgs []*pbv1.Message) string {
