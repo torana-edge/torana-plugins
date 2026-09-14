@@ -10,7 +10,7 @@ import (
 )
 
 func TestConfigFetchFailuresDoNotAdvertiseTools(t *testing.T) {
-	for _, failure := range []string{"transport", "host", "empty", "malformed"} {
+	for _, failure := range []string{"transport", "host", "missing-envelope", "malformed", "whitespace-config"} {
 		t.Run(failure, func(t *testing.T) {
 			h := sdktest.New(t)
 			mode := "valid"
@@ -20,8 +20,12 @@ func TestConfigFetchFailuresDoNotAdvertiseTools(t *testing.T) {
 					return "", errors.New("unavailable")
 				case "host":
 					return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "unavailable"), nil
-				case "empty":
+				case "missing-envelope":
+					return "", nil
+				case "unset":
 					return sdktest.HostResultValue(nil), nil
+				case "whitespace-config":
+					return sdktest.HostResultValue([]byte("  \t")), nil
 				case "malformed":
 					return "not a host reply", nil
 				case "explicit-empty":
@@ -32,16 +36,16 @@ func TestConfigFetchFailuresDoNotAdvertiseTools(t *testing.T) {
 			})
 			input := requestWithTools(tool("read", "", `{}`, false, ""), tool("shell", "", `{}`, false, ""))
 			before := proto.Clone(input)
-			for _, next := range []string{failure, "valid", failure, "valid", "explicit-empty"} {
+			for _, next := range []string{failure, "valid", failure, "valid", "explicit-empty", "valid", "unset", "valid"} {
 				mode = next
 				result := h.BeforeRequest(input)
 				if next == failure {
 					if result.Err == nil || result.PassedThrough || result.Request != nil {
 						t.Fatalf("failure advertised tools: %+v", result)
 					}
-				} else if next == "explicit-empty" {
+				} else if next == "explicit-empty" || next == "unset" {
 					if result.Err != nil || !result.PassedThrough {
-						t.Fatalf("explicit empty config rejected: %+v", result)
+						t.Fatalf("successful empty/unset config rejected: %+v", result)
 					}
 				} else if result.Err != nil || result.Request == nil || len(result.Request.Tools) != 1 || result.Request.Tools[0].Name != "read" {
 					t.Fatalf("valid policy not recovered: %+v", result)
