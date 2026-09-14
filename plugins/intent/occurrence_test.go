@@ -141,7 +141,14 @@ func TestCaptureContextRefusalKeepsSchemaAndStripping(t *testing.T) {
 		t.Fatal("schema was not injected")
 	}
 	// Absent hadI means the injected field is stripped, even with no capture context.
-	streamCallOn(t, r, "c", "read", "", `{"path":"server.go","i":"inspect"}`)
+	emitted := streamCallOn(t, r, "c", "read", "", `{"path":"server.go","i":"inspect"}`)
+	var stripped map[string]any
+	if err := json.Unmarshal([]byte(emittedArgs(t, emitted)), &stripped); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := stripped["i"]; present {
+		t.Fatal("capture-context refusal prevented stripping")
+	}
 	found := false
 	for _, entry := range h.Logs() {
 		found = found || strings.Contains(entry.Message, "capture context unavailable")
