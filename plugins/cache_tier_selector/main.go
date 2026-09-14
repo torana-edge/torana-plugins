@@ -77,7 +77,9 @@ type decision struct {
 	// DecidedAtMillis is when the choice was made.
 	DecidedAtMillis int64 `json:"decided_at_millis"`
 	// RefreshedAtMillis records use under a refresh-on-read policy. Keeping it
-	// separate preserves the original decision time and absolute-TTL behavior.
+	// separate preserves the original decision time. RefreshOnRead is part of
+	// scopedDecisionKey: switching it off selects a new absolute-TTL decision
+	// rather than inheriting these refresh timestamps.
 	RefreshedAtMillis int64 `json:"refreshed_at_millis,omitempty"`
 	// Cover the next TTL/10 of reads to coalesce writes. This can retain an idle
 	// choice slightly longer, but cannot expire a live prefix early after restart.
