@@ -314,9 +314,12 @@ func init() {
 			}
 			return sdk.RequestResult{}, err
 		}
-		// Best-effort observability; the decision is already durable.
+		// Best-effort observability; advisory unavailability is safe after the
+		// durable decision, while contract defects still fail the hook.
 		payload, _ := json.Marshal(map[string]any{"counter": "tier_decisions", "delta": 1})
-		_, _ = sdk.HostCallExtension("torana_plugin_counter", payload)
+		if _, err := sdk.HostCallExtension("torana_plugin_counter", payload); err != nil && !isAdvisory(err) {
+			return sdk.RequestResult{}, fmt.Errorf("cache_tier_selector: counter: %w", err)
+		}
 
 		if changed, err := replaceMarker(req, marker); err != nil {
 			return sdk.RequestResult{}, err

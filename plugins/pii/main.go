@@ -195,16 +195,20 @@ func init() {
 				// misconfigured — on_error governs the UNAVAILABLE contextual
 				// scan, never a deterministic finding already made.
 				if f := regexScan(ex.text); len(f) > 0 {
-					sdk.BlockRequest(422, "pii_detected", blockMessage(toolName, f))
+					if err := sdk.BlockRequest(422, "pii_detected", blockMessage(toolName, f)); err != nil {
+						return sdk.RequestResult{}, fmt.Errorf("pii: block detected: %w", err)
+					}
 					return sdk.PassRequest(), nil
 				}
 				if !ex.complete {
 					// Incomplete extraction: never model-scanned, never cached;
 					// on_error governs the uninspectable remainder.
 					if failClosed() {
-						sdk.BlockRequest(422, "pii_scan_failed",
+						if err := sdk.BlockRequest(422, "pii_scan_failed",
 							fmt.Sprintf("PII scan unavailable for %s; request blocked (fail-closed). Retry, or set pii.on_error=\"allow\" to forward unscanned.",
-								toolLabel(toolName)))
+								toolLabel(toolName))); err != nil {
+							return sdk.RequestResult{}, fmt.Errorf("pii: block scan failure: %w", err)
+						}
 						return sdk.PassRequest(), nil
 					}
 					continue
@@ -238,21 +242,35 @@ func init() {
 					if cfg.OnError == "allow" {
 						continue
 					}
-					sdk.BlockRequest(422, "pii_scan_failed",
+					if err := sdk.BlockRequest(422, "pii_scan_failed",
 						fmt.Sprintf("PII scan unavailable for %s; request blocked (fail-closed). Retry, or set pii.on_error=\"allow\" to forward unscanned.",
-							toolLabel(toolName)))
+							toolLabel(toolName))); err != nil {
+						return sdk.RequestResult{}, fmt.Errorf("pii: block scan failure: %w", err)
+					}
 					return sdk.PassRequest(), nil
 				}
 				if len(findings) > 0 {
-					sdk.BlockRequest(422, "pii_detected", blockMessage(toolName, findings))
+					if err := sdk.BlockRequest(422, "pii_detected", blockMessage(toolName, findings)); err != nil {
+						return sdk.RequestResult{}, fmt.Errorf("pii: block detected: %w", err)
+					}
 					return sdk.PassRequest(), nil
 				}
 				// Complete extraction was scannable and clean: cache the verdict.
-				_ = sdk.CacheSet(cacheKey, "1")
+				if err := sdk.CacheSet(cacheKey, "1"); err != nil && !isAdvisory(err) {
+					return sdk.RequestResult{}, fmt.Errorf("pii: cache clean result: %w", err)
+				}
 			}
 		}
 		return sdk.PassRequest(), nil
 	})
+}
+
+func isAdvisory(err error) bool {
+	var refusal *sdk.HostCallRefusalError
+	if !errors.As(err, &refusal) {
+		return false
+	}
+	return refusal.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED || refusal.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE
 }
 
 func failClosed() bool { return cfg.OnError != "allow" }
@@ -398,13 +416,9 @@ func modelScan(content, toolName string) ([]finding, error) {
 		PII      json.RawMessage `json:"pii"`
 		Findings json.RawMessage `json:"findings"`
 	}
-	completion := ""
-	if res != nil && res.Message != nil {
-		for _, block := range res.Message.Blocks {
-			if text := block.GetText(); text != nil {
-				completion += text.Text
-			}
-		}
+	completion, err := strictModelText(res)
+	if err != nil {
+		return nil, fmt.Errorf("pii: scanner response: %w", err)
 	}
 	if json.Unmarshal([]byte(extractJSON(completion)), &verdict) != nil {
 		return nil, &scannerFailure{"pii scan: unparseable verdict"}
@@ -463,6 +477,20 @@ func modelScan(content, toolName string) ([]finding, error) {
 		out = append(out, finding{Type: "unspecified"})
 	}
 	return out, nil
+}
+
+func strictModelText(result *pbv1.ModelCompleteResult) (string, error) {
+	if result == nil || result.Message == nil {
+		return "", nil
+	}
+	var out strings.Builder
+	for i, block := range result.Message.Blocks {
+		if block == nil || block.GetText() == nil {
+			return "", fmt.Errorf("response block %d is not text", i)
+		}
+		out.WriteString(block.GetText().Text)
+	}
+	return out.String(), nil
 }
 
 // extractJSON pulls the first complete {...} object out of a model reply that

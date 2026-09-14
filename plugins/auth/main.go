@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -114,7 +114,9 @@ func init() {
 		}
 		switch outcome {
 		case verifyOK:
-			sdk.SetIdentity(id)
+			if err := sdk.SetIdentity(id); err != nil {
+				return sdk.RequestResult{}, fmt.Errorf("auth: set identity: %w", err)
+			}
 			return sdk.PassRequest(), nil
 		case verifyRejected:
 			// A domain rejection is an authoritative answer about the presented
@@ -122,7 +124,9 @@ func init() {
 			// turn an explicitly revoked/invalid Torana key into authenticated
 			// access. Keep the verifier's optional diagnostic private and return a
 			// stable, value-free denial.
-			sdk.BlockRequest(401, "virtual_key_rejected", "The Torana virtual key was rejected.")
+			if err := sdk.BlockRequest(401, "virtual_key_rejected", "The Torana virtual key was rejected."); err != nil {
+				return sdk.RequestResult{}, fmt.Errorf("auth: block rejected virtual key: %w", err)
+			}
 			return sdk.PassRequest(), nil
 		default: // verifyNoIdentity: advisory unwired/unavailable verifier.
 			return sdk.PassRequest(), nil
@@ -274,7 +278,9 @@ func verifyVirtualKey(token string) (string, verifyOutcome, error) {
 			return "", verifyNoIdentity, fmt.Errorf("auth: verify_virtual_key refused (code=%s)", refusal.Code)
 		}
 	}
-	if err != nil { return "", verifyNoIdentity, fmt.Errorf("auth: verify_virtual_key call failed: %w", err) }
+	if err != nil {
+		return "", verifyNoIdentity, fmt.Errorf("auth: verify_virtual_key call failed: %w", err)
+	}
 
 	resp, err := decodeVerifyResponse(res)
 	if err != nil {

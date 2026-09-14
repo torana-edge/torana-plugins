@@ -1110,7 +1110,7 @@ func TestRequestPathSanitizedReplayAndFingerprint(t *testing.T) {
 // nothing else, no clock/state, and exact input preservation.
 func TestRequestPathExactCallMultisets(t *testing.T) {
 	outOfDomain := uReq()
-	outOfDomain.Messages[0].Blocks = outOfDomain.Messages[0].Blocks[:0]
+	outOfDomain.ToranaMetaJson = []byte(`{"_provider":"p","_path":"/x"}`)
 	noMarker := uReq()
 	noMarker.Messages = []*pbv1.Message{textMsg("user", "u", false)}
 	terminalSuffix := &pbv1.ChatRequest{

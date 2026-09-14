@@ -41,6 +41,14 @@ import (
 
 func main() {}
 
+func isAdvisory(err error) bool {
+	var refusal *sdk.HostCallRefusalError
+	if !errors.As(err, &refusal) {
+		return false
+	}
+	return refusal.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED || refusal.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE
+}
+
 const (
 	intentCacheKey  = "intent"
 	compactionCache = "compacted"
@@ -397,13 +405,9 @@ func prepareAndApplyModelBatch(req *pbv1.ChatRequest, works []modelWork) (bool, 
 			usage = tokenUsage{Reported: true, InputTokens: int64(result.Usage.InputTokens), OutputTokens: int64(result.Usage.OutputTokens), CacheReadTokens: int64(result.Usage.CacheReadTokens), CacheWriteTokens: int64(result.Usage.CacheWriteTokens)}
 		}
 		attempts = append(attempts, usage)
-		completion := ""
-		if result != nil && result.Message != nil {
-			for _, block := range result.Message.Blocks {
-				if text := block.GetText(); text != nil {
-					completion += text.Text
-				}
-			}
+		completion, err := strictModelText(result)
+		if err != nil {
+			return false, fmt.Errorf("compactor: summarizer response: %w", err)
 		}
 		if completion == "" || len(completion) >= len(work.text) {
 			continue
@@ -441,14 +445,35 @@ func prepareAndApplyModelBatch(req *pbv1.ChatRequest, works []modelWork) (bool, 
 		if candidate.source == "transformation" {
 			// Best-effort: the replacement is already applied in memory; a
 			// refused write cannot corrupt it, and the host logs the refusal.
-			_ = sdk.CacheSet(candidate.cacheKey, candidate.replacement)
+			if err := sdk.CacheSet(candidate.cacheKey, candidate.replacement); err != nil && !isAdvisory(err) {
+				return false, fmt.Errorf("compactor: cache write: %w", err)
+			}
 		}
 	}
-	payload, _ := json.Marshal(report)
-	// Best-effort observability: the batch is applied; rolling back after
-	// cache/report side effects would be worse. The host logs refusals.
-	_, _ = sdk.HostCallExtension("torana_record_savings", payload)
+	payload, err := json.Marshal(report)
+	if err != nil {
+		return false, fmt.Errorf("compactor: encode savings report: %w", err)
+	}
+	// The batch is applied before reporting. Advisory host unavailability is
+	// safe to ignore; contract and transport defects surface to the hook.
+	if _, err := sdk.HostCallExtension("torana_record_savings", payload); err != nil && !isAdvisory(err) {
+		return false, fmt.Errorf("compactor: record savings: %w", err)
+	}
 	return true, nil
+}
+
+func strictModelText(result *pbv1.ModelCompleteResult) (string, error) {
+	if result == nil || result.Message == nil {
+		return "", nil
+	}
+	var out strings.Builder
+	for i, block := range result.Message.Blocks {
+		if block == nil || block.GetText() == nil {
+			return "", fmt.Errorf("response block %d is not text", i)
+		}
+		out.WriteString(block.GetText().Text)
+	}
+	return out.String(), nil
 }
 
 func optimisticModelCandidates(works []modelWork) ([]modelCandidate, bool) {
@@ -577,7 +602,9 @@ func applyDeterministicPolicy(msg *pbv1.Message, block int, text, toolName, tool
 	// inputs, so a corrupt or stale entry must never be applied (applying a
 	// non-shorter value would expand the request) or cached forever.
 	if found && cached != "" && len(cached) < len(text) {
-		recordSavings(len(text), len(cached), "cache_reuse")
+		if err := recordSavings(len(text), len(cached), "cache_reuse"); err != nil {
+			return false, err
+		}
 		if _, err := sdk.ReplaceToolResultText(msg, block, cached); err != nil {
 			return false, fmt.Errorf("compactor: apply policy replacement: %w", err)
 		}
@@ -587,26 +614,40 @@ func applyDeterministicPolicy(msg *pbv1.Message, block int, text, toolName, tool
 	if len(replacement) >= len(text) {
 		return false, nil
 	}
-	recordSavings(len(text), len(replacement), "transformation")
+	if err := recordSavings(len(text), len(replacement), "transformation"); err != nil {
+		return false, err
+	}
 	if _, err := sdk.ReplaceToolResultText(msg, block, replacement); err != nil {
 		return false, fmt.Errorf("compactor: apply policy replacement: %w", err)
 	}
 	// Best-effort: the replacement is already applied; a refused write cannot
 	// corrupt it, and the host logs the refusal.
-	_ = sdk.CacheSet(cacheKey, replacement)
+	if err := sdk.CacheSet(cacheKey, replacement); err != nil && !isAdvisory(err) {
+		return false, fmt.Errorf("compactor: cache write: %w", err)
+	}
 	return true, nil
 }
 
 // recordSavings reports compaction byte savings to /stats via the host.
-// Best-effort by contract: it runs after the mutation and must never change
-// the applied replacement.
-func recordSavings(originalBytes, finalBytes int, source string) {
-	payload, _ := json.Marshal(map[string]any{
+// Advisory reporting refusal does not prevent a replacement; protocol,
+// transport, and contract failures surface to the hook.
+func recordSavings(originalBytes, finalBytes int, source string) error {
+	payload, err := json.Marshal(map[string]any{
 		"original_bytes": originalBytes,
 		"final_bytes":    finalBytes,
 		"source":         source,
 	})
-	_, _ = sdk.HostCallExtension("torana_record_savings", payload)
+	if err != nil {
+		return fmt.Errorf("compactor: encode savings report: %w", err)
+	}
+	_, err = sdk.HostCallExtension("torana_record_savings", payload)
+	if err != nil && isAdvisory(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("compactor: record savings: %w", err)
+	}
+	return nil
 }
 
 func extractConversationContext(msgs []*pbv1.Message) string {

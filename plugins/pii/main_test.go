@@ -58,6 +58,19 @@ func modelResult(content string) *pbv1.ModelCompleteResult {
 	return &pbv1.ModelCompleteResult{Message: &pbv1.ResponseMessage{Blocks: []*pbv1.ResponseBlock{{Kind: &pbv1.ResponseBlock_Text{Text: &pbv1.ResponseTextBlock{Text: content}}}}}, FinishReason: "stop"}
 }
 
+func TestStrictModelTextRejectsUnsupportedBlocks(t *testing.T) {
+	tool := &pbv1.ResponseBlock{Kind: &pbv1.ResponseBlock_ToolCall{ToolCall: &pbv1.ToolCall{Name: "read", ArgumentsJson: []byte(`{}`)}}}
+	mixed := &pbv1.ModelCompleteResult{Message: &pbv1.ResponseMessage{Blocks: []*pbv1.ResponseBlock{
+		{Kind: &pbv1.ResponseBlock_Text{Text: &pbv1.ResponseTextBlock{Text: `{"pii":false}`}}}, tool,
+	}}}
+	if _, err := strictModelText(mixed); err == nil {
+		t.Fatal("mixed text/tool scanner response must be rejected rather than treated as clean")
+	}
+	if _, err := strictModelText(&pbv1.ModelCompleteResult{Message: &pbv1.ResponseMessage{Blocks: []*pbv1.ResponseBlock{tool}}}); err == nil {
+		t.Fatal("tool-only scanner response must be rejected")
+	}
+}
+
 func countCommand(h *sdktest.Harness, cmd string) int {
 	n := 0
 	for _, c := range h.Calls() {
@@ -478,6 +491,15 @@ func TestCacheRefusalClasses(t *testing.T) {
 	})
 	if res3 := h3.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("no pii")))); res3.Err == nil {
 		t.Fatal("a malformed cache frame must error the hook")
+	}
+}
+
+func TestDeniedBlockCannotReturnSuccess(t *testing.T) {
+	h := newHarness(t)
+	h.DenyPermission("env.block_request")
+	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("contact someone@example.com"))))
+	if res.Err == nil || res.PassedThrough {
+		t.Fatalf("denied PII block must fail the hook, passed=%v err=%v", res.PassedThrough, res.Err)
 	}
 }
 

@@ -778,9 +778,11 @@ func TestBestEffortWritesAndSavings(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(keywordCfg)
 	h.SeedSharedCache("intent:call_1", "find the bug in server")
-	h.DenyPermission("env.cache_set")
+	h.StubHostCall("env.cache_set", func(string) (string, error) {
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "cache unavailable"), nil
+	})
 	h.StubHostCall("torana_record_savings", func(string) (string, error) {
-		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "stub"), nil
 	})
 	res := h.BeforeRequest(bigToolRequest(keywordContent()))
 	if res.Err != nil {

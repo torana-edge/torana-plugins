@@ -91,3 +91,16 @@ A production auth plugin must use a fail-closed policy instead.
 An earlier iteration of this plugin shipped hardcoded stubs that returned a dummy
 tenant for every request. Those were removed precisely because a security stub
 that returns success is worse than no stub at all.
+
+### Local SDK override
+
+For development against a checked out SDK, set `TORANA_SDK_DIR` to its
+absolute path. The scripts validate the module before using it:
+
+```bash
+TORANA_SDK_DIR=/path/to/torana-plugin-sdk ./scripts/test.sh
+TORANA_SDK_DIR=/path/to/torana-plugin-sdk ./scripts/build.sh pii
+```
+
+Release builds continue to use the SDK revision pinned by each plugin's
+`go.mod`.

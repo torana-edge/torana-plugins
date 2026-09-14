@@ -93,6 +93,19 @@ func modelResult(text string, usage *pbv1.Usage) *pbv1.ModelCompleteResult {
 	return &pbv1.ModelCompleteResult{Message: &pbv1.ResponseMessage{Blocks: []*pbv1.ResponseBlock{{Kind: &pbv1.ResponseBlock_Text{Text: &pbv1.ResponseTextBlock{Text: text}}}}}, FinishReason: "stop", ReportedModel: "small-model", Usage: usage}
 }
 
+func TestStrictModelTextRejectsUnsupportedBlocks(t *testing.T) {
+	tool := &pbv1.ResponseBlock{Kind: &pbv1.ResponseBlock_ToolCall{ToolCall: &pbv1.ToolCall{Name: "read", ArgumentsJson: []byte(`{}`)}}}
+	mixed := &pbv1.ModelCompleteResult{Message: &pbv1.ResponseMessage{Blocks: []*pbv1.ResponseBlock{
+		{Kind: &pbv1.ResponseBlock_Text{Text: &pbv1.ResponseTextBlock{Text: "summary"}}}, tool,
+	}}}
+	if _, err := strictModelText(mixed); err == nil {
+		t.Fatal("mixed text/tool response must be rejected rather than partially applied")
+	}
+	if _, err := strictModelText(&pbv1.ModelCompleteResult{Message: &pbv1.ResponseMessage{Blocks: []*pbv1.ResponseBlock{tool}}}); err == nil {
+		t.Fatal("tool-only response must be rejected")
+	}
+}
+
 func modelMessageText(m *pbv1.Message) string {
 	return sdk.Text(m)
 }
@@ -929,7 +942,9 @@ func TestCacheSetRefusalIsBestEffort(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
 	h.SeedSharedCache("intent:call_1", "find the bug")
-	h.DenyPermission("env.cache_set")
+	h.StubHostCall("env.cache_set", func(string) (string, error) {
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "cache unavailable"), nil
+	})
 	h.StubModelComplete(modelStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	res := h.BeforeRequest(bigToolRequest(bigContent()))
@@ -953,7 +968,7 @@ func TestSavingsReportRefusalDoesNotChangeReplacement(t *testing.T) {
 	h.StubModelComplete(modelStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	h.StubHostCall("torana_record_savings", func(string) (string, error) {
-		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "stub refusal"), nil
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "stub refusal"), nil
 	})
 	res := h.BeforeRequest(bigToolRequest(bigContent()))
 	if res.Err != nil {
