@@ -333,7 +333,6 @@ type modelCandidate struct {
 	originalBytes int
 	replacement   string
 	source        string
-	usage         tokenUsage
 	cacheKey      string
 }
 
@@ -351,7 +350,7 @@ func prepareAndApplyModelBatch(req *pbv1.ChatRequest, works []modelWork) (bool, 
 	// uncached candidate optimistically assumes zero bytes.
 	optimistic, hasUncached := optimisticModelCandidates(works)
 	if hasUncached {
-		preflight, ok := modelBatchReport(req, optimistic, false)
+		preflight, ok := modelBatchReport(req, optimistic, nil)
 		if !ok {
 			return false, nil
 		}
@@ -365,6 +364,7 @@ func prepareAndApplyModelBatch(req *pbv1.ChatRequest, works []modelWork) (bool, 
 	}
 
 	var candidates []modelCandidate
+	var attempts []tokenUsage
 	for _, work := range works {
 		if work.cached != "" {
 			candidates = append(candidates, modelCandidate{
@@ -397,23 +397,25 @@ func prepareAndApplyModelBatch(req *pbv1.ChatRequest, works []modelWork) (bool, 
 				return false, fmt.Errorf("compactor: summarizer refused: %s", herr.Message)
 			}
 		}
-		if result == nil || result.Content == "" || len(result.Content) >= len(work.text) {
-			// An unusable completion is a candidate-local decline.
-			continue
-		}
+		// Every successful service response is an attempt, even if its output
+		// is unusable. Missing usage makes the whole batch cost unknown.
 		usage := tokenUsage{}
-		if result.Usage != nil {
+		if result != nil && result.Usage != nil {
 			usage = tokenUsage{Reported: true, InputTokens: int64(result.Usage.InputTokens), OutputTokens: int64(result.Usage.OutputTokens), CacheReadTokens: int64(result.Usage.CacheReadTokens), CacheWriteTokens: int64(result.Usage.CacheWriteTokens)}
+		}
+		attempts = append(attempts, usage)
+		if result == nil || result.Content == "" || len(result.Content) >= len(work.text) {
+			continue
 		}
 		candidates = append(candidates, modelCandidate{
 			message: work.message, index: work.index, block: work.block, originalBytes: len(work.text), replacement: result.Content,
-			source: "transformation", usage: usage, cacheKey: work.cacheKey,
+			source: "transformation", cacheKey: work.cacheKey,
 		})
 	}
 	if len(candidates) == 0 {
 		return false, nil
 	}
-	report, ok := modelBatchReport(req, candidates, true)
+	report, ok := modelBatchReport(req, candidates, attempts)
 	if !ok {
 		return false, nil
 	}
@@ -466,15 +468,13 @@ func optimisticModelCandidates(works []modelWork) ([]modelCandidate, bool) {
 	return candidates, hasUncached
 }
 
-func modelBatchReport(req *pbv1.ChatRequest, candidates []modelCandidate, includeSummarizer bool) (map[string]any, bool) {
+func modelBatchReport(req *pbv1.ChatRequest, candidates []modelCandidate, attempts []tokenUsage) (map[string]any, bool) {
 	if len(candidates) == 0 {
 		return nil, false
 	}
 	earliest := len(req.Messages)
 	originalBytes, finalBytes := 0, 0
 	source := "cache_reuse"
-	usage := tokenUsage{Reported: true}
-	hasTransformation := false
 	for _, candidate := range candidates {
 		if candidate.index < earliest {
 			earliest = candidate.index
@@ -484,14 +484,7 @@ func modelBatchReport(req *pbv1.ChatRequest, candidates []modelCandidate, includ
 		if candidate.source != "transformation" {
 			continue
 		}
-		hasTransformation = true
 		source = "transformation"
-		usage.Reported = usage.Reported && candidate.usage.Reported
-		usage.InputTokens += candidate.usage.InputTokens
-		usage.OutputTokens += candidate.usage.OutputTokens
-		usage.CacheReadTokens += candidate.usage.CacheReadTokens
-		usage.CacheWriteTokens += candidate.usage.CacheWriteTokens
-		usage.InputIncludesCacheRead = usage.InputIncludesCacheRead || candidate.usage.InputIncludesCacheRead
 	}
 
 	tail := proto.Clone(req).(*pbv1.ChatRequest)
@@ -508,7 +501,16 @@ func modelBatchReport(req *pbv1.ChatRequest, candidates []modelCandidate, includ
 		"source":                        source,
 		"pricing_resource":              "target",
 	}
-	if includeSummarizer && hasTransformation {
+	if len(attempts) > 0 {
+		usage := tokenUsage{Reported: true}
+		for _, attempt := range attempts {
+			usage.Reported = usage.Reported && attempt.Reported
+			usage.InputTokens += attempt.InputTokens
+			usage.OutputTokens += attempt.OutputTokens
+			usage.CacheReadTokens += attempt.CacheReadTokens
+			usage.CacheWriteTokens += attempt.CacheWriteTokens
+			usage.InputIncludesCacheRead = usage.InputIncludesCacheRead || attempt.InputIncludesCacheRead
+		}
 		if !usage.Reported {
 			return nil, false
 		}

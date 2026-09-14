@@ -204,7 +204,7 @@ func TestModelBatchReportUsesAdjustedTailOnce(t *testing.T) {
 
 	report, ok := modelBatchReport(req, []modelCandidate{{
 		message: result, index: 1, originalBytes: len(original), replacement: replacement, source: "cache_reuse",
-	}}, false)
+	}}, nil)
 	if !ok {
 		t.Fatal("modelBatchReport rejected valid candidate")
 	}
