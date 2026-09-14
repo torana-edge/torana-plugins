@@ -23,9 +23,8 @@ if [ -n "$stray" ]; then
   echo "remove with: git rm --cached <path>" >&2
   exit 1
 fi
-cache=$(mktemp -d)
 workspace_dir=$(mktemp -d)
-trap 'rm -rf "$cache" "$workspace_dir"' EXIT
+trap 'rm -rf "$workspace_dir"' EXIT
 
 if [[ -d "$root/../torana-plugin-sdk" ]]; then
   modules=("$root/../torana-plugin-sdk")
@@ -71,5 +70,5 @@ go run "$root/scripts/validate_manifests.go" "$root/plugins"
 "$root/scripts/test_build_without_sibling.sh"
 "$root/scripts/test_bundle_digest.sh"
 for module in "$root"/plugins/*; do
-  (cd "$module" && GOCACHE="$cache" go test ./...)
+  (cd "$module" && go test ./...)
 done
