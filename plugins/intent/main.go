@@ -470,6 +470,10 @@ func conversationIdentity(req *pbv1.ChatRequest) (string, string) {
 // Without conversation and call identity a cached value cannot safely be
 // attributed to this historical occurrence. Bind inputs too, so reusing an ID
 // for a different tool or arguments cannot restore an unrelated intent.
+// The host conversation label hashes the leading system messages and first user
+// message; changing that prefix rotates the key. Model/tool-definition changes
+// alone are excluded (unless the harness renders them into the system prompt).
+// Equal prefixes can share a label, so retained call identity is also essential.
 func occurrenceKey(conversation, id, name string, args map[string]any) string {
 	if conversation == "" || id == "" {
 		return ""
