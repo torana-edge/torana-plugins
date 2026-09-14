@@ -69,6 +69,12 @@ then the later plugins may add intent fields or translate an approved schema
 for the provider. Run only one of the two compactors; their manifests declare
 that conflict and the host enforces it before loading either guest.
 
+Intent history restoration requires the same host conversation ID, tool-call ID,
+tool name, and arguments as the captured call. Harnesses that remap call IDs, or
+requests without a conversation identity, use the configured heuristic fill (or
+leave history unchanged with `fill: off`). Equal arguments alone cannot identify
+why an earlier call was made; old arguments-only cache entries are ignored.
+
 ## A note on `auth`
 
 `plugins/auth` ships in this repository but is **deliberately excluded from the public

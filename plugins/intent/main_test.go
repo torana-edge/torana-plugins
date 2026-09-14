@@ -206,6 +206,7 @@ func TestSchemaInjectionPreservesLargeIntegerConstraints(t *testing.T) {
 // which exercises schema injection, the system prompt, and rehydration.
 func reqWith(toolArgs string) *pbv1.ChatRequest {
 	return &pbv1.ChatRequest{
+		ToranaMetaJson: []byte(`{"_conversation_id":"conv-1"}`),
 		Tools: []*pbv1.ToolDef{{
 			Name:           "read",
 			ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"}}}`),
@@ -228,7 +229,9 @@ func reqWith(toolArgs string) *pbv1.ChatRequest {
 // the closing stop emits nothing.
 func streamCall(t *testing.T, h *sdktest.Harness, id, name, sig, args string) sdktest.StreamResult {
 	t.Helper()
-	return streamCallOn(t, h.NewRequest(), id, name, sig, args)
+	r := h.NewRequest()
+	r.BeforeRequest(&pbv1.ChatRequest{ToranaMetaJson: []byte(`{"_conversation_id":"conv-1"}`), Tools: []*pbv1.ToolDef{{Name: name, ParametersJson: []byte(`{"type":"object"}`)}}})
+	return streamCallOn(t, r, id, name, sig, args)
 }
 
 // streamCallOn is streamCall on a CALLER-SUPPLIED request, for a test that
@@ -400,12 +403,12 @@ func protoEqual(t *testing.T, a, b *pbv1.ChatRequest) bool {
 	return string(ab) == string(bb)
 }
 
-// TestRehydrationRestoresAndBridges — a captured intent (by content key) is
+// TestRehydrationRestoresAndBridges — a captured intent (by occurrence key) is
 // restored onto the history call and bridged to intent:<tool_call_id>, the
 // key the compactors consume.
 func TestRehydrationRestoresAndBridges(t *testing.T) {
 	h := newHarness(t)
-	key := contentKey("read", map[string]any{"path": "server.go"})
+	key := occurrenceKey("conv-1", "call_1", "read", map[string]any{"path": "server.go"})
 	h.SeedCache(key, "find the bug in server.go")
 
 	res := h.BeforeRequest(reqWith(`{"path":"server.go"}`))
@@ -507,7 +510,7 @@ func TestConfigResetPinsIsolation(t *testing.T) {
 // a restore; the fill path runs (and nothing is bridged).
 func TestRehydrationPresentEmptyIsUnusable(t *testing.T) {
 	h := newHarness(t)
-	h.SeedCache(contentKey("read", map[string]any{"path": "server.go"}), "")
+	h.SeedCache(occurrenceKey("conv-1", "call_1", "read", map[string]any{"path": "server.go"}), "")
 	res := h.BeforeRequest(reqWith(`{"path":"server.go"}`))
 	if res.Err != nil {
 		t.Fatal(res.Err)
@@ -589,8 +592,8 @@ func TestStreamExtractsIntentStripsAndClearsSignature(t *testing.T) {
 	if got, _ := h.SharedCache("intent:call_1"); got != "find the bug" {
 		t.Fatalf("intent not captured under intent:call_1: %q", got)
 	}
-	if _, ok := h.Cache(contentKey("read", map[string]any{"path": "server.go"})); !ok {
-		t.Fatal("intent not captured under the content key")
+	if _, ok := h.Cache(occurrenceKey("conv-1", "call_1", "read", map[string]any{"path": "server.go"})); !ok {
+		t.Fatal("intent not captured under the occurrence key")
 	}
 	if sig := emittedSig(t, res); sig != "" {
 		t.Fatalf("a changed call must clear the bound signature, got %q", sig)
@@ -656,15 +659,15 @@ func TestStreamFailOpenOnCallbackError(t *testing.T) {
 	if got, _ := h.SharedCache("intent:call_1"); got != "find the bug" {
 		t.Fatalf("a valid capture made before the failure must stand, got %q", got)
 	}
-	// Exactly one meta_get was attempted — no retry.
+	// Context and native-field reads were attempted once each, with no retry.
 	gets := 0
 	for _, c := range h.Calls() {
 		if c.Command == "env.meta_get" {
 			gets++
 		}
 	}
-	if gets != 1 {
-		t.Fatalf("expected exactly one meta_get attempt, got %d", gets)
+	if gets != 2 {
+		t.Fatalf("expected context and native-field meta_get attempts, got %d", gets)
 	}
 }
 
