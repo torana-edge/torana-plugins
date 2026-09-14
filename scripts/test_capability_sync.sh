@@ -142,4 +142,8 @@ if ! diff <(echo "$hooks_sdk") <(echo "$hooks_validator") >/dev/null; then
   exit 1
 fi
 
-echo "capability sync: validator matches the SDK ($pin at $sdk)"
+if [[ -n "${SDK_DIR:-}" ]]; then
+  echo "capability sync: validator matches SDK checkout $sdk (published pins remain $pin)"
+else
+  echo "capability sync: validator matches the published SDK $pin"
+fi
