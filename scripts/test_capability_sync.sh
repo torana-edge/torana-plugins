@@ -91,7 +91,7 @@ if [[ -z "$sdk" ]]; then
   module_dir=$(dirname "$first_module")
   sdk=$(cd "$module_dir" && GOWORK=off go mod download -json github.com/torana-edge/torana-plugin-sdk 2>/dev/null | awk -F'"' '/"Dir"/{print $4; exit}')
 fi
-if [[ -z "$sdk" || ( ! -f "$sdk/capabilities.json" && ! -f "$sdk/capabilities.go" ) ]]; then
+if [[ -z "$sdk" || ! -f "$sdk/capabilities.json" ]]; then
   echo "capability sync: SDK capability catalog could not be resolved at ${sdk:-<empty>}" >&2
   exit 1
 fi
@@ -113,25 +113,16 @@ json_array() { # file key
 }
 
 catalog="$sdk/capabilities.json"
-if [[ -f "$catalog" ]]; then
-  command_perms=$(grep -o '"permission"[[:space:]]*:[[:space:]]*"[^"]*"' "$catalog" | sed 's/.*"\([^"]*\)"$/\1/')
-  hook_perms=$(awk '/"hook_grants"[[:space:]]*:/ {f=1; next} f && /}/ {exit} f' "$catalog" | grep -o '"env\.[^"]*"' | tr -d '"')
-  metadata_perms=$(json_array "$catalog" metadata_grants)
-  write_perms=$(json_array "$catalog" write_permissions)
-  if [[ -z "$command_perms" || -z "$hook_perms" || -z "$metadata_perms" || -z "$write_perms" ]]; then
-    echo "capability sync: could not read the SDK capability catalog — its schema changed" >&2
-    exit 1
-  fi
-  sdk_perms=$( { echo "$command_perms"; echo "$hook_perms"; echo "$metadata_perms"; echo "$write_perms"; } | sort -u )
-  hooks_sdk=$(json_array "$catalog" hooks | sort -u)
-else
-  # Compatibility for the currently published pre-catalog SDK. Remove this
-  # branch after all supported plugin pins contain capabilities.json.
-  env_perms=$(awk '/^var Permissions = append\(\[\]string\{/{f=1;next} f&&/^}, WritePermissions\.\.\.\)/{f=0} f' "$sdk/capabilities.go" | sed 's|//.*||' | grep -o '"[^"]*"' | tr -d '"')
-  write_perms=$(block "$sdk/capabilities_write.go" WritePermissions)
-  sdk_perms=$( { echo "$env_perms"; echo "$write_perms"; } | sort -u )
-  hooks_sdk=$(block "$sdk/capabilities.go" Hooks)
+command_perms=$(grep -o '"permission"[[:space:]]*:[[:space:]]*"[^"]*"' "$catalog" | sed 's/.*"\([^"]*\)"$/\1/')
+hook_perms=$(awk '/"hook_grants"[[:space:]]*:/ {f=1; next} f && /}/ {exit} f' "$catalog" | grep -o '"env\.[^"]*"' | tr -d '"')
+metadata_perms=$(json_array "$catalog" metadata_grants)
+write_perms=$(json_array "$catalog" write_permissions)
+if [[ -z "$command_perms" || -z "$hook_perms" || -z "$metadata_perms" || -z "$write_perms" ]]; then
+  echo "capability sync: could not read the SDK capability catalog — its schema changed" >&2
+  exit 1
 fi
+sdk_perms=$( { echo "$command_perms"; echo "$hook_perms"; echo "$metadata_perms"; echo "$write_perms"; } | sort -u )
+hooks_sdk=$(json_array "$catalog" hooks | sort -u)
 validator_perms=$(block "$validator" knownPermissions | sort -u)
 
 if ! diff <(echo "$sdk_perms") <(echo "$validator_perms") >/dev/null; then
