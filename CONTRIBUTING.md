@@ -33,6 +33,12 @@ is deliberately no committed `go.work`: a checked-in workspace would make the
 local SDK path part of the repo, and released plugins depend on the published
 SDK module.
 
+Routine builds and tests use Go's persistent build cache, including any
+`GOCACHE` you explicitly set. The temporary workspace is still removed after
+each invocation. For an intentionally cold reproducibility check, supply a
+temporary `GOCACHE` yourself; normal builds should reuse dependency compilation
+across plugins and invocations.
+
 ## Adding a plugin
 
 ```

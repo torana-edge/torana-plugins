@@ -11,9 +11,8 @@ plugin=$1
 source="$root/plugins/$plugin"
 [[ -d "$source" ]] || { echo "unknown plugin: $plugin" >&2; exit 2; }
 mkdir -p "$root/dist/$plugin"
-cache=$(mktemp -d)
 workspace_dir=$(mktemp -d)
-trap 'rm -rf "$cache" "$workspace_dir"' EXIT
+trap 'rm -rf "$workspace_dir"' EXIT
 if [[ -d "$root/../torana-plugin-sdk" ]]; then
   (cd "$workspace_dir" && go work init "$root/../torana-plugin-sdk" "$source")
   export GOWORK="$workspace_dir/go.work"
@@ -39,7 +38,7 @@ else
   echo "note: no sibling torana-plugin-sdk checkout; building $plugin against the published module" >&2
   export GOWORK=off
 fi
-(cd "$source" && GOCACHE="$cache" GOOS=wasip1 GOARCH=wasm \
+(cd "$source" && GOOS=wasip1 GOARCH=wasm \
   go build -trimpath -buildmode=c-shared -buildvcs=false \
   -o "$root/dist/$plugin/plugin.wasm" .)
 cp "$source/plugin.json" "$root/dist/$plugin/plugin.json"
