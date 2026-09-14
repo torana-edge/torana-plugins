@@ -2,6 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
+	"github.com/torana-edge/torana-plugin-sdk/sdktest"
+	"google.golang.org/protobuf/proto"
+	"strings"
 	"testing"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
@@ -81,5 +85,68 @@ func TestArgumentsOnlyLegacyEntryIsNotAnOccurrence(t *testing.T) {
 	}
 	if _, ok := args["i"]; ok {
 		t.Fatal("legacy arguments-only cache rewrote history")
+	}
+}
+
+func TestOccurrenceDiagnostics(t *testing.T) {
+	for _, tc := range []struct{ meta, id, reason string }{
+		{`{`, "call_1", "malformed_torana_meta"},
+		{`{}`, "call_1", "missing_conversation"},
+		{`{"_conversation_id":"A"}`, "", "missing_call_id=1"},
+		{`{"_conversation_id":"A"}`, "remapped", "lookup_miss=1"},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			h := newHarness(t)
+			h.SetConfig(`{"fill":"off"}`)
+			req := reqWith(`{"path":"server.go"}`)
+			req.ToranaMetaJson = []byte(tc.meta)
+			req.Messages[2].Blocks[0].GetToolUse().Id = tc.id
+			// Exercise the helper directly for malformed host metadata/missing call IDs,
+			// which the native hook-input validator correctly rejects before dispatch.
+			h.Run(func() {
+				if _, err := rehydrateHistoryIntents(req); err != nil {
+					t.Fatal(err)
+				}
+			})
+			for _, entry := range h.Logs() {
+				if strings.Contains(entry.Message, tc.reason) {
+					return
+				}
+			}
+			t.Fatalf("missing diagnostic %s: %v", tc.reason, h.Logs())
+		})
+	}
+}
+
+func TestCaptureContextRefusalKeepsSchemaAndStripping(t *testing.T) {
+	h := newHarness(t)
+	req := reqWith(`{"path":"server.go"}`)
+	req.Messages = req.Messages[:2]
+	h.StubHostCall("env.meta_set", func(raw string) (string, error) {
+		var args pbv1.MetaSetArgs
+		if err := proto.Unmarshal([]byte(raw), &args); err != nil {
+			return "", err
+		}
+		if args.Key == "intent:conversation" {
+			return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "context denied"), nil
+		}
+		return sdktest.HostResultValue(nil), nil
+	})
+	r := h.NewRequest()
+	res := r.BeforeRequest(req)
+	if res.Err != nil || res.Request == nil {
+		t.Fatalf("context bookkeeping blocked schema injection: %v", res.Err)
+	}
+	if !strings.Contains(string(res.Request.Tools[0].ParametersJson), `"i"`) {
+		t.Fatal("schema was not injected")
+	}
+	// Absent hadI means the injected field is stripped, even with no capture context.
+	streamCallOn(t, r, "c", "read", "", `{"path":"server.go","i":"inspect"}`)
+	found := false
+	for _, entry := range h.Logs() {
+		found = found || strings.Contains(entry.Message, "capture context unavailable")
+	}
+	if !found {
+		t.Fatal("context refusal was not logged")
 	}
 }

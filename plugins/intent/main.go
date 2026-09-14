@@ -102,7 +102,7 @@ func init() {
 			return sdk.PassRequest(), nil
 		}
 		if herr, err := sdk.MetaSet("intent:conversation", conversationID(req)); err != nil || herr != nil {
-			return sdk.RequestResult{}, fmt.Errorf("intent: capture context refused: %v %v", herr, err)
+			sdk.Log(fmt.Sprintf("intent: capture context unavailable: %v %v", herr, err), sdk.LogLevelInfo)
 		}
 		modified, err := injectIntentSchema(req)
 		if err != nil {
@@ -195,7 +195,15 @@ func handleToolCall(call sdk.ToolCall) (sdk.ToolCallAction, error) {
 				if herr, err := sdk.CacheSet(key, intent); err != nil || herr != nil {
 					sdk.Log(fmt.Sprintf("intent: cache_set occurrence refused: %v %v", herr, err), sdk.LogLevelInfo)
 				}
+			} else {
+				reason := "missing_call_id"
+				if conversation == "" {
+					reason = "missing_conversation"
+				}
+				sdk.Log("intent: occurrence capture skipped: "+reason, sdk.LogLevelInfo)
 			}
+		} else {
+			sdk.Log("intent: occurrence capture skipped: context_lookup_failed", sdk.LogLevelInfo)
 		}
 		sdk.EmitMetric("torana_intent_captured_total", sdk.MetricCounter, 1, labels)
 		// Debug visibility for dogfooding: intent QUALITY (goal vs action
@@ -270,6 +278,16 @@ func handleToolCall(call sdk.ToolCall) (sdk.ToolCallAction, error) {
 func rehydrateHistoryIntents(req *pbv1.ChatRequest) (bool, error) {
 	loadConfig()
 	restored, filled, present := 0, 0, 0
+	conversation, identityReason := conversationIdentity(req)
+	missingID, lookupMiss := 0, 0
+	defer func() {
+		if identityReason != "" {
+			sdk.Log("intent: history restoration unavailable: "+identityReason, sdk.LogLevelInfo)
+		}
+		if missingID > 0 || lookupMiss > 0 {
+			sdk.Log(fmt.Sprintf("intent: history occurrence unavailable: missing_call_id=%d lookup_miss=%d (uncaptured, expired, or remapped identity); using configured fill", missingID, lookupMiss), sdk.LogLevelInfo)
+		}
+	}()
 	modified := false
 	for _, msg := range req.Messages {
 		// The semantic scope is ASSISTANT HISTORY (past tool-use turns), so
@@ -303,7 +321,10 @@ func rehydrateHistoryIntents(req *pbv1.ChatRequest) (bool, error) {
 			}
 			// Missing/remapped identity declines to heuristic/off. A
 			// tool-arguments-only fallback can rewrite unrelated old history.
-			key := occurrenceKey(conversationID(req), tc.Id, tc.Name, args)
+			key := occurrenceKey(conversation, tc.Id, tc.Name, args)
+			if tc.Id == "" {
+				missingID++
+			}
 			intent := ""
 			var herr *pbv1.HostError
 			if key != "" {
@@ -323,6 +344,9 @@ func rehydrateHistoryIntents(req *pbv1.ChatRequest) (bool, error) {
 				}
 				restored++
 			} else {
+				if key != "" {
+					lookupMiss++
+				}
 				if fillMode == "off" {
 					continue
 				}
@@ -423,13 +447,24 @@ func contentKey(name string, args map[string]any) string {
 }
 
 func conversationID(req *pbv1.ChatRequest) string {
+	id, _ := conversationIdentity(req)
+	return id
+}
+
+func conversationIdentity(req *pbv1.ChatRequest) (string, string) {
+	if req == nil || len(req.ToranaMetaJson) == 0 {
+		return "", "missing_conversation"
+	}
 	var meta struct {
 		ConversationID string `json:"_conversation_id"`
 	}
 	if json.Unmarshal(req.ToranaMetaJson, &meta) != nil {
-		return ""
+		return "", "malformed_torana_meta"
 	}
-	return meta.ConversationID
+	if meta.ConversationID == "" {
+		return "", "missing_conversation"
+	}
+	return meta.ConversationID, ""
 }
 
 // Without conversation and call identity a cached value cannot safely be
