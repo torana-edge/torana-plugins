@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -230,16 +231,11 @@ func init() {
 		if err != nil {
 			return sdk.RequestResult{}, err
 		}
-		if herr, err := sdk.MetaSet(mutationsKey, string(envJSON)); err != nil {
-			return sdk.RequestResult{}, err
-		} else if herr != nil {
-			if isAdvisory(herr.Code) {
-				// The reversal registry was not persisted. The original
-				// request travels untouched — a translated schema whose
-				// reversal cannot be proven must not be sent.
+		if err := sdk.MetaSet(mutationsKey, string(envJSON)); err != nil {
+			if isAdvisoryError(err) {
 				return sdk.PassRequest(), nil
 			}
-			return sdk.RequestResult{}, fmt.Errorf("schema_translator: registry publish refused (code=%s)", herr.Code)
+			return sdk.RequestResult{}, err
 		}
 
 		if !changed {
@@ -285,15 +281,15 @@ func init() {
 
 // handleAssembled resolves one completed tool call against the registry.
 func handleAssembled(call sdk.ToolCall) (sdk.StreamResult, error) {
-	raw, herr, err := sdk.MetaGet(mutationsKey)
+	raw, found, err := sdk.MetaGet(mutationsKey)
 	if err != nil {
 		return sdk.StreamResult{}, err
 	}
-	if herr != nil {
+	if !found {
 		// NOT_FOUND, NOT_CONFIGURED, UNAVAILABLE, PERMISSION_DENIED: every
 		// non-success is terminal at stream completion. There is no
 		// pass-through without a present, valid envelope.
-		return sdk.StreamResult{}, fmt.Errorf("schema_translator: registry unavailable (code=%s)", herr.Code)
+		return sdk.StreamResult{}, fmt.Errorf("schema_translator: registry unavailable")
 	}
 	reg, err := decodeRegistry([]byte(raw))
 	if err != nil {
@@ -418,6 +414,11 @@ func validJSONString(s string) bool {
 func isAdvisory(code pbv1.ErrorCode) bool {
 	return code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED ||
 		code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE
+}
+
+func isAdvisoryError(err error) bool {
+	var refusal *sdk.HostCallRefusalError
+	return errors.As(err, &refusal) && isAdvisory(refusal.Code)
 }
 
 // ==========================================================================

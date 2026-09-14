@@ -85,7 +85,13 @@ func parseConfig(raw string) (fill string) {
 }
 
 func loadConfig() {
-	cfgOnce.Do(func() { fillMode = parseConfig(sdk.PluginConfig()) })
+	cfgOnce.Do(func() {
+		raw, err := sdk.PluginConfig()
+		if err != nil {
+			raw = "{}"
+		}
+		fillMode = parseConfig(raw)
+	})
 }
 
 // resetConfigForTest restores every config global so a test row can install a
@@ -101,8 +107,8 @@ func init() {
 		if !hasFunctionTool(req) {
 			return sdk.PassRequest(), nil
 		}
-		if herr, err := sdk.MetaSet("intent:conversation", conversationID(req)); err != nil || herr != nil {
-			sdk.Log(fmt.Sprintf("intent: capture context unavailable: %v %v", herr, err), sdk.LogLevelInfo)
+		if err := sdk.MetaSet("intent:conversation", conversationID(req)); err != nil {
+			sdk.Log(fmt.Sprintf("intent: capture context unavailable: %v", err), sdk.LogLevelInfo)
 		}
 		modified, err := injectIntentSchema(req)
 		if err != nil {
@@ -186,14 +192,14 @@ func handleToolCall(call sdk.ToolCall) (sdk.ToolCallAction, error) {
 		// CacheSet is best-effort: a refusal affects FUTURE compaction, not
 		// the validity of this response, so it is logged and the current
 		// tool call still completes. The host records the refusal itself.
-		if herr, err := sdk.SharedCacheSet(intentCacheKey+":"+call.ID, intent); err != nil || herr != nil {
-			sdk.Log(fmt.Sprintf("intent: cache_set %s:%s refused: %v %v", intentCacheKey, call.ID, herr, err), sdk.LogLevelInfo)
+		if err := sdk.SharedCacheSet(intentCacheKey+":"+call.ID, intent); err != nil {
+			sdk.Log(fmt.Sprintf("intent: cache_set %s:%s refused: %v", intentCacheKey, call.ID, err), sdk.LogLevelInfo)
 		}
-		conversation, herr, err := sdk.MetaGet("intent:conversation")
-		if err == nil && herr == nil {
+		conversation, _, err := sdk.MetaGet("intent:conversation")
+		if err == nil {
 			if key := occurrenceKey(conversation, call.ID, call.Name, args); key != "" {
-				if herr, err := sdk.CacheSet(key, intent); err != nil || herr != nil {
-					sdk.Log(fmt.Sprintf("intent: cache_set occurrence refused: %v %v", herr, err), sdk.LogLevelInfo)
+				if err := sdk.CacheSet(key, intent); err != nil {
+					sdk.Log(fmt.Sprintf("intent: cache_set occurrence refused: %v", err), sdk.LogLevelInfo)
 				}
 			} else {
 				reason := "missing_call_id"
@@ -228,12 +234,11 @@ func handleToolCall(call sdk.ToolCall) (sdk.ToolCallAction, error) {
 	// whether to strip.
 	hadI := ""
 	if call.Name != "" {
-		var herr *pbv1.HostError
 		var err error
-		hadI, herr, err = sdk.MetaGet("hadI:" + call.Name)
-		if err != nil || (herr != nil && !sdk.IsNotFound(herr)) {
-			sdk.Log(fmt.Sprintf("intent: hadI meta_get refused: %v %v", herr, err), sdk.LogLevelInfo)
-			return sdk.ToolCallAction{}, fmt.Errorf("intent: hadI meta_get failed: %v %v", herr, err)
+		hadI, _, err = sdk.MetaGet("hadI:" + call.Name)
+		if err != nil {
+			sdk.Log(fmt.Sprintf("intent: hadI meta_get refused: %v", err), sdk.LogLevelInfo)
+			return sdk.ToolCallAction{}, fmt.Errorf("intent: hadI meta_get failed: %v", err)
 		}
 	}
 	if hadI == "true" {
@@ -326,21 +331,17 @@ func rehydrateHistoryIntents(req *pbv1.ChatRequest) (bool, error) {
 				missingID++
 			}
 			intent := ""
-			var herr *pbv1.HostError
 			if key != "" {
 				var err error
-				intent, herr, err = sdk.CacheGet(key)
+				intent, _, err = sdk.CacheGet(key)
 				if err != nil {
 					return false, fmt.Errorf("intent: cache_get %q: %w", key, err)
 				}
-				if herr != nil && !sdk.IsNotFound(herr) {
-					return false, fmt.Errorf("intent: cache_get %q refused: %s", key, herr.Message)
-				}
 			}
-			if herr == nil && intent != "" {
+			if intent != "" {
 				// Publish the verified occurrence's captured intent for compactors.
-				if herr, err := sdk.SharedCacheSet(intentCacheKey+":"+tc.Id, intent); err != nil || herr != nil {
-					return false, fmt.Errorf("intent: cache_set %s:%s refused: %v %v", intentCacheKey, tc.Id, herr, err)
+				if err := sdk.SharedCacheSet(intentCacheKey+":"+tc.Id, intent); err != nil {
+					return false, fmt.Errorf("intent: cache_set %s:%s refused: %v", intentCacheKey, tc.Id, err)
 				}
 				restored++
 			} else {
@@ -548,8 +549,8 @@ func injectIntentSchema(req *pbv1.ChatRequest) (bool, error) {
 			// defect: fail the hook so failure_mode applies rather than
 			// stripping "i" on the response side of a tool we promised to
 			// preserve.
-			if herr, err := sdk.MetaSet("hadI:"+tool.Name, "true"); err != nil || herr != nil {
-				return false, fmt.Errorf("intent: hadI meta_set refused for %s: %v %v", tool.Name, herr, err)
+			if err := sdk.MetaSet("hadI:"+tool.Name, "true"); err != nil {
+				return false, fmt.Errorf("intent: hadI meta_set refused for %s: %v", tool.Name, err)
 			}
 			if m, ok := existing.(map[string]any); ok {
 				m["description"] = intentDescription

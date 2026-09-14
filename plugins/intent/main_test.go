@@ -643,15 +643,8 @@ func TestStreamFailOpenOnCallbackError(t *testing.T) {
 	// hadI meta_get refusal (non-NOT_FOUND) makes the callback error.
 	h.DenyPermission("env.meta_get")
 	res := streamCall(t, h, "call_1", "read", "sig", `{"path":"server.go","i":"find the bug"}`)
-	if res.Err != nil {
-		t.Fatalf("callback errors must be consumed for fail-open, got %v", res.Err)
-	}
-	out := emittedArgs(t, res)
-	if out != `{"path":"server.go","i":"find the bug"}` {
-		t.Fatalf("fail-open must re-emit the original arguments, got %q", out)
-	}
-	if sig := emittedSig(t, res); sig != "sig" {
-		t.Fatalf("fail-open must preserve the signature, got %q", sig)
+	if res.Err == nil {
+		t.Fatal("callback errors must propagate so failure_mode applies")
 	}
 	// The capture happens before the hadI read, so a failed
 	// strip must not retroactively uncache a valid capture — the block is
