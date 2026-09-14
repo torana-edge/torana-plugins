@@ -1165,9 +1165,10 @@ func TestKeywordOrderedSeamRows(t *testing.T) {
 		// one cache_reuse — the count alone would not prove the shared-key
 		// reuse path.
 		type savingsPayload struct {
-			OriginalBytes int    `json:"original_bytes"`
-			FinalBytes    int    `json:"final_bytes"`
-			Source        string `json:"source"`
+			OriginalBytes   int    `json:"original_bytes"`
+			FinalBytes      int    `json:"final_bytes"`
+			Source          string `json:"source"`
+			PricingResource string `json:"pricing_resource"`
 		}
 		sources := map[string]int{}
 		var sawOriginal bool
@@ -1181,6 +1182,9 @@ func TestKeywordOrderedSeamRows(t *testing.T) {
 			}
 			if p.OriginalBytes == len(content) {
 				sawOriginal = true
+			}
+			if p.PricingResource != "target" {
+				t.Fatalf("savings pricing resource = %q, want target", p.PricingResource)
 			}
 			sources[p.Source]++
 		}

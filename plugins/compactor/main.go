@@ -633,9 +633,10 @@ func applyDeterministicPolicy(msg *pbv1.Message, block int, text, toolName, tool
 // transport, and contract failures surface to the hook.
 func recordSavings(originalBytes, finalBytes int, source string) error {
 	payload, err := json.Marshal(map[string]any{
-		"original_bytes": originalBytes,
-		"final_bytes":    finalBytes,
-		"source":         source,
+		"original_bytes":   originalBytes,
+		"final_bytes":      finalBytes,
+		"source":           source,
+		"pricing_resource": "target",
 	})
 	if err != nil {
 		return fmt.Errorf("compactor: encode savings report: %w", err)

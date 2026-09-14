@@ -322,6 +322,20 @@ func TestDeterministicFirstPassAppliesAndCachesThenReuses(t *testing.T) {
 	if countCommand(h, "env.cache_set") != 1 {
 		t.Fatalf("turn 1 must cache the replacement, cache_set calls=%d", countCommand(h, "env.cache_set"))
 	}
+	for _, call := range h.Calls() {
+		if call.Command != "torana_record_savings" {
+			continue
+		}
+		var report struct {
+			PricingResource string `json:"pricing_resource"`
+		}
+		if err := json.Unmarshal([]byte(call.Args), &report); err != nil {
+			t.Fatalf("savings args not JSON: %v (%s)", err, call.Args)
+		}
+		if report.PricingResource != "target" {
+			t.Fatalf("savings pricing resource = %q, want target", report.PricingResource)
+		}
+	}
 
 	// Turn 2: a FRESH CLONE of the original request on the SAME harness (the
 	// cache store is per-harness). Reusing the mutated request would trip
