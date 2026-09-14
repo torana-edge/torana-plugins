@@ -85,7 +85,11 @@ func parseConfig(raw string) config {
 
 func loadConfig() {
 	cfgOnce.Do(func() {
-		c := parseConfig(sdk.PluginConfig())
+		raw, err := sdk.PluginConfig()
+		if err != nil {
+			raw = "{}"
+		}
+		c := parseConfig(raw)
 		toolPolicies = c.ToolPolicies
 	})
 }
@@ -187,32 +191,26 @@ func compactToolResults(req *pbv1.ChatRequest) (bool, error) {
 			// Retrieve the optional model-authored intent for this tool call.
 			// NOT_FOUND and present-empty both use the bounded fallback; any other
 			// refusal or malformed reply is a contract defect — error the hook.
-			intent, herr, err := sdk.SharedCacheGet(intentCacheKey + ":" + view.ToolCallId)
+			intent, found, err := sdk.SharedCacheGet(intentCacheKey + ":" + view.ToolCallId)
 			if err != nil {
 				return false, fmt.Errorf("keyword_compactor: cache_get %s:%s: %w", intentCacheKey, view.ToolCallId, err)
 			}
-			if herr != nil && !sdk.IsNotFound(herr) {
-				return false, fmt.Errorf("keyword_compactor: cache_get %s:%s refused: %s", intentCacheKey, view.ToolCallId, herr.Message)
-			}
-			derived := herr != nil || intent == ""
+			derived := !found || intent == ""
 			if derived {
 				sdk.EmitMetric("torana_intent_missing_total", sdk.MetricCounter, 1, map[string]string{"tool": toolName})
 				intent = deriveCompactionIntent(req.Messages, mi, view.Block, toolName, toolArgs)
 			}
 
 			keywordKey := keywordResultCacheKey(toolName, toolArgs, text, intent, derived)
-			cached, herr, err := sdk.CacheGet(keywordKey)
+			cached, found, err := sdk.CacheGet(keywordKey)
 			if err != nil {
 				return false, fmt.Errorf("keyword_compactor: cache_get keyword key: %w", err)
-			}
-			if herr != nil && !sdk.IsNotFound(herr) {
-				return false, fmt.Errorf("keyword_compactor: cache_get keyword key refused: %s", herr.Message)
 			}
 			// Reuse only a non-empty value that is SHORTER than the original.
 			// Missing, present-empty, and non-shorter values are unusable and
 			// recomputed locally — the value is a pure function of the inputs, so
 			// a stale or corrupt entry must never be applied or cached forever.
-			if herr == nil && cached != "" && len(cached) < len(text) {
+			if found && cached != "" && len(cached) < len(text) {
 				recordSavings(len(text), len(cached), "cache_reuse")
 				if _, err := sdk.ReplaceToolResultText(msg, view.Block, cached); err != nil {
 					return false, fmt.Errorf("keyword_compactor: apply cached replacement: %w", err)
@@ -238,7 +236,7 @@ func compactToolResults(req *pbv1.ChatRequest) (bool, error) {
 			modified = true
 			// Best-effort: the replacement is already applied in memory; a
 			// refused write cannot corrupt it, and the host logs the refusal.
-			_, _ = sdk.CacheSet(keywordKey, compacted)
+			_ = sdk.CacheSet(keywordKey, compacted)
 		}
 	}
 	return modified, nil
@@ -345,14 +343,11 @@ func assistantMessageCountsAfter(messages []*pbv1.Message) []int {
 func applyDeterministicPolicy(msg *pbv1.Message, block int, text, toolName, toolArgs string, rule sdk.ToolPolicyRule) (bool, error) {
 	cacheKey := sdk.ContentAddressedCacheKey(policyCompactionCache,
 		"policy-v1", toolName, toolArgs, text, rule.Mode, rule.Rerun)
-	cached, herr, err := sdk.CacheGet(cacheKey)
+	cached, found, err := sdk.CacheGet(cacheKey)
 	if err != nil {
 		return false, fmt.Errorf("keyword_compactor: policy cache_get: %w", err)
 	}
-	if herr != nil && !sdk.IsNotFound(herr) {
-		return false, fmt.Errorf("keyword_compactor: policy cache_get refused: %s", herr.Message)
-	}
-	if herr == nil && cached != "" && len(cached) < len(text) {
+	if found && cached != "" && len(cached) < len(text) {
 		recordSavings(len(text), len(cached), "cache_reuse")
 		if _, err := sdk.ReplaceToolResultText(msg, block, cached); err != nil {
 			return false, fmt.Errorf("keyword_compactor: apply policy replacement: %w", err)
@@ -367,7 +362,7 @@ func applyDeterministicPolicy(msg *pbv1.Message, block int, text, toolName, tool
 	if _, err := sdk.ReplaceToolResultText(msg, block, replacement); err != nil {
 		return false, fmt.Errorf("keyword_compactor: apply policy replacement: %w", err)
 	}
-	_, _ = sdk.CacheSet(cacheKey, replacement)
+	_ = sdk.CacheSet(cacheKey, replacement)
 	return true, nil
 }
 
@@ -380,7 +375,7 @@ func recordSavings(originalBytes, finalBytes int, source string) {
 		"final_bytes":    finalBytes,
 		"source":         source,
 	})
-	_, _, _ = sdk.HostCallExtension("torana_record_savings", payload)
+	_, _ = sdk.HostCallExtension("torana_record_savings", payload)
 }
 
 // compactDeterministic extracts lines matching intent keywords, keeping the
