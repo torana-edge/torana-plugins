@@ -23,6 +23,13 @@ and review that revision before proceeding.
 
 ## Configure
 
+For the quickest setup, open Torana’s local control plane, select
+**usage_logger**, review the requested file access and budget, and choose
+**Approve and enable**. The default plugin configuration is `{}`. Send another
+request and follow [the output](#try-it-and-check-the-result).
+
+Prefer a terminal or an agent-driven workflow? The CLI steps follow below.
+
 ```bash
 torana plugin config get usage_logger > plugin-settings.json
 ```
@@ -74,7 +81,19 @@ same inspect/configure/approve/enable flow. Rebuilds need a new digest approval.
 
 ## Try it and check the result
 
-Send the quickstart request, then run `torana plugin file tail usage_logger usage.jsonl` in the same data-directory environment. Expect a JSON record with `status`, `duration_ms` and `usage_reported`. Missing usage is not zero usage. Alternatively, `tail -F "$(torana plugin file path usage_logger usage.jsonl)"` follows rotation; set `TORANA_PORT` for a non-default listener.
+Send a request from your connected harness, then follow the output with your shell:
+
+```bash
+tail -F "$(torana plugin file path usage_logger usage.jsonl)"
+```
+
+In PowerShell, use `Get-Content -Wait (torana plugin file path usage_logger usage.jsonl)`.
+Torana resolves the running plugin’s absolute file path; your shell reads it.
+Use the same `TORANA_DATA_DIR` as the running instance. Its recorded listener
+is discovered automatically, including a non-default port. To select an instance
+explicitly, use `torana plugin file path --addr 127.0.0.1:9090 usage_logger usage.jsonl`.
+Expect a JSON record with `status`, `duration_ms` and `usage_reported`.
+Missing usage is not zero usage.
 
 ## Data and failure behavior
 
