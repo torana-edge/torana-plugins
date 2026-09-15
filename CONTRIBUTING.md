@@ -111,19 +111,6 @@ fetchable; release builds require it to be reachable from SDK main.
 main CI uses Edge main. Reproduce with those sibling checkouts, then run the
 behavior suite above. Land owning SDK changes before their consumers.
 
-### Keep the guides executable
-
-The normal test script checks each catalogue guide's JSON, exact permission
-set and required resource slots against its manifest. For full host schema
-and approval validation, from the sibling Edge checkout run:
-
-```bash
-go run scripts/check-plugin-guides.go ../torana-plugins/plugins
-```
-
-Keep behavior examples small and use synthetic data. A parser check does not
-replace a real request through the plugin or a paid-model experiment.
-
 ## Releasing
 
 ```bash
