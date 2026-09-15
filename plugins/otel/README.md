@@ -1,8 +1,10 @@
-# Choose the tools your model sees
+# Add request metrics
 
-Restrict or replace model-visible tool definitions. For example, expose search and read tools while omitting deployment tools during a review.
+Emit request shape, latency, observed status classes and provider-reported token usage through Torana's metrics host.
 
 [All plugins](../../README.md#choose-a-plugin) · [Source](main.go) · [Manifest](plugin.json) · [Settings schema](schema.json)
+
+[Read status from an agent](AGENT_OPERATIONS.md)
 
 ## Install and inspect
 
@@ -12,8 +14,8 @@ Run installation from the host checkout or supply its configured plugin
 directory with `--dir`. Keep the same `TORANA_DATA_DIR` for local file commands.
 
 ```bash
-torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/tool_governor
-torana plugin inspect tool_governor
+torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/otel
+torana plugin inspect otel
 ```
 
 Installation builds source locally; it does not approve or enable the bundle.
@@ -24,25 +26,20 @@ and review that revision before proceeding.
 ## Configure
 
 ```bash
-torana plugin config get tool_governor > plugin-settings.json
+torana plugin config get otel > plugin-settings.json
 ```
 
 Set the snapshot's `config` object to the following, preserving its `revision`:
 
 ```json
-{
-  "allow": [
-    "read_file",
-    "web_search"
-  ]
-}
+{}
 ```
 
 ```bash
-torana plugin config apply tool_governor --file plugin-settings.json --yes
+torana plugin config apply otel --file plugin-settings.json --yes
 ```
 
-No resource bindings are required. Review the configuration-read and tool/cache-marker write permissions.
+No outbound endpoint binding is requested. The host owns metric export; the plugin does not connect directly to an OpenTelemetry collector.
 
 ## Approve and enable
 
@@ -55,17 +52,16 @@ Permissions must equal the manifest's requested set; budgets can be lower.
 {
   "digest": "sha256:REPLACE_WITH_YOUR_INSPECTED_DIGEST",
   "permissions": [
-    "env.plugin_config",
-    "ir.cache_control.write",
-    "ir.tools.write"
+    "env.emit_metric",
+    "env.serve_http"
   ],
-  "failure_mode": "block"
+  "failure_mode": "pass"
 }
 ```
 
 ```bash
-torana plugin approve tool_governor --file approval.json --yes
-torana plugin enable tool_governor --yes
+torana plugin approve otel --file approval.json --yes
+torana plugin enable otel --yes
 torana plugin status
 ```
 
@@ -75,18 +71,18 @@ same inspect/configure/approve/enable flow. Rebuilds need a new digest approval.
 
 ## Try it and check the result
 
-Send a request containing `read_file`, `web_search` and `deploy` tool definitions to a test backend. Only the first two should reach it. `allow: []` removes all definitions; omitting `allow` leaves them eligible. `deny` must not overlap `allow`. `replace` changes a retained tool's description, parameters or strict flag; it does not add a missing tool.
+Send an inference request, then open `http://127.0.0.1:8080/_torana/plugin/otel/` for its minimal status page. `torana agent discover` lists its declared status operation. The page is not a metrics dashboard: inspect your configured host metrics exporter for the `torana_plugin_requests_total` and response series.
 
 ## Data and failure behavior
 
-This controls advertised definitions, not execution. Your harness still executes tools and owns its approvals; a model can propose a call it was not shown. Config is read on every request. A valid unset/empty value or `{}` leaves tools unchanged; malformed/whitespace policy and host-call failures error rather than reuse an old policy. Default failure mode is block.
+No payload rewrite or content export. Labels describe request/model shape. Missing status or usage is not invented. Logging/metrics imports are best effort; a status page alone does not prove collector ingestion. Default failure mode is pass.
 
 ## Combine or disable
 
-Place before `intent` and `schema_translator` so policy is applied to the harness's original definitions. Preserve existing pipeline entries when reordering.
+No special order is required. Host metrics remain the source for outcomes such as vetoes that may bypass this plugin.
 
 ```bash
-torana plugin disable tool_governor --yes
+torana plugin disable otel --yes
 ```
 
 Disabling keeps configuration, approval and private data. `plugin revoke`

@@ -1,6 +1,6 @@
-# Choose the tools your model sees
+# Adapt map-shaped tool schemas
 
-Restrict or replace model-visible tool definitions. For example, expose search and read tools while omitting deployment tools during a review.
+Convert supported open-map tool parameters into key/value arrays for providers that need a constrained schema, then reverse the recorded conversion on streamed tool calls.
 
 [All plugins](../../README.md#choose-a-plugin) · [Source](main.go) · [Manifest](plugin.json) · [Settings schema](schema.json)
 
@@ -12,8 +12,8 @@ Run installation from the host checkout or supply its configured plugin
 directory with `--dir`. Keep the same `TORANA_DATA_DIR` for local file commands.
 
 ```bash
-torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/tool_governor
-torana plugin inspect tool_governor
+torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/schema_translator
+torana plugin inspect schema_translator
 ```
 
 Installation builds source locally; it does not approve or enable the bundle.
@@ -24,25 +24,20 @@ and review that revision before proceeding.
 ## Configure
 
 ```bash
-torana plugin config get tool_governor > plugin-settings.json
+torana plugin config get schema_translator > plugin-settings.json
 ```
 
 Set the snapshot's `config` object to the following, preserving its `revision`:
 
 ```json
-{
-  "allow": [
-    "read_file",
-    "web_search"
-  ]
-}
+{}
 ```
 
 ```bash
-torana plugin config apply tool_governor --file plugin-settings.json --yes
+torana plugin config apply schema_translator --file plugin-settings.json --yes
 ```
 
-No resource bindings are required. Review the configuration-read and tool/cache-marker write permissions.
+No resource bindings or custom settings are required. The plugin keeps its conversion map in request-scoped metadata.
 
 ## Approve and enable
 
@@ -55,17 +50,19 @@ Permissions must equal the manifest's requested set; budgets can be lower.
 {
   "digest": "sha256:REPLACE_WITH_YOUR_INSPECTED_DIGEST",
   "permissions": [
-    "env.plugin_config",
-    "ir.cache_control.write",
+    "env.meta_get",
+    "env.meta_set",
+    "ir.messages.write.assistant",
+    "ir.stream.write",
     "ir.tools.write"
   ],
-  "failure_mode": "block"
+  "failure_mode": "pass"
 }
 ```
 
 ```bash
-torana plugin approve tool_governor --file approval.json --yes
-torana plugin enable tool_governor --yes
+torana plugin approve schema_translator --file approval.json --yes
+torana plugin enable schema_translator --yes
 torana plugin status
 ```
 
@@ -75,18 +72,18 @@ same inspect/configure/approve/enable flow. Rebuilds need a new digest approval.
 
 ## Try it and check the result
 
-Send a request containing `read_file`, `web_search` and `deploy` tool definitions to a test backend. Only the first two should reach it. `allow: []` removes all definitions; omitting `allow` leaves them eligible. `deny` must not overlap `allow`. `replace` changes a retained tool's description, parameters or strict flag; it does not add a missing tool.
+Use a test tool with an `additionalProperties` map and inspect the provider-facing definition: eligible maps become arrays of key/value entries. On a streamed call, verify the harness receives the original map shape. Test the exact nested schema and streaming path you use; this is not arbitrary schema conversion.
 
 ## Data and failure behavior
 
-This controls advertised definitions, not execution. Your harness still executes tools and owns its approvals; a model can propose a call it was not shown. Config is read on every request. A valid unset/empty value or `{}` leaves tools unchanged; malformed/whitespace policy and host-call failures error rather than reuse an old policy. Default failure mode is block.
+This plugin adapts tool schemas. It is not the protocol bridge and does not change the provider API. Reversal is implemented on the stream hook; do not assume non-streaming tool calls are reversed. Malformed conversion state errors under the approved failure policy (default pass); verify actual outputs before enabling broadly.
 
 ## Combine or disable
 
-Place before `intent` and `schema_translator` so policy is applied to the harness's original definitions. Preserve existing pipeline entries when reordering.
+Place after `tool_governor`. If using `intent`, keep its injected field inside the schema you test with the translator.
 
 ```bash
-torana plugin disable tool_governor --yes
+torana plugin disable schema_translator --yes
 ```
 
 Disabling keeps configuration, approval and private data. `plugin revoke`
