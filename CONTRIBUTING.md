@@ -1,15 +1,11 @@
 # Contributing to the official plugins
 
-**Most plugins should not live here.** Plugins belong in their own repositories:
-there is no index to register with, nothing to publish, and
-`torana plugin install github.com/you/your-plugin` works against any git path.
-That is the normal way to write and share one, and
-[WRITING_A_PLUGIN.md](https://github.com/torana-edge/torana-plugin-sdk/blob/main/docs/WRITING_A_PLUGIN.md)
-is the whole story.
+Fix a plugin, improve a guide, or propose an addition to the official set.
+Include a concrete use case and a small reproducible test.
 
-This file is for the narrower case: proposing a plugin for the first-party set,
-or changing one that is already in it. The bar is higher here because these ship
-as examples people copy and as defaults people trust.
+You can also keep a plugin in your own repository and share its install URL.
+Start with the [first-plugin tutorial](https://github.com/torana-edge/torana-plugin-sdk/blob/main/docs/FIRST_PLUGIN.md).
+A catalogue listing is optional and never grants permissions.
 
 Official plugins target ABI v1. New or changed plugins must use the repository's
 pinned Go SDK, declare the exact grants they exercise, and remain consistent
@@ -54,9 +50,9 @@ Two things are easy to miss and both stop a plugin loading:
 
 - **`"schema_version": 1` is required** in `plugin.json`. Without it the
   manifest fails validation and the plugin is skipped.
-- **A declared hook must actually be exported** by the WASM binary. The host
-  treats a missing export as silent success, so `ValidateHooks` rejects it at
-  load rather than letting the plugin do nothing forever.
+- **The manifest hooks must exactly match the exported bitmap.** ABI v1 uses
+  one `run_hook` dispatcher plus `supported_hooks`, not separate exports for
+  each hook. The host rejects a mismatch or incompatible ABI at load time.
 
 ## What the review looks for
 
@@ -77,10 +73,11 @@ most of their code is about refusing.
 operator has to approve, and the description you write is what they read while
 deciding. Say what you do with it, not what it is.
 
-**`schema.json` renders scalars only** — string, number, boolean, enum. A list
-has to be a comma-separated string. Values are type-checked against what you
-declare before they reach the plugin, so an array where you said string is
-rejected at save time.
+**Use JSON Schema for settings.** The host validates the complete document,
+including nested objects, arrays and `additionalProperties`. The UI renders
+scalar controls and uses raw JSON for structured settings; a list need not be
+encoded as a comma-separated string. Keep each plugin's README examples in
+sync with its schema and required approval resources.
 
 ## Testing
 
@@ -98,24 +95,34 @@ fails that script deliberately:
 this is the only place plugin behaviour runs, so a silently-skipped suite is
 indistinguishable from one that passes.
 
-**Do not copy your plugin into `torana-edge/plugins/`.** That directory no
-longer exists. It used to hold a hand-synced mirror of this repository, and
-keeping two trees in step by hand failed exactly once, silently, in the plugin
-where it mattered most: the copy there shipped a `pii` cache key bound to
-nothing but a `tool_call_id`, so a tool result was skipped **without being
-scanned** whenever that id had been cleared before. torana-edge#206.
+Keep plugin source here, not duplicated inside Edge. Edge's purpose-built
+fixtures test the host; behavior tests use `TORANA_PLUGIN_BUNDLES_DIR` to
+exercise bundles built from their owning source.
 
-torana-edge now tests the *host* with purpose-built fixtures in
-`examples/plugins/` — is a hook dispatched, is a missing grant refused — and
-keeps no copy of these plugins at all. Assertions about what a plugin *does*
-live behind `TORANA_PLUGIN_BUNDLES_DIR` and run from here, against bundles
-built from the source that owns them.
+Test a case where the plugin acts, one where it should leave input unchanged,
+and a failure. Temporarily disabling the behavior should make its action test
+fail; setup that accidentally exercises a no-op is not coverage.
 
-A test that passes whether or not the code works is worse than no test. Two
-examples from this repo's own history: a stickiness test that ran in a mode
-where the plugin correctly did nothing, and a warming test whose timestamps
-tripped a deadline so every send-path assertion passed for the wrong reason.
-Disable your logic, watch the test fail, put it back.
+### Coordinated SDK and host changes
+
+All plugin modules and `SDK_REF` pin the same SDK revision. A review pin must be
+fetchable; release builds require it to be reachable from SDK main.
+`EDGE_REVIEW_REF`, when present, pins the Edge commit for PR integration;
+main CI uses Edge main. Reproduce with those sibling checkouts, then run the
+behavior suite above. Land owning SDK changes before their consumers.
+
+### Keep the guides executable
+
+The normal test script checks each catalogue guide's JSON, exact permission
+set and required resource slots against its manifest. For full host schema
+and approval validation, from the sibling Edge checkout run:
+
+```bash
+go run scripts/check-plugin-guides.go ../torana-plugins/plugins
+```
+
+Keep behavior examples small and use synthetic data. A parser check does not
+replace a real request through the plugin or a paid-model experiment.
 
 ## Releasing
 

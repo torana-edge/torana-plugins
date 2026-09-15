@@ -1,6 +1,6 @@
-# Choose the tools your model sees
+# Carry the reason for a tool call
 
-Restrict or replace model-visible tool definitions. For example, expose search and read tools while omitting deployment tools during a review.
+Ask the model to include why it is making a tool call, strip the added field before the harness sees the streamed call, and make captured intent available to a compactor.
 
 [All plugins](../../README.md#choose-a-plugin) · [Source](main.go) · [Manifest](plugin.json) · [Settings schema](schema.json)
 
@@ -12,8 +12,8 @@ Run installation from the host checkout or supply its configured plugin
 directory with `--dir`. Keep the same `TORANA_DATA_DIR` for local file commands.
 
 ```bash
-torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/tool_governor
-torana plugin inspect tool_governor
+torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/intent
+torana plugin inspect intent
 ```
 
 Installation builds source locally; it does not approve or enable the bundle.
@@ -24,25 +24,22 @@ and review that revision before proceeding.
 ## Configure
 
 ```bash
-torana plugin config get tool_governor > plugin-settings.json
+torana plugin config get intent > plugin-settings.json
 ```
 
 Set the snapshot's `config` object to the following, preserving its `revision`:
 
 ```json
 {
-  "allow": [
-    "read_file",
-    "web_search"
-  ]
+  "fill": "heuristic"
 }
 ```
 
 ```bash
-torana plugin config apply tool_governor --file plugin-settings.json --yes
+torana plugin config apply intent --file plugin-settings.json --yes
 ```
 
-No resource bindings are required. Review the configuration-read and tool/cache-marker write permissions.
+No bound resource slots are required. It requests private cache and separately approved shared-cache writes. The shared cache is visible to other plugins with the corresponding shared-cache grant.
 
 ## Approve and enable
 
@@ -55,17 +52,32 @@ Permissions must equal the manifest's requested set; budgets can be lower.
 {
   "digest": "sha256:REPLACE_WITH_YOUR_INSPECTED_DIGEST",
   "permissions": [
+    "env.cache_get",
+    "env.cache_set",
+    "env.shared_cache_set",
+    "env.emit_metric",
+    "env.log",
+    "env.meta_get",
+    "env.meta_set",
     "env.plugin_config",
     "ir.cache_control.write",
+    "ir.messages.write.assistant",
+    "ir.messages.write.developer",
+    "ir.messages.write.other",
+    "ir.messages.write.system",
+    "ir.messages.write.tool",
+    "ir.messages.write.user",
+    "ir.stream.write",
+    "ir.tool_results.write",
     "ir.tools.write"
   ],
-  "failure_mode": "block"
+  "failure_mode": "pass"
 }
 ```
 
 ```bash
-torana plugin approve tool_governor --file approval.json --yes
-torana plugin enable tool_governor --yes
+torana plugin approve intent --file approval.json --yes
+torana plugin enable intent --yes
 torana plugin status
 ```
 
@@ -75,18 +87,18 @@ same inspect/configure/approve/enable flow. Rebuilds need a new digest approval.
 
 ## Try it and check the result
 
-Send a request containing `read_file`, `web_search` and `deploy` tool definitions to a test backend. Only the first two should reach it. `allow: []` removes all definitions; omitting `allow` leaves them eligible. `deny` must not overlap `allow`. `replace` changes a retained tool's description, parameters or strict flag; it does not add a missing tool.
+On a test streaming workflow, inspect the provider-facing tool schema for the added `i` field, then confirm that the harness receives the original tool arguments without that added field. Captured intent is restored only for the same host conversation ID, tool-call ID, tool name and inputs. Remapped IDs use heuristic fill, or remain unchanged with `fill: "off"`.
 
 ## Data and failure behavior
 
-This controls advertised definitions, not execution. Your harness still executes tools and owns its approvals; a model can propose a call it was not shown. Config is read on every request. A valid unset/empty value or `{}` leaves tools unchanged; malformed/whitespace policy and host-call failures error rather than reuse an old policy. Default failure mode is block.
+Adds a model-facing convention and changes tool schemas/history; it is not a guarantee of intent quality. Captured intent and tool-derived cache data can contain workflow context. Heuristic fill uses stable call information, not newer turns. Missing identity/cache entries cannot recover the original intent. Default failure mode is pass.
 
 ## Combine or disable
 
-Place before `intent` and `schema_translator` so policy is applied to the harness's original definitions. Preserve existing pipeline entries when reordering.
+Place after `tool_governor` and before one compactor. Compactors also work without it using bounded local guidance.
 
 ```bash
-torana plugin disable tool_governor --yes
+torana plugin disable intent --yes
 ```
 
 Disabling keeps configuration, approval and private data. `plugin revoke`

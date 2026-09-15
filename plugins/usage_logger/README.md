@@ -1,6 +1,6 @@
-# Choose the tools your model sees
+# See usage without saving prompts
 
-Restrict or replace model-visible tool definitions. For example, expose search and read tools while omitting deployment tools during a review.
+Write one content-free JSONL record for each completed response: provider, model, status, latency and reported token counts.
 
 [All plugins](../../README.md#choose-a-plugin) · [Source](main.go) · [Manifest](plugin.json) · [Settings schema](schema.json)
 
@@ -12,8 +12,8 @@ Run installation from the host checkout or supply its configured plugin
 directory with `--dir`. Keep the same `TORANA_DATA_DIR` for local file commands.
 
 ```bash
-torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/tool_governor
-torana plugin inspect tool_governor
+torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/usage_logger
+torana plugin inspect usage_logger
 ```
 
 Installation builds source locally; it does not approve or enable the bundle.
@@ -24,25 +24,20 @@ and review that revision before proceeding.
 ## Configure
 
 ```bash
-torana plugin config get tool_governor > plugin-settings.json
+torana plugin config get usage_logger > plugin-settings.json
 ```
 
 Set the snapshot's `config` object to the following, preserving its `revision`:
 
 ```json
-{
-  "allow": [
-    "read_file",
-    "web_search"
-  ]
-}
+{}
 ```
 
 ```bash
-torana plugin config apply tool_governor --file plugin-settings.json --yes
+torana plugin config apply usage_logger --file plugin-settings.json --yes
 ```
 
-No resource bindings are required. Review the configuration-read and tool/cache-marker write permissions.
+Approve the required private file `usage.jsonl`. The example permits 16 MiB per generation and five retained rotations. You may lower these limits; the guest cannot select an OS path.
 
 ## Approve and enable
 
@@ -55,17 +50,21 @@ Permissions must equal the manifest's requested set; budgets can be lower.
 {
   "digest": "sha256:REPLACE_WITH_YOUR_INSPECTED_DIGEST",
   "permissions": [
-    "env.plugin_config",
-    "ir.cache_control.write",
-    "ir.tools.write"
+    "env.file_append"
   ],
-  "failure_mode": "block"
+  "failure_mode": "pass",
+  "files": {
+    "usage.jsonl": {
+      "max_bytes": 16777216,
+      "retained_files": 5
+    }
+  }
 }
 ```
 
 ```bash
-torana plugin approve tool_governor --file approval.json --yes
-torana plugin enable tool_governor --yes
+torana plugin approve usage_logger --file approval.json --yes
+torana plugin enable usage_logger --yes
 torana plugin status
 ```
 
@@ -75,18 +74,18 @@ same inspect/configure/approve/enable flow. Rebuilds need a new digest approval.
 
 ## Try it and check the result
 
-Send a request containing `read_file`, `web_search` and `deploy` tool definitions to a test backend. Only the first two should reach it. `allow: []` removes all definitions; omitting `allow` leaves them eligible. `deny` must not overlap `allow`. `replace` changes a retained tool's description, parameters or strict flag; it does not add a missing tool.
+Send the quickstart request, then run `torana plugin file tail usage_logger usage.jsonl` in the same data-directory environment. Expect a JSON record with `status`, `duration_ms` and `usage_reported`. Missing usage is not zero usage. Alternatively, `tail -F "$(torana plugin file path usage_logger usage.jsonl)"` follows rotation; set `TORANA_PORT` for a non-default listener.
 
 ## Data and failure behavior
 
-This controls advertised definitions, not execution. Your harness still executes tools and owns its approvals; a model can propose a call it was not shown. Config is read on every request. A valid unset/empty value or `{}` leaves tools unchanged; malformed/whitespace policy and host-call failures error rather than reuse an old policy. Default failure mode is block.
+No prompts, response bodies or headers are written. The file still contains operational identifiers and timing; keep it private. Append failures follow the approved failure policy (default pass), so this is not a guaranteed audit ledger.
 
 ## Combine or disable
 
-Place before `intent` and `schema_translator` so policy is applied to the harness's original definitions. Preserve existing pipeline entries when reordering.
+No special order is required. It observes completed responses; earlier vetoes may prevent its hook from running.
 
 ```bash
-torana plugin disable tool_governor --yes
+torana plugin disable usage_logger --yes
 ```
 
 Disabling keeps configuration, approval and private data. `plugin revoke`
