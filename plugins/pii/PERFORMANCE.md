@@ -1,4 +1,4 @@
-# Plugin performance evidence
+# PII scan performance evidence
 
 Plugins add CPU and memory costs to the proxy. Measure your selected pipeline,
 not just Torana without plugins. The [full plugin-chain report](https://github.com/torana-edge/torana-edge/blob/main/benchmarks/BENCHMARK_PLUGIN_CHAIN_RESULTS_2026-08-18.md)

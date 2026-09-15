@@ -4,6 +4,8 @@ Choose between configured prompt-cache tiers using observed idle gaps, while kee
 
 [All plugins](../../README.md#choose-a-plugin) · [Source](main.go) · [Manifest](plugin.json) · [Settings schema](schema.json)
 
+[Tier selection versus warming](../cache_warmer/ECONOMICS.md)
+
 ## Install and inspect
 
 Start [Torana](https://github.com/torana-edge/torana-edge/blob/main/docs/QUICKSTART.md)

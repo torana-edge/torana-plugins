@@ -4,6 +4,8 @@ Apply explicit deterministic or keyword policies to selected tool results. Usefu
 
 [All plugins](../../README.md#choose-a-plugin) · [Source](main.go) · [Manifest](plugin.json) · [Settings schema](schema.json)
 
+[Shared tool-output policies](../compactor/COMPACTION.md#tool-result-policies) · [DeepSeek experiment](../compactor/DEEPSEEK_RESULTS.md)
+
 ## Install and inspect
 
 Start [Torana](https://github.com/torana-edge/torana-edge/blob/main/docs/QUICKSTART.md)

@@ -80,6 +80,6 @@ control. The reference remains in the executable release inventory.
 
 ## Evidence
 
-[PII scan memory measurements](docs/PERFORMANCE.md) retain the measured limits
+[PII scan memory measurements](plugins/pii/PERFORMANCE.md) retain the measured limits
 of that experiment. Full proxy/plugin-chain CPU and memory results remain
 [public in Edge](https://github.com/torana-edge/torana-edge/blob/main/benchmarks/README.md).

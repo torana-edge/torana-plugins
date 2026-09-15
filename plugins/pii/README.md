@@ -4,6 +4,8 @@ Scan selected tool results with deterministic patterns and an operator-bound con
 
 [All plugins](../../README.md#choose-a-plugin) · [Source](main.go) · [Manifest](plugin.json) · [Settings schema](schema.json)
 
+[Measured clean-scan costs](PERFORMANCE.md)
+
 ## Install and inspect
 
 Start [Torana](https://github.com/torana-edge/torana-edge/blob/main/docs/QUICKSTART.md)

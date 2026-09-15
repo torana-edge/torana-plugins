@@ -4,6 +4,8 @@ Emit request shape, latency, observed status classes and provider-reported token
 
 [All plugins](../../README.md#choose-a-plugin) · [Source](main.go) · [Manifest](plugin.json) · [Settings schema](schema.json)
 
+[Read status from an agent](AGENT_OPERATIONS.md)
+
 ## Install and inspect
 
 Start [Torana](https://github.com/torana-edge/torana-edge/blob/main/docs/QUICKSTART.md)

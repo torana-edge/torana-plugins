@@ -4,6 +4,8 @@ Opt a conversation into periodic refresh requests, with a deadline and break-eve
 
 [All plugins](../../README.md#choose-a-plugin) · [Source](main.go) · [Manifest](plugin.json) · [Settings schema](schema.json)
 
+[When warming is worth it](ECONOMICS.md)
+
 ## Install and inspect
 
 Start [Torana](https://github.com/torana-edge/torana-edge/blob/main/docs/QUICKSTART.md)

@@ -4,6 +4,8 @@ Use an operator-bound model for eligible older tool output, only when the estima
 
 [All plugins](../../README.md#choose-a-plugin) · [Source](main.go) · [Manifest](plugin.json) · [Settings schema](schema.json)
 
+[Policies and economics](COMPACTION.md) · [Local summarizer](LOCAL_SUMMARIZER.md) · [DeepSeek experiment](DEEPSEEK_RESULTS.md)
+
 ## Install and inspect
 
 Start [Torana](https://github.com/torana-edge/torana-edge/blob/main/docs/QUICKSTART.md)
