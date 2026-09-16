@@ -25,16 +25,22 @@ optional context experiments.
 
 Start with `usage_logger` if you want a visible result without changing
 payloads. Every guide includes settings, exact permissions, required resource
-bindings, a CLI setup path and a way to check the result.
+bindings, and a way to check the result. For a first run, install it from the
+Torana checkout where the proxy is running (use `./torana` for a source build):
 
 ```bash
 torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/usage_logger
-torana plugin inspect usage_logger
 ```
 
 Installation compiles source locally. It never approves or enables a plugin.
-Follow the guide for your installed revision, inspect the digest, approve the
-complete requested permission set and bounded resources, then enable it.
+Open Torana's local control plane, select **usage_logger**, review its requested
+file access and retention budget, then choose **Approve and enable**. Send
+another request from your harness and [check the local record](plugins/usage_logger/README.md#try-it-and-check-the-result).
+
+Prefer terminal or agent automation? Follow the plugin's
+[CLI setup guide](plugins/usage_logger/README.md#configure). Other plugins may
+need their own settings or resource bindings; each catalogue entry links to
+its owning guide.
 
 ## Combine deliberately
 

@@ -48,9 +48,9 @@ Approve the required private file `usage.jsonl`. The example permits 16 MiB per 
 
 ## Approve and enable
 
-Save this as `approval.json`. Replace the digest with the exact one you reviewed
-and replace any provider/model placeholders. Do not paste real secrets here;
-model-service authentication belongs to the host provider's credential binding.
+Save this as `approval.json`. Replace the digest with the exact one you reviewed.
+The usage logger needs only the private file grant shown here; it has no model
+service or provider-key setup of its own.
 Permissions must equal the manifest's requested set; budgets can be lower.
 
 ```json
