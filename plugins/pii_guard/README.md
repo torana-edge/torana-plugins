@@ -1,4 +1,4 @@
-# Block recognizable sensitive data without a model
+# Keep recognizable sensitive data out of model requests
 
 `pii_guard` checks tool-result text for high-confidence PII and secret patterns
 before the next request reaches the configured model provider. It runs entirely
@@ -26,8 +26,9 @@ torana plugin inspect pii_guard
 
 Installation builds the source locally and never approves or enables it.
 Open Torana's local control plane, select **pii_guard**, review the inspected
-digest and its two permissions, then choose **Approve and enable**. It requests
-only permission to read its tool allowlist and block a request.
+digest and permissions, then choose **Approve and enable**. It requests
+only the permissions needed to read its allowlist, replace affected tool
+results, and remember those replacements across restarts.
 
 ## Try it safely
 
@@ -39,11 +40,15 @@ PAYMENT_API_KEY=sk_test_torana_demo_not_a_real_key_123
 
 Ask your coding harness to read that file. The harness executes the read
 locally; when it prepares the follow-up containing the tool result, Torana
-returns a value-free `sensitive_data_detected` block before the configured
-provider receives that result.
+replaces that result with a value-free tool error before the configured
+provider receives it. The model can acknowledge the error, skip the affected
+lines, or ask for a narrower read instead of losing the whole conversation.
 
 The message reports only a category and line number. It never repeats the
-matched value. Remove or replace the value before asking the harness to retry.
+matched value. Torana persists the safe replacement—not the original
+content—so later turns, resumed conversations, and restarts remain protected.
+Only the newest tool-result batch is scanned; historical output is changed
+only when replaying a decision the plugin already made.
 
 ## Coverage and boundary
 

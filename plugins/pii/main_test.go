@@ -12,6 +12,7 @@ import (
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"github.com/torana-edge/torana-plugin-sdk/sdktest"
+	"google.golang.org/protobuf/proto"
 )
 
 // ==========================================================================
@@ -81,28 +82,45 @@ func countCommand(h *sdktest.Harness, cmd string) int {
 	return n
 }
 
+func requestCompleted(result sdktest.RequestResult) bool {
+	return result.Err == nil && (result.PassedThrough || result.Request != nil)
+}
+
 func reqWith(msgs ...*pbv1.Message) *pbv1.ChatRequest {
 	return &pbv1.ChatRequest{Messages: msgs}
 }
 
-// assertBlocked asserts EXACTLY one block verdict with status 422, the given
-// code, and a message free of the given secrets.
+func protectedMessage(t *testing.T, h *sdktest.Harness) (string, bool) {
+	t.Helper()
+	for i := len(h.Calls()) - 1; i >= 0; i-- {
+		call := h.Calls()[i]
+		if call.Command != "env.state_compare_and_set" {
+			continue
+		}
+		var args pbv1.StateCompareAndSetArgs
+		if err := proto.Unmarshal([]byte(call.Args), &args); err != nil {
+			t.Fatalf("decode state compare-and-set: %v", err)
+		}
+		var record replayRecord
+		if err := json.Unmarshal([]byte(args.Value), &record); err != nil {
+			t.Fatalf("decode replay record: %v", err)
+		}
+		return record.Replacement, true
+	}
+	return "", false
+}
+
+// assertBlocked retains the old test name while asserting the new behavior:
+// the request passes with a persisted, value-free replacement.
 func assertBlocked(t *testing.T, h *sdktest.Harness, code string, secrets ...string) {
 	t.Helper()
-	blocks := h.BlockCalls()
-	if len(blocks) != 1 {
-		t.Fatalf("expected exactly one block verdict, got %d", len(blocks))
-	}
-	args := sdktest.DecodeBlockArgs(t, blocks[0].Args)
-	if args.Status != 422 {
-		t.Fatalf("block status=%d, want 422", args.Status)
-	}
-	if args.Code != code {
-		t.Fatalf("block code=%q, want %q", args.Code, code)
+	message, ok := protectedMessage(t, h)
+	if !ok {
+		t.Fatalf("expected a persisted replacement for %s", code)
 	}
 	for _, secret := range secrets {
-		if strings.Contains(args.Message, secret) {
-			t.Fatalf("block message must be value-free, leaked %q: %q", secret, args.Message)
+		if strings.Contains(message, secret) {
+			t.Fatalf("replacement must be value-free, leaked %q: %q", secret, message)
 		}
 	}
 }
@@ -159,7 +177,7 @@ func TestKnownPIIBlocksDespiteUnsupportedPart(t *testing.T) {
 			h := newHarness(t)
 			h.SetConfig(`{"on_error":"` + onError + `"}`)
 			res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm(content), unknownArm())))
-			if res.Err != nil || !res.PassedThrough {
+			if !requestCompleted(res) {
 				t.Fatalf("err=%v", res.Err)
 			}
 			assertBlocked(t, h, "pii_detected", "victim@example.com")
@@ -170,7 +188,7 @@ func TestKnownPIIBlocksDespiteUnsupportedPart(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(`{"on_error":"allow"}`)
 	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("ssn 123-45-6789"), unknownArm())))
-	if res.Err != nil || !res.PassedThrough {
+	if !requestCompleted(res) {
 		t.Fatalf("err=%v", res.Err)
 	}
 	assertBlocked(t, h, "pii_detected", "123-45-6789")
@@ -179,7 +197,7 @@ func TestKnownPIIBlocksDespiteUnsupportedPart(t *testing.T) {
 	h2 := newHarness(t)
 	h2.SetConfig(`{"on_error":"allow"}`)
 	res2 := h2.BeforeRequest(reqWith(toolMsg("c1", "read", unknownArm(), textArm("key AKIA1234567890ABCDEF"))))
-	if res2.Err != nil || !res2.PassedThrough {
+	if !requestCompleted(res2) {
 		t.Fatalf("err=%v", res2.Err)
 	}
 	assertBlocked(t, h2, "pii_detected", "AKIA1234567890ABCDEF")
@@ -190,7 +208,7 @@ func TestFreeformToolOutputIsScanned(t *testing.T) {
 	msg := toolMsg("call_1", "exec", textArm("contact victim@example.com"))
 	msg.Blocks[0].GetToolResult().InvocationKind = pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM
 	res := h.BeforeRequest(reqWith(msg))
-	if res.Err != nil || !res.PassedThrough {
+	if !requestCompleted(res) {
 		t.Fatalf("err=%v passed=%v", res.Err, res.PassedThrough)
 	}
 	assertBlocked(t, h, "pii_detected", "victim@example.com")
@@ -205,13 +223,13 @@ func TestUnknownUnscannableContentFollowsOnError(t *testing.T) {
 			h := newHarness(t)
 			h.SetConfig(`{"on_error":"` + onError + `"}`)
 			res := h.BeforeRequest(reqWith(toolMsg("c1", "read", unknownArm())))
-			if res.Err != nil || !res.PassedThrough {
+			if !requestCompleted(res) {
 				t.Fatalf("err=%v", res.Err)
 			}
 			if onError == "block" {
 				assertBlocked(t, h, "pii_scan_failed")
-			} else if len(h.BlockCalls()) != 0 {
-				t.Fatalf("allow must forward unknown unscannable content: %+v", h.BlockCalls())
+			} else if _, protected := protectedMessage(t, h); protected {
+				t.Fatal("allow must forward unknown unscannable content")
 			}
 			if n := countCommand(h, "env.cache_set"); n != 0 {
 				t.Fatalf("incomplete extractions must never be cached, got %d writes", n)
@@ -265,7 +283,7 @@ func TestUserRoleResultIsACandidate(t *testing.T) {
 	}}
 	h := newHarness(t)
 	res := h.BeforeRequest(reqWith(msg))
-	if res.Err != nil || !res.PassedThrough {
+	if !requestCompleted(res) {
 		t.Fatalf("err=%v", res.Err)
 	}
 	assertBlocked(t, h, "pii_detected", "someone@example.com")
@@ -290,16 +308,16 @@ func TestRegexCategoriesBlock(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
 			res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm(tc.content))))
-			if res.Err != nil || !res.PassedThrough {
+			if !requestCompleted(res) {
 				t.Fatalf("err=%v", res.Err)
 			}
 			assertBlocked(t, h, "pii_detected")
-			args := sdktest.DecodeBlockArgs(t, h.BlockCalls()[0].Args)
-			if !strings.Contains(args.Message, tc.wantType) {
-				t.Fatalf("block must name the category: %q", args.Message)
+			message, _ := protectedMessage(t, h)
+			if !strings.Contains(message, tc.wantType) {
+				t.Fatalf("replacement must name the category: %q", message)
 			}
-			if !strings.Contains(args.Message, "line 1") {
-				t.Fatalf("block must carry the line number: %q", args.Message)
+			if !strings.Contains(message, "line 1") {
+				t.Fatalf("replacement must carry the line number: %q", message)
 			}
 		})
 	}
@@ -413,10 +431,10 @@ func TestDuplicateToolCallIDsAmbiguous(t *testing.T) {
 			h := newHarness(t)
 			h.SetConfig(`{"tools":["read"]}`)
 			res := h.BeforeRequest(mk())
-			if res.Err != nil || !res.PassedThrough {
+			if !requestCompleted(res) {
 				t.Fatalf("err=%v", res.Err)
 			}
-			if len(h.BlockCalls()) != 1 {
+			if _, ok := protectedMessage(t, h); !ok {
 				t.Fatal("an ambiguous id must err toward scanning")
 			}
 		})
@@ -431,10 +449,10 @@ func TestDuplicateToolCallIDsAmbiguous(t *testing.T) {
 		toolMsg("same", "read", textArm("contact someone@example.com")),
 	}}
 	res := h.BeforeRequest(req)
-	if res.Err != nil || !res.PassedThrough {
+	if !requestCompleted(res) {
 		t.Fatalf("err=%v", res.Err)
 	}
-	if len(h.BlockCalls()) != 1 {
+	if _, ok := protectedMessage(t, h); !ok {
 		t.Fatal("an explicit authoritative name must still scan")
 	}
 }
@@ -480,7 +498,7 @@ func TestCacheRefusalClasses(t *testing.T) {
 	})
 	h.StubModelComplete(modelStub(`{"pii":false,"findings":[]}`))
 	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("no pii here"))))
-	if res.Err != nil || !res.PassedThrough {
+	if !requestCompleted(res) {
 		t.Fatalf("advisory cache refusal must still scan, err=%v", res.Err)
 	}
 	if len(h.BlockCalls()) != 0 {
@@ -502,12 +520,12 @@ func TestCacheRefusalClasses(t *testing.T) {
 	}
 }
 
-func TestDeniedBlockCannotReturnSuccess(t *testing.T) {
+func TestDeniedReplayWriteCannotReturnSuccess(t *testing.T) {
 	h := newHarness(t)
-	h.DenyPermission("env.block_request")
+	h.DenyPermission("env.state_compare_and_set")
 	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("contact someone@example.com"))))
 	if res.Err == nil || res.PassedThrough {
-		t.Fatalf("denied PII block must fail the hook, passed=%v err=%v", res.PassedThrough, res.Err)
+		t.Fatalf("denied replay write must fail the hook, passed=%v err=%v", res.PassedThrough, res.Err)
 	}
 }
 
@@ -518,25 +536,25 @@ func TestAllowlistSemantics(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(`{"tools":["read"]}`)
 	h.BeforeRequest(reqWith(toolMsg("c1", "grep", textArm(email))))
-	if len(h.BlockCalls()) != 0 {
+	if _, ok := protectedMessage(t, h); ok {
 		t.Fatal("grep must not be scanned under the read-only allowlist")
 	}
 	h.BeforeRequest(reqWith(toolMsg("c2", "read", textArm(email))))
-	if len(h.BlockCalls()) != 1 {
+	if _, ok := protectedMessage(t, h); !ok {
 		t.Fatal("read must be scanned under the allowlist")
 	}
 
 	h2 := newHarness(t)
 	h2.SetConfig(`{"tools":["*"]}`)
 	h2.BeforeRequest(reqWith(toolMsg("c1", "anything", textArm(email))))
-	if len(h2.BlockCalls()) != 1 {
+	if _, ok := protectedMessage(t, h2); !ok {
 		t.Fatal("* must scan every tool")
 	}
 
 	h3 := newHarness(t)
 	h3.SetConfig(`{"tools":["read"]}`)
 	h3.BeforeRequest(reqWith(toolMsg("c1", "", textArm(email))))
-	if len(h3.BlockCalls()) != 1 {
+	if _, ok := protectedMessage(t, h3); !ok {
 		t.Fatal("an unknown tool name with an allowlist must still scan")
 	}
 }
@@ -548,7 +566,7 @@ func TestModelScanHappyPath(t *testing.T) {
 	h.SetConfig(`{}`)
 	h.StubModelComplete(modelStub(`{"pii":true,"findings":[{"type":"email","line":3}]}`))
 	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("line1\nline2\nline3"))))
-	if res.Err != nil || !res.PassedThrough {
+	if !requestCompleted(res) {
 		t.Fatalf("err=%v", res.Err)
 	}
 	assertBlocked(t, h, "pii_detected")
@@ -560,7 +578,7 @@ func TestModelScanHappyPath(t *testing.T) {
 	if res2.Err != nil || !res2.PassedThrough {
 		t.Fatalf("err=%v", res2.Err)
 	}
-	if len(h2.BlockCalls()) != 0 {
+	if _, ok := protectedMessage(t, h2); ok {
 		t.Fatal("a clean model verdict must not block")
 	}
 	if n := countCommand(h2, "env.cache_set"); n != 1 {
@@ -589,13 +607,13 @@ func TestModelVerdictShapeValidation(t *testing.T) {
 				h.SetConfig(`{"on_error":"` + onError + `"}`)
 				h.StubModelComplete(modelStub(completion))
 				res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("text"))))
-				if res.Err != nil || !res.PassedThrough {
+				if !requestCompleted(res) {
 					t.Fatalf("err=%v", res.Err)
 				}
 				if onError == "block" {
 					assertBlocked(t, h, "pii_scan_failed")
-				} else if len(h.BlockCalls()) != 0 {
-					t.Fatalf("allow must forward a malformed verdict: %+v", h.BlockCalls())
+				} else if _, protected := protectedMessage(t, h); protected {
+					t.Fatal("allow must forward a malformed verdict")
 				}
 				if n := countCommand(h, "env.cache_set"); n != 0 {
 					t.Fatalf("a malformed verdict must never be cached, got %d writes", n)
@@ -615,15 +633,15 @@ func TestModelCategoryNormalization(t *testing.T) {
 	h.StubModelComplete(modelStub(
 		`{"pii":true,"findings":[{"type":"` + secret + `","line":1}]}`))
 	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("text"))))
-	if res.Err != nil || !res.PassedThrough {
+	if !requestCompleted(res) {
 		t.Fatalf("err=%v", res.Err)
 	}
-	args := sdktest.DecodeBlockArgs(t, h.BlockCalls()[0].Args)
-	if strings.Contains(args.Message, secret) {
-		t.Fatalf("the model-controlled category was echoed: %q", args.Message)
+	message, _ := protectedMessage(t, h)
+	if strings.Contains(message, secret) {
+		t.Fatalf("the model-controlled category was echoed: %q", message)
 	}
-	if !strings.Contains(args.Message, "unspecified") {
-		t.Fatalf("an unknown category must map to unspecified: %q", args.Message)
+	if !strings.Contains(message, "unspecified") {
+		t.Fatalf("an unknown category must map to unspecified: %q", message)
 	}
 
 	// Aliases normalize to the documented set.
@@ -642,12 +660,12 @@ func TestModelCategoryNormalization(t *testing.T) {
 	h2.SetConfig(`{}`)
 	h2.StubModelComplete(modelStub(`{"pii":true,"findings":[{"type":"email","line":-7}]}`))
 	res2 := h2.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("text"))))
-	if res2.Err != nil || !res2.PassedThrough {
+	if !requestCompleted(res2) {
 		t.Fatalf("err=%v", res2.Err)
 	}
-	args2 := sdktest.DecodeBlockArgs(t, h2.BlockCalls()[0].Args)
-	if strings.Contains(args2.Message, "-7") {
-		t.Fatalf("a negative line must be clamped: %q", args2.Message)
+	message2, _ := protectedMessage(t, h2)
+	if strings.Contains(message2, "-7") {
+		t.Fatalf("a negative line must be clamped: %q", message2)
 	}
 }
 
@@ -679,7 +697,7 @@ func TestModelScanRefusalClasses(t *testing.T) {
 				return nil, &pbv1.HostError{Code: code, Message: "stub"}, nil
 			})
 			res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("text"))))
-			if res.Err != nil || !res.PassedThrough {
+			if !requestCompleted(res) {
 				t.Fatalf("err=%v", res.Err)
 			}
 			assertBlocked(t, h, "pii_scan_failed")
@@ -693,10 +711,10 @@ func TestModelScanRefusalClasses(t *testing.T) {
 			return nil, &pbv1.HostError{Code: pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, Message: "stub"}, nil
 		})
 		res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("text"))))
-		if res.Err != nil || !res.PassedThrough {
+		if !requestCompleted(res) {
 			t.Fatalf("err=%v", res.Err)
 		}
-		if len(h.BlockCalls()) != 0 {
+		if _, ok := protectedMessage(t, h); ok {
 			t.Fatal("allow must forward on an advisory model-service refusal")
 		}
 	})
@@ -736,7 +754,7 @@ func TestModelScanRefusalClasses(t *testing.T) {
 		h.SetConfig(`{"on_error":"block"}`)
 		h.StubModelComplete(modelStub(`no json here`))
 		res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("text"))))
-		if res.Err != nil || !res.PassedThrough {
+		if !requestCompleted(res) {
 			t.Fatalf("err=%v", res.Err)
 		}
 		assertBlocked(t, h, "pii_scan_failed")
@@ -772,7 +790,7 @@ func TestMaxScanBytesTruncation(t *testing.T) {
 			})
 			content := strings.Repeat("日本語", 500)
 			res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm(content))))
-			if res.Err != nil || !res.PassedThrough {
+			if !requestCompleted(res) {
 				t.Fatalf("err=%v", res.Err)
 			}
 			if request == nil || len(request.Messages) != 2 {
@@ -793,7 +811,7 @@ func TestMaxScanBytesTruncation(t *testing.T) {
 			if n := countCommand(h, "env.cache_set"); n != 0 {
 				t.Fatalf("incomplete scan wrote %d clean cache entries", n)
 			}
-			blocked := len(h.BlockCalls()) > 0
+			_, blocked := protectedMessage(t, h)
 			if want := onError == "block"; blocked != want {
 				t.Fatalf("blocked=%v, want %v for on_error=%s", blocked, want, onError)
 			}
@@ -833,7 +851,7 @@ func TestScannerModelServiceContract(t *testing.T) {
 	h2 := newHarness(t)
 	h2.StubModelComplete(modelStub(`{"pii":false,"findings":[]}`))
 	res2 := h2.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("contact someone@example.com"))))
-	if res2.Err != nil || !res2.PassedThrough {
+	if !requestCompleted(res2) {
 		t.Fatalf("err=%v", res2.Err)
 	}
 	assertBlocked(t, h2, "pii_detected", "someone@example.com")
@@ -843,17 +861,15 @@ func TestScannerModelServiceContract(t *testing.T) {
 }
 
 // TestBlockReturnsPassAndNoWriteGrant — P2: every block row returns
-// pass-through content and the plugin never touches a write grant.
-func TestBlockReturnsPassAndNoWriteGrant(t *testing.T) {
+// The guard changes the request in place and still permits upstream recovery.
+func TestReplacementReturnsRequest(t *testing.T) {
 	h := newHarness(t)
 	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("contact someone@example.com"))))
-	if res.Err != nil || !res.PassedThrough {
-		t.Fatalf("a block verdict must be pass-through, err=%v", res.Err)
+	if res.Err != nil || res.PassedThrough || res.Request == nil {
+		t.Fatalf("a protected result must return replace_request, result=%+v", res)
 	}
-	for _, c := range h.Calls() {
-		if strings.HasPrefix(c.Command, "ir.") {
-			t.Errorf("pii made a write-grant-class call: %s", c.Command)
-		}
+	if _, ok := protectedMessage(t, h); !ok {
+		t.Fatal("expected a persisted replacement")
 	}
 }
 
@@ -863,11 +879,14 @@ func TestNoUnauthorizedCalls(t *testing.T) {
 	h.StubModelComplete(modelStub(`{"pii":false,"findings":[]}`))
 	h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("clean"))))
 	allowed := map[string]bool{
-		"env.plugin_config":  true,
-		"env.cache_get":      true,
-		"env.cache_set":      true,
-		"env.block_request":  true,
-		"env.model_complete": true,
+		"env.plugin_config":            true,
+		"env.cache_get":                true,
+		"env.cache_set":                true,
+		"env.state_get":                true,
+		"env.state_get_versioned":      true,
+		"env.state_set":                true,
+		"env.state_compare_and_delete": true,
+		"env.model_complete":           true,
 	}
 	for _, c := range h.Calls() {
 		if !allowed[c.Command] {
@@ -919,13 +938,13 @@ func TestConfigResetPinsIsolation(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(`{"on_error":"block"}`)
 	h.BeforeRequest(reqWith(toolMsg("c1", "read", unknownArm())))
-	if len(h.BlockCalls()) != 1 {
+	if _, ok := protectedMessage(t, h); !ok {
 		t.Fatal("row 1 must fail closed on unscannable content")
 	}
 	h2 := newHarness(t)
 	h2.SetConfig(`{"on_error":"allow"}`)
 	h2.BeforeRequest(reqWith(toolMsg("c2", "read", unknownArm())))
-	if len(h2.BlockCalls()) != 0 {
+	if _, ok := protectedMessage(t, h2); ok {
 		t.Fatal("row 2 leaked row 1's fail-closed policy")
 	}
 }
@@ -951,13 +970,13 @@ func TestDeterminismOverIdenticalRequests(t *testing.T) {
 func TestEmptyPartPreservesLineBoundary(t *testing.T) {
 	h := newHarness(t)
 	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm(""), textArm("contact victim@example.com"))))
-	if res.Err != nil || !res.PassedThrough {
+	if !requestCompleted(res) {
 		t.Fatalf("err=%v", res.Err)
 	}
 	assertBlocked(t, h, "pii_detected", "victim@example.com")
-	args := sdktest.DecodeBlockArgs(t, h.BlockCalls()[0].Args)
-	if !strings.Contains(args.Message, "line 2") {
-		t.Fatalf("the empty leading part must push the finding to line 2: %q", args.Message)
+	message, _ := protectedMessage(t, h)
+	if !strings.Contains(message, "line 2") {
+		t.Fatalf("the empty leading part must push the finding to line 2: %q", message)
 	}
 }
 
@@ -971,21 +990,21 @@ func TestRegexFindingCapAndMessageBound(t *testing.T) {
 	}
 	h := newHarness(t)
 	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm(content))))
-	if res.Err != nil || !res.PassedThrough {
+	if !requestCompleted(res) {
 		t.Fatalf("err=%v", res.Err)
 	}
-	args := sdktest.DecodeBlockArgs(t, h.BlockCalls()[0].Args)
-	if !strings.Contains(args.Message, "Additional findings omitted") {
-		t.Fatalf("overflow note missing: %q", args.Message)
+	message, _ := protectedMessage(t, h)
+	if !strings.Contains(message, "Additional findings omitted") {
+		t.Fatalf("overflow note missing: %q", message)
 	}
-	if len(args.Message) > 4096 {
-		t.Fatalf("block message unbounded: %d bytes", len(args.Message))
+	if len(message) > 4096 {
+		t.Fatalf("replacement message unbounded: %d bytes", len(message))
 	}
 	// Deterministic ordering: findings render in line order.
-	first := strings.Index(args.Message, "line 1")
-	second := strings.Index(args.Message, "line 2")
+	first := strings.Index(message, "line 1")
+	second := strings.Index(message, "line 2")
 	if first < 0 || second < 0 || first > second {
-		t.Fatalf("findings out of order: %q", args.Message)
+		t.Fatalf("findings out of order: %q", message)
 	}
 }
 
@@ -1002,15 +1021,15 @@ func TestModelFindingCapAndLineValidation(t *testing.T) {
 	h.SetConfig(`{}`)
 	h.StubModelComplete(modelStub(`{"pii":true,"findings":[` + findings + `]}`))
 	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("one line"))))
-	if res.Err != nil || !res.PassedThrough {
+	if !requestCompleted(res) {
 		t.Fatalf("err=%v", res.Err)
 	}
-	args := sdktest.DecodeBlockArgs(t, h.BlockCalls()[0].Args)
-	if !strings.Contains(args.Message, "Additional findings omitted") {
-		t.Fatalf("overflow note missing: %q", args.Message)
+	message, _ := protectedMessage(t, h)
+	if !strings.Contains(message, "Additional findings omitted") {
+		t.Fatalf("overflow note missing: %q", message)
 	}
-	if len(args.Message) > 4096 {
-		t.Fatalf("block message unbounded: %d bytes", len(args.Message))
+	if len(message) > 4096 {
+		t.Fatalf("replacement message unbounded: %d bytes", len(message))
 	}
 
 	// A one-line input with model lines 2 and 999999: both implausible and
@@ -1020,15 +1039,15 @@ func TestModelFindingCapAndLineValidation(t *testing.T) {
 	h2.StubModelComplete(modelStub(
 		`{"pii":true,"findings":[{"type":"email","line":2},{"type":"email","line":999999}]}`))
 	res2 := h2.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("one line"))))
-	if res2.Err != nil || !res2.PassedThrough {
+	if !requestCompleted(res2) {
 		t.Fatalf("err=%v", res2.Err)
 	}
-	args2 := sdktest.DecodeBlockArgs(t, h2.BlockCalls()[0].Args)
-	if strings.Contains(args2.Message, "line 2") || strings.Contains(args2.Message, "999999") {
-		t.Fatalf("implausible lines must be omitted: %q", args2.Message)
+	message2, _ := protectedMessage(t, h2)
+	if strings.Contains(message2, "line 2") || strings.Contains(message2, "999999") {
+		t.Fatalf("implausible lines must be omitted: %q", message2)
 	}
-	if !strings.Contains(args2.Message, "email") {
-		t.Fatalf("the category must still render: %q", args2.Message)
+	if !strings.Contains(message2, "email") {
+		t.Fatalf("the category must still render: %q", message2)
 	}
 }
 
@@ -1131,11 +1150,11 @@ func TestFindingCapBoundaries(t *testing.T) {
 		t.Run("regex/"+itoa(n), func(t *testing.T) {
 			h := newHarness(t)
 			res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm(regexContent(n)))))
-			if res.Err != nil || !res.PassedThrough {
+			if !requestCompleted(res) {
 				t.Fatalf("err=%v", res.Err)
 			}
-			args := sdktest.DecodeBlockArgs(t, h.BlockCalls()[0].Args)
-			note := strings.Contains(args.Message, "Additional findings omitted")
+			message, _ := protectedMessage(t, h)
+			note := strings.Contains(message, "Additional findings omitted")
 			if (n > 20) != note {
 				t.Fatalf("n=%d: note present=%v, want %v", n, note, n > 20)
 			}
@@ -1161,11 +1180,11 @@ func TestFindingCapBoundaries(t *testing.T) {
 			h.SetConfig(`{}`)
 			h.StubModelComplete(modelStub(modelCompletion(n)))
 			res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("one line"))))
-			if res.Err != nil || !res.PassedThrough {
+			if !requestCompleted(res) {
 				t.Fatalf("err=%v", res.Err)
 			}
-			args := sdktest.DecodeBlockArgs(t, h.BlockCalls()[0].Args)
-			note := strings.Contains(args.Message, "Additional findings omitted")
+			message, _ := protectedMessage(t, h)
+			note := strings.Contains(message, "Additional findings omitted")
 			if (n > 20) != note {
 				t.Fatalf("n=%d: note present=%v, want %v", n, note, n > 20)
 			}
@@ -1186,12 +1205,12 @@ func TestEmptyLineNumberingAfterSplitSeq(t *testing.T) {
 	}
 	h := newHarness(t)
 	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm(content))))
-	if res.Err != nil || !res.PassedThrough {
+	if !requestCompleted(res) {
 		t.Fatalf("err=%v", res.Err)
 	}
-	args := sdktest.DecodeBlockArgs(t, h.BlockCalls()[0].Args)
-	if !strings.Contains(args.Message, "line 3") {
-		t.Fatalf("hook-level line numbering wrong: %q", args.Message)
+	message, _ := protectedMessage(t, h)
+	if !strings.Contains(message, "line 3") {
+		t.Fatalf("hook-level line numbering wrong: %q", message)
 	}
 }
 

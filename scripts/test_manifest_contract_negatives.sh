@@ -83,7 +83,7 @@ python3 - "$tmp/missing-grant/pii/plugin.json" << 'PYEOF'
 import json, sys
 f = sys.argv[1]
 d = json.load(open(f))
-d['permissions'] = [p for p in d['permissions'] if p['name'] != 'env.block_request']
+d['permissions'] = [p for p in d['permissions'] if p['name'] != 'env.state_get']
 json.dump(d, open(f, 'w'), indent=2)
 open(f, 'a').write('\n')
 PYEOF

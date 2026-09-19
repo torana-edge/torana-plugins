@@ -142,7 +142,7 @@ var knownPermissions = map[string]bool{
 	"ir.messages.write.other": true, "ir.messages.write.system": true,
 	"ir.messages.write.tool": true, "ir.messages.write.user": true,
 	"ir.model.write": true, "ir.params.write": true,
-	"ir.stream.write": true, "ir.tool_results.write": true, "ir.tools.write": true,
+	"ir.stream.write": true, "ir.tool_result_content.write": true, "ir.tool_result_errors.write": true, "ir.tool_results.write": true, "ir.tools.write": true,
 }
 
 // pluginContract pins one plugin's EXACT approved contract.
@@ -173,10 +173,10 @@ var pluginContracts = map[string]pluginContract{
 	"otel": {hooks: []string{"run_before_request", "run_after_response", "run_on_http_request"},
 		permissions: []string{"env.emit_metric", "env.serve_http"}},
 	"pii": {hooks: []string{"run_before_request"},
-		permissions:   []string{"env.block_request", "env.cache_get", "env.cache_set", "env.model_complete", "env.plugin_config"},
+		permissions:   []string{"env.cache_get", "env.cache_set", "env.model_complete", "env.plugin_config", "env.state_get", "env.state_set", "ir.cache_control.write", "ir.tool_result_content.write", "ir.tool_result_errors.write", "ir.tool_results.write"},
 		conflictsWith: []string{"torana/pii_guard"}},
 	"pii_guard": {hooks: []string{"run_before_request"},
-		permissions:   []string{"env.block_request", "env.plugin_config"},
+		permissions:   []string{"env.plugin_config", "env.state_get", "env.state_set", "ir.cache_control.write", "ir.tool_result_content.write", "ir.tool_result_errors.write", "ir.tool_results.write"},
 		conflictsWith: []string{"torana/pii"}},
 	"schema_translator": {hooks: []string{"run_before_request", "run_on_stream_chunk"},
 		permissions: []string{"env.meta_get", "env.meta_set", "ir.messages.write.assistant", "ir.stream.write", "ir.tools.write"}},

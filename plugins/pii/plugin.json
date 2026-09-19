@@ -7,7 +7,7 @@
   "minimum_torana_version": "0.1.0",
   "failure_mode": "block",
   "repository": "https://github.com/torana-edge/torana-plugins",
-  "description": "Scans tool results through an operator-bound model plus a regex pre-filter and blocks the request if PII is detected",
+  "description": "Scans new tool results through an operator-bound model plus a regex pre-filter and replaces sensitive output with a recoverable tool error",
   "conflicts_with": [
     "torana/pii_guard"
   ],
@@ -18,8 +18,28 @@
   ],
   "permissions": [
     {
-      "name": "env.block_request",
-      "description": "Reject a request whose tool output contains PII"
+      "name": "ir.tool_results.write",
+      "description": "Replace a sensitive tool result with a value-free diagnostic"
+    },
+    {
+      "name": "ir.tool_result_content.write",
+      "description": "Collapse structured sensitive output into one safe diagnostic"
+    },
+    {
+      "name": "ir.tool_result_errors.write",
+      "description": "Mark a protected tool result as a recoverable tool error"
+    },
+    {
+      "name": "ir.cache_control.write",
+      "description": "Preserve and, when visible arms collapse, reposition cache markers around the safe diagnostic"
+    },
+    {
+      "name": "env.state_get",
+      "description": "Replay prior replacements across later turns and restarts"
+    },
+    {
+      "name": "env.state_set",
+      "description": "Remember replacement decisions without storing sensitive values"
     },
     {
       "name": "env.cache_get",
