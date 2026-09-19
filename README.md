@@ -1,11 +1,11 @@
 # Plugins for your workflow
 
 Add one useful behavior to Torana, then make it yours. These are the sources
-for the eleven official catalogue plugins: telemetry, tool policy, checks and
+for eleven maintained plugin examples: telemetry, tool policy, checks and
 optional context experiments.
 
 [Get Torana running](https://github.com/torana-edge/torana-edge/blob/main/docs/QUICKSTART.md) ·
-[Browse the website catalogue](https://torana.sh/plugins/) ·
+[Browse plugin listings](https://torana.sh/plugins/) ·
 [Write a plugin](https://github.com/torana-edge/torana-plugin-sdk/blob/main/docs/FIRST_PLUGIN.md)
 
 ## Choose a plugin
@@ -42,7 +42,7 @@ synthetic credential before that tool result reaches your model provider.
 
 Prefer terminal or agent automation? Each plugin guide covers its configuration
 and lifecycle commands. Other plugins may need their own settings or resource
-bindings; each catalogue entry links to its owning guide.
+bindings; each listing links to its owning guide.
 
 ## Combine deliberately
 
@@ -58,13 +58,14 @@ may be local or remote.
 
 ## Share your own
 
-Your plugin can live in its own repository. You do not need a registry listing
+Your plugin can live in its own repository. You do not need a website listing
 to install it. Go plugins can use Git URLs; Rust projects are cloned and reviewed
 locally before building, including their dependencies and build scripts.
 
 Use the [Go/Rust SDK](https://github.com/torana-edge/torana-plugin-sdk), then
-[request a catalogue listing](https://torana.sh/plugins/submit/) if you would
-like other users to find it. Contributions to the official set are welcome;
+[request a website listing](https://torana.sh/plugins/submit/) if you would
+like other users to find it. Contributions to this maintained example set are
+welcome;
 see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Build and test this repository
@@ -76,13 +77,13 @@ see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Use a sibling SDK checkout or `TORANA_SDK_DIR` for coordinated local development.
 Release builds use the exact SDK pin in `SDK_REF` and each module. Current
-official sources target ABI v1, contract revision 1. Build output stays in
+maintained sources target ABI v1, contract revision 1. Build output stays in
 `dist/`, not source control.
 
-## The auth reference is not a catalogue plugin
+## The auth reference is not a listed plugin
 
 `plugins/auth` is a twelfth, reference-only capability example. It is
-excluded from the public registry and is not an authentication boundary:
+excluded from the public listing and is not an authentication boundary:
 explicit verifier rejection blocks, but unavailable verification and its
 `failure_mode: pass` policy can allow traffic. Do not deploy it as access
 control. The reference remains in the executable release inventory.
