@@ -12,6 +12,8 @@ optional context experiments.
 
 | Plugin | Use it to… |
 | --- | --- |
+| [`pii`](plugins/pii/README.md) | Use a local model for contextual checks of tool output |
+| [`pii_guard`](plugins/pii_guard/README.md) | Block recognizable PII and secrets without a model |
 | [`usage_logger`](plugins/usage_logger/README.md) | See usage without saving prompts |
 | [`tool_governor`](plugins/tool_governor/README.md) | Choose the tools your model sees |
 | [`otel`](plugins/otel/README.md) | Add request metrics |
@@ -19,26 +21,35 @@ optional context experiments.
 | [`intent`](plugins/intent/README.md) | Carry the reason for a tool call |
 | [`keyword_compactor`](plugins/keyword_compactor/README.md) | Trim repeatable tool output without another model |
 | [`compactor`](plugins/compactor/README.md) | Summarize selected historical tool results |
-| [`pii_guard`](plugins/pii_guard/README.md) | Block recognizable PII and secrets without a model |
-| [`pii`](plugins/pii/README.md) | Use a model for contextual checks of tool output |
 | [`cache_tier_selector`](plugins/cache_tier_selector/README.md) | Choose a cache lifetime for a conversation |
 | [`cache_warmer`](plugins/cache_warmer/README.md) | Keep one conversation's cache warm for a bounded gap |
 
-Start with `pii_guard` for useful protection without setting up a model, or
-`usage_logger` for a visible result that does not change payloads. Every guide
-includes settings, exact permissions, required resource bindings, and a way to
-check the result. For a first run, install `pii_guard` from the Torana checkout
+Already running Ollama or another OpenAI-compatible local model? Start with
+`pii` and bind its scanner to that endpoint. It checks obvious patterns first,
+then uses your local model for contextual cases. If you do not have a local
+model ready, start with the deterministic `pii_guard` instead. Install only one;
+their manifests declare them as conflicting.
+
+Every guide includes settings, exact permissions, required resource bindings,
+and a way to check the result. Install your choice from the Torana checkout
 where the proxy is running (use `./torana` for a source build):
+
+```bash
+torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii
+```
+
+Or, without a local model:
 
 ```bash
 torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii_guard
 ```
 
 Installation compiles source locally. It never approves or enables a plugin.
-Open Torana's local control plane, select **pii_guard**, review its two requested
-permissions, then choose **Approve and enable**. Follow the plugin's
-[safe walkthrough](plugins/pii_guard/README.md#try-it-safely) to see it stop a
-synthetic credential before that tool result reaches your model provider.
+Open Torana's local control plane and select the plugin you installed. For
+`pii`, configure the required scanner binding before reviewing its permissions
+and model-call limits. `pii_guard` requests only two permissions and no model
+resource. Follow the [PII guide](plugins/pii/README.md) or the deterministic
+guard's [safe walkthrough](plugins/pii_guard/README.md#try-it-safely).
 
 Prefer terminal or agent automation? Each plugin guide covers its configuration
 and lifecycle commands. Other plugins may need their own settings or resource

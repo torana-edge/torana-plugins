@@ -5,6 +5,10 @@ before the next request reaches the configured model provider. It runs entirely
 inside Torana: there is no scanner model, network destination, credential, or
 clean-result cache to configure.
 
+Use this as your first plugin when you do not already have a local model
+endpoint. If you do, the model-backed [`pii`](../pii/README.md) guard adds
+contextual checks while keeping the same deterministic fast path.
+
 [All plugins](../../README.md#choose-a-plugin) · [Source](main.go) ·
 [Manifest](plugin.json) · [Settings schema](schema.json)
 

@@ -4,6 +4,10 @@ Scan selected tool results with deterministic patterns and an operator-bound
 contextual model. Block the request when a finding is detected. If you want a
 zero-model guard for recognizable values, use [`pii_guard`](../pii_guard/README.md).
 
+This is the recommended first plugin when you already have a local model
+endpoint. Bind the scanner locally so tool output does not make an additional
+trip to a remote model service.
+
 [All plugins](../../README.md#choose-a-plugin) · [Source](main.go) · [Manifest](plugin.json) · [Settings schema](schema.json)
 
 [Measured clean-scan costs](PERFORMANCE.md)
