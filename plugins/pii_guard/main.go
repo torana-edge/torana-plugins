@@ -82,7 +82,7 @@ type finding struct {
 const maxReportedFindings = 20
 
 func init() {
-	sdk.OnBeforeRequest(func(_ context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
 		if err := loadConfig(); err != nil {
 			return sdk.RequestResult{}, err
 		}
@@ -99,8 +99,28 @@ func init() {
 			}
 		}
 
-		for _, message := range req.Messages {
+		mutated := false
+		replayed := map[[2]int]bool{}
+		for messageIndex, message := range req.Messages {
 			for _, result := range sdk.ToolResults(message) {
+				didReplay, err := replayPrior(ctx, message, result)
+				if err != nil {
+					return sdk.RequestResult{}, fmt.Errorf("pii_guard: replay protected result: %w", err)
+				}
+				replayed[[2]int{messageIndex, result.Block}] = didReplay
+				mutated = mutated || didReplay
+			}
+		}
+
+		latest := trailingToolResultMessages(req.Messages)
+		for messageIndex, message := range req.Messages {
+			if !latest[messageIndex] {
+				continue
+			}
+			for _, result := range sdk.ToolResults(message) {
+				if replayed[[2]int{messageIndex, result.Block}] {
+					continue
+				}
 				toolName := result.ToolName
 				if toolName == "" {
 					toolName = nameByID[result.ToolCallId]
@@ -115,11 +135,14 @@ func init() {
 				if len(findings) == 0 {
 					continue
 				}
-				if err := sdk.BlockRequest(422, "sensitive_data_detected", blockMessage(toolName, findings)); err != nil {
-					return sdk.RequestResult{}, fmt.Errorf("pii_guard: block detected content: %w", err)
+				if err := replaceAndRemember(ctx, message, result, blockMessage(toolName, findings)); err != nil {
+					return sdk.RequestResult{}, fmt.Errorf("pii_guard: replace detected content: %w", err)
 				}
-				return sdk.PassRequest(), nil
+				mutated = true
 			}
+		}
+		if mutated {
+			return sdk.ReplaceRequest(req), nil
 		}
 		return sdk.PassRequest(), nil
 	})
@@ -181,7 +204,7 @@ func blockMessage(toolName string, findings []finding) string {
 	if len(toolName) <= 64 && safeToolName.MatchString(toolName) {
 		label = fmt.Sprintf("`%s` output", toolName)
 	}
-	message := fmt.Sprintf("Blocked: sensitive data detected in %s and NOT sent upstream. Found: %s. Remove or replace the value before returning the tool result.", label, strings.Join(parts, ", "))
+	message := fmt.Sprintf("Sensitive output withheld before it reached the model. pii_guard detected %s in %s. Continue without the sensitive value; request a narrower read or skip the affected lines.", strings.Join(parts, ", "), label)
 	if len(findings) > maxReportedFindings {
 		message += " Additional findings omitted."
 	}

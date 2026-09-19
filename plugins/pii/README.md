@@ -1,7 +1,8 @@
 # Check tool output before forwarding it
 
 Scan selected tool results with deterministic patterns and an operator-bound
-contextual model. Block the request when a finding is detected. If you want a
+contextual model. Replace a finding with a recoverable, value-free tool error
+so the primary model can continue safely. If you want a
 zero-model guard for recognizable values, use [`pii_guard`](../pii_guard/README.md).
 
 This is the recommended first plugin when you already have a local model
@@ -69,11 +70,16 @@ Permissions must equal the manifest's requested set; budgets can be lower.
 {
   "digest": "sha256:REPLACE_WITH_YOUR_INSPECTED_DIGEST",
   "permissions": [
-    "env.block_request",
     "env.cache_get",
     "env.cache_set",
     "env.model_complete",
-    "env.plugin_config"
+    "env.plugin_config",
+    "env.state_get",
+    "env.state_set",
+    "ir.cache_control.write",
+    "ir.tool_result_content.write",
+    "ir.tool_result_errors.write",
+    "ir.tool_results.write"
   ],
   "failure_mode": "block",
   "model_services": {
@@ -103,17 +109,17 @@ same inspect/configure/approve/enable flow. Rebuilds need a new digest approval.
 
 ## Try it and check the result
 
-Use synthetic tool output such as `contact: someone@example.com` with a matching tool-call ID. Expect a value-free `pii_detected` block before the primary provider receives it. Also test a clean result and an unavailable scanner. Only complete clean scans are cached; unsupported content or truncation is governed by `on_error`, not cached as clean.
+Use synthetic tool output such as `contact: someone@example.com` with a matching tool-call ID. Expect that result to become a value-free tool error before the primary provider receives it. The model can then skip the affected lines or request a narrower read. Also test a clean result and an unavailable scanner. Only complete clean scans are cached; unsupported content or truncation is governed by `on_error`, not cached as clean.
 
 ## Data and failure behavior
 
-The scanner receives eligible tool-output text. If bound remotely, that text leaves your machine before the primary request is allowed. This is a tool-result guard, not a scanner for all user prompts, a comprehensive DLP system or a guarantee of detection. `on_error: allow` permits undecidable scans; the approval's failure mode separately controls hook failures. Defaults are block.
+The scanner receives eligible tool-output text. If bound remotely, that text leaves your machine before the primary request is allowed. This is a tool-result guard, not a scanner for all user prompts, a comprehensive DLP system or a guarantee of detection. `on_error: allow` permits undecidable scans; the approval's failure mode separately controls hook failures. Defaults are block. Torana durably stores only hashes and safe replacement messages, never the original sensitive output, so the same decisions replay across later turns and restarts. Only the newest tool-result batch is scanned; historical output is changed only when replaying an earlier decision.
 
 ## Combine or disable
 
-Place before plugins that reduce tool output if you want to scan its original
-content. Check that earlier plugins cannot remove the evidence you intend to
-scan. Do not enable this plugin with `pii_guard`: this plugin already performs
+Place before plugins that reduce tool output so it sees the original content.
+Torana rejects a pipeline that places a tool-result writer after a compaction
+gate. Do not enable this plugin with `pii_guard`: this plugin already performs
 the deterministic check before its contextual scan, and the manifests declare
 the pair as conflicting.
 

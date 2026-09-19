@@ -28,7 +28,7 @@ func toolResult(id, name, text string) *pbv1.Message {
 	}}}
 }
 
-func TestRecognizedPatternsBlockWithoutModelOrNetworkCalls(t *testing.T) {
+func TestRecognizedPatternsBecomeRecoverableErrorsWithoutModelOrNetworkCalls(t *testing.T) {
 	tests := []struct {
 		name     string
 		value    string
@@ -47,20 +47,18 @@ func TestRecognizedPatternsBlockWithoutModelOrNetworkCalls(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			h := newHarness(t)
-			result := h.BeforeRequest(&pbv1.ChatRequest{Messages: []*pbv1.Message{toolResult("call-1", "read", test.value)}})
+			req := &pbv1.ChatRequest{Messages: []*pbv1.Message{toolResult("call-1", "read", test.value)}}
+			result := h.BeforeRequest(req)
 			if result.Err != nil {
 				t.Fatalf("hook error: %v", result.Err)
 			}
-			blocks := h.BlockCalls()
-			if len(blocks) != 1 {
-				t.Fatalf("block calls=%d, want 1", len(blocks))
+			resultView := sdk.ToolResults(req.Messages[0])[0]
+			text, ok := sdk.ToolResultScalarText(resultView)
+			if !ok || resultView.IsError == nil || !*resultView.IsError {
+				t.Fatalf("tool result was not converted to an error: %+v", resultView)
 			}
-			args := sdktest.DecodeBlockArgs(t, blocks[0].Args)
-			if args.Status != 422 || args.Code != "sensitive_data_detected" {
-				t.Fatalf("block=%+v", args)
-			}
-			if !strings.Contains(args.Message, test.category) || strings.Contains(args.Message, test.value) {
-				t.Fatalf("unsafe or unhelpful message: %q", args.Message)
+			if !strings.Contains(text, test.category) || strings.Contains(text, test.value) {
+				t.Fatalf("unsafe or unhelpful replacement: %q", text)
 			}
 			for _, call := range h.Calls() {
 				if call.Command == "env.model_complete" || call.Command == "env.http_request" || call.Command == "env.cache_get" || call.Command == "env.cache_set" {
@@ -103,10 +101,12 @@ func TestToolAllowlistAndUnknownName(t *testing.T) {
 	h.StubHostCall("env.plugin_config", func(string) (string, error) {
 		return sdktest.HostResultValue([]byte(`{"tools":["shell"]}`)), nil
 	})
-	if result := h.BeforeRequest(&pbv1.ChatRequest{Messages: []*pbv1.Message{toolResult("call-2", "", secret)}}); result.Err != nil {
+	req := &pbv1.ChatRequest{Messages: []*pbv1.Message{toolResult("call-2", "", secret)}}
+	if result := h.BeforeRequest(req); result.Err != nil {
 		t.Fatalf("unknown tool result=%+v", result)
 	}
-	if len(h.BlockCalls()) != 1 {
+	view := sdk.ToolResults(req.Messages[0])[0]
+	if view.IsError == nil || !*view.IsError {
 		t.Fatal("unknown tool name should err toward scanning")
 	}
 }

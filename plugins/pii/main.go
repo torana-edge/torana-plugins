@@ -1,13 +1,13 @@
 // pii scans tool results (grep/bash/etc. output) before they are forwarded to
 // the cloud upstream. A deterministic regex pre-filter catches high-precision
 // categories; anything else is sent to an operator-bound model for contextual
-// detection. If PII is found the request is vetoed (env.block_request) with an
-// actionable, value-free error so the upstream model can adjust next turn.
+// detection. If PII is found the affected tool result becomes an actionable,
+// value-free tool error so the upstream model can adjust in the same turn.
 //
 // # Ordered-body semantics
 //
-//   - Every message's tool-result blocks are candidates (role-independent,
-//     position-addressed by the ordered seam). Structured content is
+//   - Previously replaced results are replayed from durable state. Only the
+//     trailing batch of otherwise unseen tool results is scanned. Structured content is
 //     COMPLETE or explicitly unscannable: the scan composes every wire-order
 //     TEXT ARM's value of each result (newline-separated, stable line
 //     numbers, explicit-empty arms kept as empty segments); any
@@ -16,10 +16,9 @@
 //     arms are the plugin's own carriers (host/plugin-injected, never
 //     provider content) and are skipped without affecting completeness. An
 //     empty but valid collection is distinct from unsupported content.
-//   - Blocking is an ATTRIBUTED SIDE EFFECT: the verdict goes through
-//     sdk.BlockRequest and the hook returns PassRequest — no content
-//     replacement, no write grant. The host short-circuits downstream plugins
-//     and never reaches upstream.
+//   - A finding replaces only the affected result with an explicit tool error.
+//     The replacement is persisted without retaining the sensitive value and
+//     replayed byte-for-byte on later turns and after restarts.
 //   - max_scan_bytes is a BYTE budget with rune-safe boundary repair (the
 //     old "chars" name was a lie); zero is unbounded.
 //   - The model destination is the required "scanner" resource declared by
@@ -184,15 +183,36 @@ func init() {
 			}
 		}
 
-		// Ordered seam: EVERY message's tool-result blocks are candidates
-		// (no role gate); each block is identified by (message, block).
-		for _, msg := range req.Messages {
+		mutated := false
+		replayed := map[[2]int]bool{}
+		latest := trailingToolResultMessages(req.Messages)
+		for messageIndex, msg := range req.Messages {
 			for _, view := range sdk.ToolResults(msg) {
+				didReplay, err := replayPrior(ctx, msg, view, latest[messageIndex])
+				if err != nil {
+					return sdk.RequestResult{}, fmt.Errorf("pii: replay protected result: %w", err)
+				}
+				replayed[[2]int{messageIndex, view.Block}] = didReplay
+				mutated = mutated || didReplay
+			}
+		}
+
+		// Only the trailing tool-result batch is new work. Older results are
+		// touched solely when the durable replay ledger says Torana replaced
+		// them before.
+		for messageIndex, msg := range req.Messages {
+			if !latest[messageIndex] {
+				continue
+			}
+			for _, view := range sdk.ToolResults(msg) {
+				if replayed[[2]int{messageIndex, view.Block}] {
+					continue
+				}
 				toolName := view.ToolName
 				if toolName == "" {
 					toolName = nameByID[view.ToolCallId]
 					if ambiguousID[view.ToolCallId] {
-						toolName = "" // ambiguous id: err toward scanning via the unknown rule
+						toolName = ""
 					}
 				}
 				if !toolAllowed(toolName) {
@@ -200,27 +220,27 @@ func init() {
 				}
 				ex := extractScannable(view)
 
-				// The deterministic scan runs FIRST over ALL retained text: a PII
-				// fact Torana already detected blocks as pii_detected even when
+				// The deterministic scan runs first: a PII fact Torana can prove
+				// is replaced even when
 				// the extraction is incomplete or the bound scanner service is
 				// misconfigured — on_error governs the UNAVAILABLE contextual
 				// scan, never a deterministic finding already made.
 				if f := regexScan(ex.text); len(f) > 0 {
-					if err := sdk.BlockRequest(422, "pii_detected", blockMessage(toolName, f)); err != nil {
-						return sdk.RequestResult{}, fmt.Errorf("pii: block detected: %w", err)
+					if err := replaceAndRemember(ctx, msg, view, blockMessage(toolName, f), outcomeSensitive); err != nil {
+						return sdk.RequestResult{}, fmt.Errorf("pii: replace detected: %w", err)
 					}
-					return sdk.PassRequest(), nil
+					mutated = true
+					continue
 				}
 				if !ex.complete {
 					// Incomplete extraction: never model-scanned, never cached;
 					// on_error governs the uninspectable remainder.
 					if failClosed() {
-						if err := sdk.BlockRequest(422, "pii_scan_failed",
-							fmt.Sprintf("PII scan unavailable for %s; request blocked (fail-closed). Retry, or set pii.on_error=\"allow\" to forward unscanned.",
-								toolLabel(toolName))); err != nil {
-							return sdk.RequestResult{}, fmt.Errorf("pii: block scan failure: %w", err)
+						replacement := fmt.Sprintf("Tool output withheld because pii could not safely inspect %s. Retry with text-only output, request a narrower read, or skip this result.", toolLabel(toolName))
+						if err := replaceAndRemember(ctx, msg, view, replacement, outcomeTransient); err != nil {
+							return sdk.RequestResult{}, fmt.Errorf("pii: replace scan failure: %w", err)
 						}
-						return sdk.PassRequest(), nil
+						mutated = true
 					}
 					continue
 				}
@@ -238,6 +258,13 @@ func init() {
 					found = false
 				}
 				if found && cached != "" {
+					protected, err := resolveCleanReplay(ctx, msg, view)
+					if err != nil {
+						return sdk.RequestResult{}, fmt.Errorf("pii: clear recovered scan failure: %w", err)
+					}
+					if protected {
+						mutated = true
+					}
 					continue
 				}
 
@@ -251,26 +278,45 @@ func init() {
 					}
 					// Scanner failure. Fail-closed by default.
 					if cfg.OnError == "allow" {
+						protected, resolveErr := resolveCleanReplay(ctx, msg, view)
+						if resolveErr != nil {
+							return sdk.RequestResult{}, fmt.Errorf("pii: clear allowed scan failure: %w", resolveErr)
+						}
+						if protected {
+							mutated = true
+						}
 						continue
 					}
-					if err := sdk.BlockRequest(422, "pii_scan_failed",
-						fmt.Sprintf("PII scan unavailable for %s; request blocked (fail-closed). Retry, or set pii.on_error=\"allow\" to forward unscanned.",
-							toolLabel(toolName))); err != nil {
-						return sdk.RequestResult{}, fmt.Errorf("pii: block scan failure: %w", err)
+					replacement := fmt.Sprintf("Tool output withheld because pii could not complete the safety scan for %s. Retry, request a narrower result, or skip it.", toolLabel(toolName))
+					if err := replaceAndRemember(ctx, msg, view, replacement, outcomeTransient); err != nil {
+						return sdk.RequestResult{}, fmt.Errorf("pii: replace scan failure: %w", err)
 					}
-					return sdk.PassRequest(), nil
+					mutated = true
+					continue
 				}
 				if len(findings) > 0 {
-					if err := sdk.BlockRequest(422, "pii_detected", blockMessage(toolName, findings)); err != nil {
-						return sdk.RequestResult{}, fmt.Errorf("pii: block detected: %w", err)
+					if err := replaceAndRemember(ctx, msg, view, blockMessage(toolName, findings), outcomeSensitive); err != nil {
+						return sdk.RequestResult{}, fmt.Errorf("pii: replace detected: %w", err)
 					}
-					return sdk.PassRequest(), nil
+					mutated = true
+					continue
+				}
+				protected, err := resolveCleanReplay(ctx, msg, view)
+				if err != nil {
+					return sdk.RequestResult{}, fmt.Errorf("pii: clear recovered scan failure: %w", err)
+				}
+				if protected {
+					mutated = true
+					continue
 				}
 				// Complete extraction was scannable and clean: cache the verdict.
 				if err := sdk.CacheSet(cacheKey, "1"); err != nil && !isAdvisory(err) {
 					return sdk.RequestResult{}, fmt.Errorf("pii: cache clean result: %w", err)
 				}
 			}
+		}
+		if mutated {
+			return sdk.ReplaceRequest(req), nil
 		}
 		return sdk.PassRequest(), nil
 	})
@@ -598,9 +644,9 @@ func blockMessage(toolName string, findings []finding) string {
 		}
 	}
 	msg := fmt.Sprintf(
-		"Blocked: PII detected in %s and NOT sent upstream. Found: %s. "+
-			"Do not resend this content; reformulate to exclude or redact these values before returning the tool result.",
-		toolLabel(toolName), strings.Join(parts, ", "))
+		"Sensitive output withheld before it reached the model. pii detected %s in %s. "+
+			"Continue without the sensitive value; request a narrower read or skip the affected lines.",
+		strings.Join(parts, ", "), toolLabel(toolName))
 	if len(findings) > maxReportedFindings {
 		msg += " Additional findings omitted."
 	}
