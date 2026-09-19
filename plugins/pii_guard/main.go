@@ -103,13 +103,6 @@ func init() {
 		replayed := map[[2]int]bool{}
 		for messageIndex, message := range req.Messages {
 			for _, result := range sdk.ToolResults(message) {
-				toolName := result.ToolName
-				if toolName == "" {
-					toolName = nameByID[result.ToolCallId]
-					if ambiguousID[result.ToolCallId] {
-						toolName = ""
-					}
-				}
 				didReplay, err := replayPrior(ctx, message, result)
 				if err != nil {
 					return sdk.RequestResult{}, fmt.Errorf("pii_guard: replay protected result: %w", err)
