@@ -281,6 +281,10 @@ func TestRegexCategoriesBlock(t *testing.T) {
 		{"us ssn", "ssn: 123-45-6789", "us_ssn"},
 		{"aws access key", "key AKIA1234567890ABCDEF", "aws_access_key"},
 		{"private key", "-----BEGIN RSA PRIVATE KEY-----", "private_key"},
+		{"dash api key", "key sk-proj-abcdefghijklmnopqrstuvwxyz123456", "api_key"},
+		{"underscore api key", "key sk_test_torana_demo_not_a_real_key_123", "api_key"},
+		{"restricted api key", "key rk_live_torana_demo_not_a_real_key_123", "api_key"},
+		{"github token", "token ghp_abcdefghijklmnopqrstuvwxyz0123456789", "access_token"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -308,6 +312,10 @@ func TestRegexRequiredLiteralPrefilterMatchesReference(t *testing.T) {
 		"hyphenated-but-not-an-ssn",
 		"AKIA-short",
 		"-----BEGIN but not a private key",
+		"sk-short",
+		"sk_test_short",
+		"rk_live_short",
+		"ghp_short",
 		"contact someone@example.com now",
 		"ssn: 123-45-6789",
 		"key AKIA1234567890ABCDEF",

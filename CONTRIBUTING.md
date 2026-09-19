@@ -1,16 +1,16 @@
-# Contributing to the official plugins
+# Contributing to Torana's plugin examples
 
-Fix a plugin, improve a guide, or propose an addition to the official set.
+Fix a plugin, improve a guide, or propose another maintained example.
 Include a concrete use case and a small reproducible test.
 
 You can also keep a plugin in your own repository and share its install URL.
 Start with the [first-plugin tutorial](https://github.com/torana-edge/torana-plugin-sdk/blob/main/docs/FIRST_PLUGIN.md).
-A catalogue listing is optional and never grants permissions.
+A website listing is optional and never grants permissions.
 
-Official plugins target ABI v1. New or changed plugins must use the repository's
-pinned Go SDK, declare the exact grants they exercise, and remain consistent
-with the executable eleven-module contract table. Ten modules are public catalog
-plugins; `auth` remains a reference-only integration but is still part of the
+Plugins in this repository target ABI v1. New or changed plugins must use the
+repository's pinned Go SDK, declare the exact grants they exercise, and remain consistent
+with the executable twelve-module contract table. Eleven modules are public
+examples; `auth` remains a reference-only integration but is still part of the
 release inventory.
 
 ## Local setup

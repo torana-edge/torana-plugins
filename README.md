@@ -1,11 +1,11 @@
 # Plugins for your workflow
 
 Add one useful behavior to Torana, then make it yours. These are the sources
-for the ten official catalogue plugins: telemetry, tool policy, checks and
+for eleven maintained plugin examples: telemetry, tool policy, checks and
 optional context experiments.
 
 [Get Torana running](https://github.com/torana-edge/torana-edge/blob/main/docs/QUICKSTART.md) ·
-[Browse the website catalogue](https://torana.sh/plugins/) ·
+[Browse plugin listings](https://torana.sh/plugins/) ·
 [Write a plugin](https://github.com/torana-edge/torana-plugin-sdk/blob/main/docs/FIRST_PLUGIN.md)
 
 ## Choose a plugin
@@ -19,28 +19,30 @@ optional context experiments.
 | [`intent`](plugins/intent/README.md) | Carry the reason for a tool call |
 | [`keyword_compactor`](plugins/keyword_compactor/README.md) | Trim repeatable tool output without another model |
 | [`compactor`](plugins/compactor/README.md) | Summarize selected historical tool results |
-| [`pii`](plugins/pii/README.md) | Check tool output before forwarding it |
+| [`pii_guard`](plugins/pii_guard/README.md) | Block recognizable PII and secrets without a model |
+| [`pii`](plugins/pii/README.md) | Use a model for contextual checks of tool output |
 | [`cache_tier_selector`](plugins/cache_tier_selector/README.md) | Choose a cache lifetime for a conversation |
 | [`cache_warmer`](plugins/cache_warmer/README.md) | Keep one conversation's cache warm for a bounded gap |
 
-Start with `usage_logger` if you want a visible result without changing
-payloads. Every guide includes settings, exact permissions, required resource
-bindings, and a way to check the result. For a first run, install it from the
-Torana checkout where the proxy is running (use `./torana` for a source build):
+Start with `pii_guard` for useful protection without setting up a model, or
+`usage_logger` for a visible result that does not change payloads. Every guide
+includes settings, exact permissions, required resource bindings, and a way to
+check the result. For a first run, install `pii_guard` from the Torana checkout
+where the proxy is running (use `./torana` for a source build):
 
 ```bash
-torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/usage_logger
+torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii_guard
 ```
 
 Installation compiles source locally. It never approves or enables a plugin.
-Open Torana's local control plane, select **usage_logger**, review its requested
-file access and retention budget, then choose **Approve and enable**. Send
-another request from your harness and [check the local record](plugins/usage_logger/README.md#try-it-and-check-the-result).
+Open Torana's local control plane, select **pii_guard**, review its two requested
+permissions, then choose **Approve and enable**. Follow the plugin's
+[safe walkthrough](plugins/pii_guard/README.md#try-it-safely) to see it stop a
+synthetic credential before that tool result reaches your model provider.
 
-Prefer terminal or agent automation? Follow the plugin's
-[CLI setup guide](plugins/usage_logger/README.md#configure). Other plugins may
-need their own settings or resource bindings; each catalogue entry links to
-its owning guide.
+Prefer terminal or agent automation? Each plugin guide covers its configuration
+and lifecycle commands. Other plugins may need their own settings or resource
+bindings; each listing links to its owning guide.
 
 ## Combine deliberately
 
@@ -50,18 +52,20 @@ Put `tool_governor` before `intent` and `schema_translator`. Put optional
 data flow and other ordering considerations.
 
 Torana runs locally, but plugins with approved model or network resources may
-send data to those destinations. The PII scanner and model compactor are not
-necessarily local: you choose their model-service bindings.
+send data to those destinations. `pii_guard` uses neither. The model-backed PII
+scanner and model compactor use the model-service bindings you choose, which
+may be local or remote.
 
 ## Share your own
 
-Your plugin can live in its own repository. You do not need a registry listing
+Your plugin can live in its own repository. You do not need a website listing
 to install it. Go plugins can use Git URLs; Rust projects are cloned and reviewed
 locally before building, including their dependencies and build scripts.
 
 Use the [Go/Rust SDK](https://github.com/torana-edge/torana-plugin-sdk), then
-[request a catalogue listing](https://torana.sh/plugins/submit/) if you would
-like other users to find it. Contributions to the official set are welcome;
+[request a website listing](https://torana.sh/plugins/submit/) if you would
+like other users to find it. Contributions to this maintained example set are
+welcome;
 see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Build and test this repository
@@ -73,13 +77,13 @@ see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Use a sibling SDK checkout or `TORANA_SDK_DIR` for coordinated local development.
 Release builds use the exact SDK pin in `SDK_REF` and each module. Current
-official sources target ABI v1, contract revision 1. Build output stays in
+maintained sources target ABI v1, contract revision 1. Build output stays in
 `dist/`, not source control.
 
-## The auth reference is not a catalogue plugin
+## The auth reference is not a listed plugin
 
-`plugins/auth` is an eleventh, reference-only capability example. It is
-excluded from the public registry and is not an authentication boundary:
+`plugins/auth` is a twelfth, reference-only capability example. It is
+excluded from the public listing and is not an authentication boundary:
 explicit verifier rejection blocks, but unavailable verification and its
 `failure_mode: pass` policy can allow traffic. Do not deploy it as access
 control. The reference remains in the executable release inventory.

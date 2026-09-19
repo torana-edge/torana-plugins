@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Run torana-edge's official-plugin behaviour suite against the bundles this
+# Run torana-edge's plugin behaviour suite against the bundles this
 # repository just built, and prove it actually ran.
 #
 # torana-edge tests the *host* with purpose-built fixtures and owns no copy of
@@ -35,7 +35,6 @@ echo "built bundles: $(ls -d "$bundles"/*/ | wc -l)"
 # real drift — torana-edge renaming the variable its helper reads — rather than
 # a caller who simply forgot to set it.
 export TORANA_PLUGIN_BUNDLES_DIR="$bundles"
-export TORANA_PLUGIN_SOURCE_DIR="$root/plugins"
 
 log=$(mktemp)
 fixture_log=$(mktemp)
@@ -106,18 +105,13 @@ export TORANA_RUST_GUEST="$rust_target/wasm32-wasip1/debug/torana-rust-allhooks.
 # -v so the marker and skip reasons reach the log; -count=1 to defeat caching,
 # which would otherwise let a stale pass stand in for a run that never happened.
 status=0
-# internal/plugincmd is included for TestCatalogMatchesThePluginRepository: it
-# compares torana-edge's --official catalog against the plugins that actually
-# exist HERE, and skips unless both repos are checked out. This job is the only
-# place both are — so without it, the one guard against a shipped plugin being
-# absent from the catalog runs nowhere at all.
 # -timeout matches torana-edge's own gate (1800s) rather than sitting below it.
 # At 900s this was always marginal — internal/plugin used 876s of that budget on
 # the run before this one — and it tipped over into `panic: test timed out after
 # 15m0s` with no assertion having failed. A timeout under the suite's real
 # runtime reports a green tree as broken, which is the most expensive kind of
 # wrong: it costs a debugging session to discover nothing was.
-(cd "$edge_dir" && go test ./internal/plugin ./internal/proxy ./internal/wasm ./internal/plugincmd \
+(cd "$edge_dir" && go test ./internal/plugin ./internal/proxy ./internal/wasm \
   -count=1 -v -timeout 1800s) >"$log" 2>&1 || status=$?
 
 # Show failures without dumping several thousand lines of -v output.

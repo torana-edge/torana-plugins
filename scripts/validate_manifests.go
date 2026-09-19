@@ -153,7 +153,7 @@ type pluginContract struct {
 	conflictsWith    []string
 }
 
-// pluginContracts is the executable eleven-plugin release contract. Every
+// pluginContracts is the executable twelve-plugin release contract. Every
 // manifest must match its row exactly.
 var pluginContracts = map[string]pluginContract{
 	"auth": {hooks: []string{"run_before_request"},
@@ -173,7 +173,11 @@ var pluginContracts = map[string]pluginContract{
 	"otel": {hooks: []string{"run_before_request", "run_after_response", "run_on_http_request"},
 		permissions: []string{"env.emit_metric", "env.serve_http"}},
 	"pii": {hooks: []string{"run_before_request"},
-		permissions: []string{"env.block_request", "env.cache_get", "env.cache_set", "env.model_complete", "env.plugin_config"}},
+		permissions:   []string{"env.block_request", "env.cache_get", "env.cache_set", "env.model_complete", "env.plugin_config"},
+		conflictsWith: []string{"torana/pii_guard"}},
+	"pii_guard": {hooks: []string{"run_before_request"},
+		permissions:   []string{"env.block_request", "env.plugin_config"},
+		conflictsWith: []string{"torana/pii"}},
 	"schema_translator": {hooks: []string{"run_before_request", "run_on_stream_chunk"},
 		permissions: []string{"env.meta_get", "env.meta_set", "ir.messages.write.assistant", "ir.stream.write", "ir.tools.write"}},
 	"tool_governor": {hooks: []string{"run_before_request"},

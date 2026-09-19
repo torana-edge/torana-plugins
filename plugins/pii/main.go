@@ -110,6 +110,10 @@ var piiPatterns = []struct {
 	{"us_ssn", "-", regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)},
 	{"aws_access_key", "AKIA", regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`)},
 	{"private_key", "-----BEGIN ", regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`)},
+	{"api_key", "sk-", regexp.MustCompile(`\bsk-(?:proj-|svcacct-|ant-)?[A-Za-z0-9_-]{20,}\b`)},
+	{"api_key", "sk_", regexp.MustCompile(`\bsk_(?:live|test)_[A-Za-z0-9_]{16,}\b`)},
+	{"api_key", "rk_", regexp.MustCompile(`\brk_(?:live|test)_[A-Za-z0-9_]{16,}\b`)},
+	{"access_token", "gh", regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{20,255})\b`)},
 }
 
 type finding struct {
