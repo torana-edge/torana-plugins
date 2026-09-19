@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "tools": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": [
+        "*"
+      ],
+      "description": "Tool-name allowlist; * scans every tool result."
+    }
+  }
+}

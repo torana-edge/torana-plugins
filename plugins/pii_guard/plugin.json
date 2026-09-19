@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "id": "torana/pii_guard",
+  "name": "pii_guard",
+  "version": "0.1.0",
+  "abi_version": "v1",
+  "minimum_torana_version": "0.1.0",
+  "failure_mode": "block",
+  "repository": "https://github.com/torana-edge/torana-plugins",
+  "description": "Blocks high-confidence PII and secret patterns in tool results without calling a model or network service",
+  "conflicts_with": [
+    "torana/pii"
+  ],
+  "hooks": [
+    {
+      "name": "run_before_request"
+    }
+  ],
+  "permissions": [
+    {
+      "name": "env.block_request",
+      "description": "Reject a request whose tool output contains a recognized sensitive-data pattern"
+    },
+    {
+      "name": "env.plugin_config",
+      "description": "Read plugins.config.pii_guard (tools)"
+    }
+  ]
+}

@@ -1,7 +1,7 @@
 # Plugins for your workflow
 
 Add one useful behavior to Torana, then make it yours. These are the sources
-for the ten official catalogue plugins: telemetry, tool policy, checks and
+for the eleven official catalogue plugins: telemetry, tool policy, checks and
 optional context experiments.
 
 [Get Torana running](https://github.com/torana-edge/torana-edge/blob/main/docs/QUICKSTART.md) ·
@@ -19,28 +19,30 @@ optional context experiments.
 | [`intent`](plugins/intent/README.md) | Carry the reason for a tool call |
 | [`keyword_compactor`](plugins/keyword_compactor/README.md) | Trim repeatable tool output without another model |
 | [`compactor`](plugins/compactor/README.md) | Summarize selected historical tool results |
-| [`pii`](plugins/pii/README.md) | Check tool output before forwarding it |
+| [`pii_guard`](plugins/pii_guard/README.md) | Block recognizable PII and secrets without a model |
+| [`pii`](plugins/pii/README.md) | Use a model for contextual checks of tool output |
 | [`cache_tier_selector`](plugins/cache_tier_selector/README.md) | Choose a cache lifetime for a conversation |
 | [`cache_warmer`](plugins/cache_warmer/README.md) | Keep one conversation's cache warm for a bounded gap |
 
-Start with `usage_logger` if you want a visible result without changing
-payloads. Every guide includes settings, exact permissions, required resource
-bindings, and a way to check the result. For a first run, install it from the
-Torana checkout where the proxy is running (use `./torana` for a source build):
+Start with `pii_guard` for useful protection without setting up a model, or
+`usage_logger` for a visible result that does not change payloads. Every guide
+includes settings, exact permissions, required resource bindings, and a way to
+check the result. For a first run, install `pii_guard` from the Torana checkout
+where the proxy is running (use `./torana` for a source build):
 
 ```bash
-torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/usage_logger
+torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii_guard
 ```
 
 Installation compiles source locally. It never approves or enables a plugin.
-Open Torana's local control plane, select **usage_logger**, review its requested
-file access and retention budget, then choose **Approve and enable**. Send
-another request from your harness and [check the local record](plugins/usage_logger/README.md#try-it-and-check-the-result).
+Open Torana's local control plane, select **pii_guard**, review its two requested
+permissions, then choose **Approve and enable**. Follow the plugin's
+[safe walkthrough](plugins/pii_guard/README.md#try-it-safely) to see it stop a
+synthetic credential before that tool result reaches your model provider.
 
-Prefer terminal or agent automation? Follow the plugin's
-[CLI setup guide](plugins/usage_logger/README.md#configure). Other plugins may
-need their own settings or resource bindings; each catalogue entry links to
-its owning guide.
+Prefer terminal or agent automation? Each plugin guide covers its configuration
+and lifecycle commands. Other plugins may need their own settings or resource
+bindings; each catalogue entry links to its owning guide.
 
 ## Combine deliberately
 
@@ -50,8 +52,9 @@ Put `tool_governor` before `intent` and `schema_translator`. Put optional
 data flow and other ordering considerations.
 
 Torana runs locally, but plugins with approved model or network resources may
-send data to those destinations. The PII scanner and model compactor are not
-necessarily local: you choose their model-service bindings.
+send data to those destinations. `pii_guard` uses neither. The model-backed PII
+scanner and model compactor use the model-service bindings you choose, which
+may be local or remote.
 
 ## Share your own
 
@@ -78,7 +81,7 @@ official sources target ABI v1, contract revision 1. Build output stays in
 
 ## The auth reference is not a catalogue plugin
 
-`plugins/auth` is an eleventh, reference-only capability example. It is
+`plugins/auth` is a twelfth, reference-only capability example. It is
 excluded from the public registry and is not an authentication boundary:
 explicit verifier rejection blocks, but unavailable verification and its
 `failure_mode: pass` policy can allow traffic. Do not deploy it as access

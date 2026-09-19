@@ -1,6 +1,8 @@
 # Check tool output before forwarding it
 
-Scan selected tool results with deterministic patterns and an operator-bound contextual model. Block the request when a finding is detected.
+Scan selected tool results with deterministic patterns and an operator-bound
+contextual model. Block the request when a finding is detected. If you want a
+zero-model guard for recognizable values, use [`pii_guard`](../pii_guard/README.md).
 
 [All plugins](../../README.md#choose-a-plugin) · [Source](main.go) · [Manifest](plugin.json) · [Settings schema](schema.json)
 
@@ -45,7 +47,12 @@ Set the snapshot's `config` object to the following, preserving its `revision`:
 torana plugin config apply pii --file plugin-settings.json --yes
 ```
 
-The `scanner` model service is required even when a regex may detect a finding first. The example assumes a local OpenAI-compatible server. Add provider `local-scanner` with URL `http://127.0.0.1:11434`, format `openai`, auth mode `none`, then bind the model you actually loaded. Adjust limits within the manifest ceilings.
+The `scanner` model service is required even when a deterministic pattern may
+detect a finding first. The example assumes a local OpenAI-compatible server.
+Add provider `local-scanner` with URL `http://127.0.0.1:11434`, format `openai`,
+auth mode `none`, then bind the model you actually loaded. Adjust limits within
+the manifest ceilings. A remote binding sends eligible tool text to that
+provider; call this setup local only when the bound endpoint and model are local.
 
 ## Approve and enable
 
@@ -100,7 +107,11 @@ The scanner receives eligible tool-output text. If bound remotely, that text lea
 
 ## Combine or disable
 
-Place before plugins that reduce tool output if you want to scan its original content. Check that earlier plugins cannot remove the evidence you intend to scan.
+Place before plugins that reduce tool output if you want to scan its original
+content. Check that earlier plugins cannot remove the evidence you intend to
+scan. Do not enable this plugin with `pii_guard`: this plugin already performs
+the deterministic check before its contextual scan, and the manifests declare
+the pair as conflicting.
 
 ```bash
 torana plugin disable pii --yes
