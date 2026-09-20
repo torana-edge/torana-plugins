@@ -53,10 +53,12 @@ only when replaying a decision the plugin already made.
 ## Coverage and boundary
 
 The deterministic guard recognizes a deliberately conservative set of common
-shapes: email addresses, US SSNs, AWS access-key IDs, PEM private-key headers,
-selected `sk-`/`sk_` API keys, and GitHub access tokens. Unmatched text is not a
-claim that the result is clean. The plugin scans tool-result text, not arbitrary
-files, user prompts, tool arguments, headers, images, or every possible secret.
+shapes: US SSNs, AWS access-key IDs, PEM private-key headers, selected
+`sk-`/`sk_` API keys, and GitHub access tokens. Email addresses are allowed by
+default because a pattern alone cannot distinguish public Git metadata from a
+private address. Unmatched text is not a claim that the result is clean. The
+plugin scans tool-result text, not arbitrary files, user prompts, tool
+arguments, headers, images, or every possible secret.
 
 For names, addresses, prose, unfamiliar credentials, and other contextual
 cases, use the model-backed [`pii`](../pii/README.md) plugin instead. The two

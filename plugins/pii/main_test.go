@@ -171,7 +171,7 @@ func TestExtractScannableTable(t *testing.T) {
 // fact in retained text blocks as pii_detected even when an unsupported part
 // makes the extraction incomplete, under BOTH on_error modes.
 func TestKnownPIIBlocksDespiteUnsupportedPart(t *testing.T) {
-	content := "contact victim@example.com"
+	content := "key sk_test_torana_demo_not_a_real_key_123"
 	for name, onError := range map[string]string{"block": "block", "allow": "allow"} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)
@@ -180,7 +180,7 @@ func TestKnownPIIBlocksDespiteUnsupportedPart(t *testing.T) {
 			if !requestCompleted(res) {
 				t.Fatalf("err=%v", res.Err)
 			}
-			assertBlocked(t, h, "pii_detected", "victim@example.com")
+			assertBlocked(t, h, "pii_detected", "sk_test_torana_demo_not_a_real_key_123")
 		})
 	}
 
@@ -205,13 +205,13 @@ func TestKnownPIIBlocksDespiteUnsupportedPart(t *testing.T) {
 
 func TestFreeformToolOutputIsScanned(t *testing.T) {
 	h := newHarness(t)
-	msg := toolMsg("call_1", "exec", textArm("contact victim@example.com"))
+	msg := toolMsg("call_1", "exec", textArm("key sk_test_torana_demo_not_a_real_key_123"))
 	msg.Blocks[0].GetToolResult().InvocationKind = pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM
 	res := h.BeforeRequest(reqWith(msg))
 	if !requestCompleted(res) {
 		t.Fatalf("err=%v passed=%v", res.Err, res.PassedThrough)
 	}
-	assertBlocked(t, h, "pii_detected", "victim@example.com")
+	assertBlocked(t, h, "pii_detected", "sk_test_torana_demo_not_a_real_key_123")
 }
 
 // TestUnknownUnscannableContentFollowsOnError — incomplete extraction with NO
@@ -278,7 +278,7 @@ func TestUserRoleResultIsACandidate(t *testing.T) {
 		{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "u"}}},
 		{Kind: &pbv1.RequestBlock_ToolResult{ToolResult: &pbv1.RequestToolResultBlock{
 			ToolCallId: "c1", ToolName: "read",
-			Content: []*pbv1.ToolResultContentBlock{{Kind: &pbv1.ToolResultContentBlock_Text{Text: &pbv1.ToolResultTextBlock{Text: "contact someone@example.com"}}}},
+			Content: []*pbv1.ToolResultContentBlock{{Kind: &pbv1.ToolResultContentBlock_Text{Text: &pbv1.ToolResultTextBlock{Text: "key sk_test_torana_demo_not_a_real_key_123"}}}},
 		}}},
 	}}
 	h := newHarness(t)
@@ -286,7 +286,7 @@ func TestUserRoleResultIsACandidate(t *testing.T) {
 	if !requestCompleted(res) {
 		t.Fatalf("err=%v", res.Err)
 	}
-	assertBlocked(t, h, "pii_detected", "someone@example.com")
+	assertBlocked(t, h, "pii_detected", "sk_test_torana_demo_not_a_real_key_123")
 }
 
 // TestRegexCategoriesBlock — each deterministic category blocks with the
@@ -295,7 +295,6 @@ func TestRegexCategoriesBlock(t *testing.T) {
 	cases := []struct {
 		name, content, wantType string
 	}{
-		{"email", "contact someone@example.com now", "email"},
 		{"us ssn", "ssn: 123-45-6789", "us_ssn"},
 		{"aws access key", "key AKIA1234567890ABCDEF", "aws_access_key"},
 		{"private key", "-----BEGIN RSA PRIVATE KEY-----", "private_key"},
@@ -320,6 +319,19 @@ func TestRegexCategoriesBlock(t *testing.T) {
 				t.Fatalf("replacement must carry the line number: %q", message)
 			}
 		})
+	}
+}
+
+func TestEmailUsesContextualScanner(t *testing.T) {
+	h := newHarness(t)
+	h.SetConfig(`{}`)
+	h.StubModelComplete(modelStub(`{"pii":false,"findings":[]}`))
+	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("commit author someone@example.com"))))
+	if res.Err != nil || !res.PassedThrough {
+		t.Fatalf("public email should follow the contextual scanner verdict: %+v", res)
+	}
+	if n := countCommand(h, "env.model_complete"); n != 1 {
+		t.Fatalf("email triggered %d contextual scans, want 1", n)
 	}
 }
 
@@ -395,27 +407,27 @@ func regexScanWithoutPrefilter(content string) []finding {
 // ambiguous and err toward scanning, in either order and for same-name
 // duplicates.
 func TestDuplicateToolCallIDsAmbiguous(t *testing.T) {
-	email := "contact someone@example.com"
+	sensitive := "key sk_test_torana_demo_not_a_real_key_123"
 	for name, mk := range map[string]func() *pbv1.ChatRequest{
 		"read then excluded": func() *pbv1.ChatRequest {
 			return &pbv1.ChatRequest{Messages: []*pbv1.Message{
 				{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "same", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
 				{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "same", Name: "excluded", ArgumentsJson: []byte(`{}`)}}}}},
-				toolMsg("same", "", textArm(email)),
+				toolMsg("same", "", textArm(sensitive)),
 			}}
 		},
 		"excluded then read": func() *pbv1.ChatRequest {
 			return &pbv1.ChatRequest{Messages: []*pbv1.Message{
 				{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "same", Name: "excluded", ArgumentsJson: []byte(`{}`)}}}}},
 				{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "same", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
-				toolMsg("same", "", textArm(email)),
+				toolMsg("same", "", textArm(sensitive)),
 			}}
 		},
 		"same-name duplicates": func() *pbv1.ChatRequest {
 			return &pbv1.ChatRequest{Messages: []*pbv1.Message{
 				{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "same", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
 				{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "same", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
-				toolMsg("same", "", textArm(email)),
+				toolMsg("same", "", textArm(sensitive)),
 			}}
 		},
 		"reuse in a later message": func() *pbv1.ChatRequest {
@@ -423,7 +435,7 @@ func TestDuplicateToolCallIDsAmbiguous(t *testing.T) {
 				{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "same", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
 				{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "same", Name: "excluded", ArgumentsJson: []byte(`{}`)}}}}},
 				{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "later"}}}}},
-				toolMsg("same", "", textArm(email)),
+				toolMsg("same", "", textArm(sensitive)),
 			}}
 		},
 	} {
@@ -446,7 +458,7 @@ func TestDuplicateToolCallIDsAmbiguous(t *testing.T) {
 	req := &pbv1.ChatRequest{Messages: []*pbv1.Message{
 		{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "same", Name: "read", ArgumentsJson: []byte(`{}`)}}}}},
 		{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{Id: "same", Name: "excluded", ArgumentsJson: []byte(`{}`)}}}}},
-		toolMsg("same", "read", textArm("contact someone@example.com")),
+		toolMsg("same", "read", textArm("key sk_test_torana_demo_not_a_real_key_123")),
 	}}
 	res := h.BeforeRequest(req)
 	if !requestCompleted(res) {
@@ -523,7 +535,7 @@ func TestCacheRefusalClasses(t *testing.T) {
 func TestDeniedReplayWriteCannotReturnSuccess(t *testing.T) {
 	h := newHarness(t)
 	h.DenyPermission("env.state_compare_and_set")
-	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("contact someone@example.com"))))
+	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("key sk_test_torana_demo_not_a_real_key_123"))))
 	if res.Err == nil || res.PassedThrough {
 		t.Fatalf("denied replay write must fail the hook, passed=%v err=%v", res.PassedThrough, res.Err)
 	}
@@ -532,28 +544,28 @@ func TestDeniedReplayWriteCannotReturnSuccess(t *testing.T) {
 // TestAllowlistSemantics — ["read"] scans only read; ["*"] and empty scan
 // all; an unknown name with an allowlist still scans.
 func TestAllowlistSemantics(t *testing.T) {
-	email := "contact someone@example.com"
+	sensitive := "key sk_test_torana_demo_not_a_real_key_123"
 	h := newHarness(t)
 	h.SetConfig(`{"tools":["read"]}`)
-	h.BeforeRequest(reqWith(toolMsg("c1", "grep", textArm(email))))
+	h.BeforeRequest(reqWith(toolMsg("c1", "grep", textArm(sensitive))))
 	if _, ok := protectedMessage(t, h); ok {
 		t.Fatal("grep must not be scanned under the read-only allowlist")
 	}
-	h.BeforeRequest(reqWith(toolMsg("c2", "read", textArm(email))))
+	h.BeforeRequest(reqWith(toolMsg("c2", "read", textArm(sensitive))))
 	if _, ok := protectedMessage(t, h); !ok {
 		t.Fatal("read must be scanned under the allowlist")
 	}
 
 	h2 := newHarness(t)
 	h2.SetConfig(`{"tools":["*"]}`)
-	h2.BeforeRequest(reqWith(toolMsg("c1", "anything", textArm(email))))
+	h2.BeforeRequest(reqWith(toolMsg("c1", "anything", textArm(sensitive))))
 	if _, ok := protectedMessage(t, h2); !ok {
 		t.Fatal("* must scan every tool")
 	}
 
 	h3 := newHarness(t)
 	h3.SetConfig(`{"tools":["read"]}`)
-	h3.BeforeRequest(reqWith(toolMsg("c1", "", textArm(email))))
+	h3.BeforeRequest(reqWith(toolMsg("c1", "", textArm(sensitive))))
 	if _, ok := protectedMessage(t, h3); !ok {
 		t.Fatal("an unknown tool name with an allowlist must still scan")
 	}
@@ -850,11 +862,11 @@ func TestScannerModelServiceContract(t *testing.T) {
 	// bound model service when it already has a conclusive finding.
 	h2 := newHarness(t)
 	h2.StubModelComplete(modelStub(`{"pii":false,"findings":[]}`))
-	res2 := h2.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("contact someone@example.com"))))
+	res2 := h2.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("key sk_test_torana_demo_not_a_real_key_123"))))
 	if !requestCompleted(res2) {
 		t.Fatalf("err=%v", res2.Err)
 	}
-	assertBlocked(t, h2, "pii_detected", "someone@example.com")
+	assertBlocked(t, h2, "pii_detected", "sk_test_torana_demo_not_a_real_key_123")
 	if n := countCommand(h2, "env.model_complete"); n != 0 {
 		t.Fatalf("regex finding made %d model calls, want zero", n)
 	}
@@ -864,7 +876,7 @@ func TestScannerModelServiceContract(t *testing.T) {
 // The guard changes the request in place and still permits upstream recovery.
 func TestReplacementReturnsRequest(t *testing.T) {
 	h := newHarness(t)
-	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("contact someone@example.com"))))
+	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("key sk_test_torana_demo_not_a_real_key_123"))))
 	if res.Err != nil || res.PassedThrough || res.Request == nil {
 		t.Fatalf("a protected result must return replace_request, result=%+v", res)
 	}
@@ -969,11 +981,11 @@ func TestDeterminismOverIdenticalRequests(t *testing.T) {
 // line 1.
 func TestEmptyPartPreservesLineBoundary(t *testing.T) {
 	h := newHarness(t)
-	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm(""), textArm("contact victim@example.com"))))
+	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm(""), textArm("key sk_test_torana_demo_not_a_real_key_123"))))
 	if !requestCompleted(res) {
 		t.Fatalf("err=%v", res.Err)
 	}
-	assertBlocked(t, h, "pii_detected", "victim@example.com")
+	assertBlocked(t, h, "pii_detected", "sk_test_torana_demo_not_a_real_key_123")
 	message, _ := protectedMessage(t, h)
 	if !strings.Contains(message, "line 2") {
 		t.Fatalf("the empty leading part must push the finding to line 2: %q", message)
@@ -986,7 +998,7 @@ func TestEmptyPartPreservesLineBoundary(t *testing.T) {
 func TestRegexFindingCapAndMessageBound(t *testing.T) {
 	content := ""
 	for i := 0; i < 100; i++ {
-		content += "line with someone" + itoa(i) + "@example.com\n"
+		content += "key sk_test_torana_demo_not_a_real_key_123\n"
 	}
 	h := newHarness(t)
 	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm(content))))
@@ -1138,11 +1150,11 @@ func TestBlockMessageDirectBound(t *testing.T) {
 // TestFindingCapBoundaries — cap-1, cap, and cap+1 for BOTH producers: the
 // note appears only past the cap, and the message stays bounded.
 func TestFindingCapBoundaries(t *testing.T) {
-	// Regex producer: one unique email per line.
+	// Regex producer: one finding per line.
 	regexContent := func(n int) string {
 		var b strings.Builder
 		for i := 0; i < n; i++ {
-			b.WriteString("someone" + itoa(i) + "@example.com\n")
+			b.WriteString("key sk_test_torana_demo_not_a_real_key_123\n")
 		}
 		return b.String()
 	}
@@ -1195,7 +1207,7 @@ func TestFindingCapBoundaries(t *testing.T) {
 // TestEmptyLineNumberingAfterSplitSeq — leading, middle, and trailing empty
 // lines keep their positions with the allocation-free iterator.
 func TestEmptyLineNumberingAfterSplitSeq(t *testing.T) {
-	content := "\n\ncontact someone@example.com\n\n"
+	content := "\n\nkey sk_test_torana_demo_not_a_real_key_123\n\n"
 	findings := regexScan(content)
 	if len(findings) != 1 {
 		t.Fatalf("findings=%d, want 1", len(findings))
@@ -1220,7 +1232,7 @@ func TestEmptyLineNumberingAfterSplitSeq(t *testing.T) {
 func BenchmarkRegexScanLargeSuffix(b *testing.B) {
 	var sb strings.Builder
 	for i := 0; i < 21; i++ {
-		sb.WriteString("someone" + itoa(i) + "@example.com\n")
+		sb.WriteString("key sk_test_torana_demo_not_a_real_key_123\n")
 	}
 	for i := 0; i < 100_000; i++ {
 		sb.WriteString("noise line without matches\n")
