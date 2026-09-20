@@ -1,7 +1,7 @@
 # Plugins for your workflow
 
 Add one useful behavior to Torana, then make it yours. These are the sources
-for eleven maintained plugin examples: telemetry, tool policy, checks and
+for twelve maintained plugin examples: routing, telemetry, tool policy, checks and
 optional context experiments.
 
 [Get Torana running](https://github.com/torana-edge/torana-edge/blob/main/docs/QUICKSTART.md) ·
@@ -12,6 +12,7 @@ optional context experiments.
 
 | Plugin | Use it to… |
 | --- | --- |
+| [`decision_router`](plugins/decision_router/README.md) | Route a conversation with a closed-set System One decision |
 | [`pii`](plugins/pii/README.md) | Use a local model for contextual checks of tool output |
 | [`pii_guard`](plugins/pii_guard/README.md) | Block recognizable PII and secrets without a model |
 | [`usage_logger`](plugins/usage_logger/README.md) | See usage without saving prompts |
@@ -94,7 +95,7 @@ maintained sources target ABI v1, contract revision 1. Build output stays in
 
 ## The auth reference is not a listed plugin
 
-`plugins/auth` is a twelfth, reference-only capability example. It is
+`plugins/auth` is a thirteenth, reference-only capability example. It is
 excluded from the public listing and is not an authentication boundary:
 explicit verifier rejection blocks, but unavailable verification and its
 `failure_mode: pass` policy can allow traffic. Do not deploy it as access
