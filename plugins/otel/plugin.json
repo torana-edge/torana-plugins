@@ -2,12 +2,12 @@
   "schema_version": 1,
   "id": "torana/otel",
   "name": "otel",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "abi_version": "v1",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "pass",
   "repository": "https://github.com/torana-edge/torana-plugins",
-  "description": "OpenTelemetry per-request metrics: request shape on the way in; latency, status class, and token usage on the way out",
+  "description": "OpenTelemetry per-request metrics: request shape on the way in; latency, status class, and input/output/cache token usage on the way out",
   "hooks": [
     {
       "name": "run_before_request"

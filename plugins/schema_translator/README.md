@@ -1,6 +1,6 @@
 # Adapt map-shaped tool schemas
 
-Convert supported open-map tool parameters into key/value arrays for providers that need a constrained schema, then reverse the recorded conversion on streamed tool calls.
+Convert supported open-map tool parameters into key/value arrays for providers that need a constrained schema, then reverse the recorded conversion on the model's tool calls, streamed or not.
 
 [All plugins](../../README.md#choose-a-plugin) · [Source](main.go) · [Manifest](plugin.json) · [Settings schema](schema.json)
 
@@ -72,11 +72,11 @@ same inspect/configure/approve/enable flow. Rebuilds need a new digest approval.
 
 ## Try it and check the result
 
-Use a test tool with an `additionalProperties` map and inspect the provider-facing definition: eligible maps become arrays of key/value entries. On a streamed call, verify the harness receives the original map shape. Test the exact nested schema and streaming path you use; this is not arbitrary schema conversion.
+Use a test tool with an `additionalProperties` map and inspect the provider-facing definition: eligible maps become arrays of key/value entries. Verify the harness receives the original map shape, on a streamed call and on a non-streamed one. Test the exact nested schemas and response paths you use; this is not arbitrary schema conversion.
 
 ## Data and failure behavior
 
-This plugin adapts tool schemas. It is not the protocol bridge and does not change the provider API. Reversal is implemented on the stream hook; do not assume non-streaming tool calls are reversed. Malformed conversion state errors under the approved failure policy (default pass); verify actual outputs before enabling broadly.
+This plugin adapts tool schemas. It is not the protocol bridge and does not change the provider API. Reversal runs on both response paths — the stream hook for streamed tool calls, the after-response hook for non-streamed ones — and only for the conversions this request recorded; tool calls it did not translate are passed through byte for byte, signature included. A tool call whose arguments it does change loses its provider signature, which is the prescribed response to changing the content that signature covers. Missing or malformed conversion state is terminal rather than guessed, and errors under the approved failure policy (default pass); verify actual outputs before enabling broadly.
 
 ## Combine or disable
 

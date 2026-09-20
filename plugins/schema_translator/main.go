@@ -19,8 +19,9 @@ import (
 func main() {}
 
 // mutationsKey is the single request-scoped meta key holding the registry
-// envelope (see registryWire below). The stream hook reads it back to reverse
-// the exact conversions this request's schema translation recorded.
+// envelope (see registryWire below). Both response hooks — streamed and
+// non-streamed — read it back to reverse the exact conversions this request's
+// schema translation recorded.
 const mutationsKey = "mutations"
 
 // ==========================================================================
@@ -277,23 +278,119 @@ func init() {
 		}
 		return sdk.EmitEvents(fr.Emit...), nil
 	})
+
+	// ── Response side: reverse KV arrays on the NON-STREAMING path ──────
+	//
+	// The request hook translates schemas for streamed and non-streamed
+	// requests alike, so the reversal has to exist on both response paths;
+	// otherwise a non-streaming tool call reaches the harness in the
+	// MODEL-FACING KV-array shape, with the wrong argument types.
+	//
+	// Same registry and the same strictness as the stream hook. The
+	// differences are all in the host contract for replace_response:
+	//
+	//   - only a MUTABLE dispatch has a body to rewrite. Observational
+	//     dispatches (streamed responses, upstream errors) are passed
+	//     untouched and never even read the registry — the stream hook
+	//     already reversed a streamed call, and a replacement would be
+	//     discarded anyway;
+	//   - blocks keep their cardinality, arm and position: this hook only
+	//     rewrites arguments_json in place, and tool identity (id) is
+	//     host-owned;
+	//   - a call whose arguments actually change must not keep its provider
+	//     signature. Clearing it is the prescribed response to changing the
+	//     content it covers; a call this plugin did not touch keeps its
+	//     token, because dropping provenance over UNCHANGED content is
+	//     rejected as forgery.
+	//
+	// There is no free-form arm here: a non-streaming response tool call is
+	// always a function call with arguments_json, so the stream hook's
+	// free-form pass-through has no counterpart.
+	sdk.OnAfterResponse(func(ctx context.Context, resp *pbv1.ChatResponse, mutable bool) (sdk.ResponseResult, error) {
+		if !mutable || resp.GetMessage() == nil || !hasToolCall(resp.GetMessage()) {
+			return sdk.PassResponse(), nil
+		}
+		reg, err := loadRegistry()
+		if err != nil {
+			return sdk.ResponseResult{}, err
+		}
+		// Mutate a CLONE: a reversal that fails halfway must not leave the
+		// accepted response partially rewritten, and untouched calls must
+		// travel byte-identical.
+		out, ok := proto.Clone(resp).(*pbv1.ChatResponse)
+		if !ok {
+			return sdk.ResponseResult{}, fmt.Errorf("schema_translator: response clone")
+		}
+		changed := false
+		for _, block := range out.Message.Blocks {
+			call := block.GetToolCall()
+			if call == nil {
+				continue
+			}
+			paths, recorded := reg.tools[call.Name]
+			if !recorded || len(paths) == 0 {
+				// Explicit absence in a valid envelope: not translated.
+				continue
+			}
+			reversed, did, err := reverseTranslate(call.Name, string(call.ArgumentsJson), paths)
+			if err != nil {
+				return sdk.ResponseResult{}, err
+			}
+			if !did {
+				// Every translated property was absent: a semantic no-op, so
+				// the original bytes and the bound signature both stay.
+				continue
+			}
+			call.ArgumentsJson = []byte(reversed)
+			call.Signature = ""
+			changed = true
+		}
+		if !changed {
+			return sdk.PassResponse(), nil
+		}
+		return sdk.ReplaceResponse(out), nil
+	})
+}
+
+// hasToolCall reports whether a non-streaming response body contains any tool
+// call. A response without one needs no registry: there is nothing to reverse,
+// and an absent envelope must not fail a plain text answer.
+func hasToolCall(msg *pbv1.ResponseMessage) bool {
+	for _, block := range msg.Blocks {
+		if block.GetToolCall() != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// loadRegistry reads and strictly decodes this request's envelope. Missing,
+// advisory-unavailable, malformed, and unsupported states are ALL terminal:
+// an absent envelope cannot prove "nothing was translated", because successive
+// calls may land on different WASM instances, so pass-through requires
+// positive proof.
+func loadRegistry() (*registry, error) {
+	raw, found, err := sdk.MetaGet(mutationsKey)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		// NOT_FOUND, NOT_CONFIGURED, UNAVAILABLE, PERMISSION_DENIED: every
+		// non-success is terminal.
+		return nil, fmt.Errorf("schema_translator: registry unavailable")
+	}
+	reg, err := decodeRegistry([]byte(raw))
+	if err != nil {
+		return nil, fmt.Errorf("schema_translator: registry corrupt: %w", err)
+	}
+	return reg, nil
 }
 
 // handleAssembled resolves one completed tool call against the registry.
 func handleAssembled(call sdk.ToolCall) (sdk.StreamResult, error) {
-	raw, found, err := sdk.MetaGet(mutationsKey)
+	reg, err := loadRegistry()
 	if err != nil {
 		return sdk.StreamResult{}, err
-	}
-	if !found {
-		// NOT_FOUND, NOT_CONFIGURED, UNAVAILABLE, PERMISSION_DENIED: every
-		// non-success is terminal at stream completion. There is no
-		// pass-through without a present, valid envelope.
-		return sdk.StreamResult{}, fmt.Errorf("schema_translator: registry unavailable")
-	}
-	reg, err := decodeRegistry([]byte(raw))
-	if err != nil {
-		return sdk.StreamResult{}, fmt.Errorf("schema_translator: registry corrupt: %w", err)
 	}
 	if call.InvocationKind == pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM {
 		if call.InputText == nil {

@@ -98,6 +98,8 @@ excluded from the public listing and is not an authentication boundary:
 explicit verifier rejection blocks, but unavailable verification and its
 `failure_mode: pass` policy can allow traffic. Do not deploy it as access
 control. The reference remains in the executable release inventory.
+Its [README](plugins/auth/README.md) states what it does today, and why none
+of it is protection.
 
 ## Evidence
 

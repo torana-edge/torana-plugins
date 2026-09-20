@@ -43,10 +43,16 @@
 //     enabled plugin is visible. Corrupt stored JSON is a key-local data
 //     error: that entry is skipped, others are unaffected.
 //   - The request path is observational and never mutates the request.
+//   - The replay artifact is bounded (see the prefix budget). A conversation
+//     whose artifact does not fit is NOT warmed, and the entry says so; the
+//     warmer never refreshes a partial prefix or reports warming it did not
+//     perform.
 package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,8 +67,48 @@ func main() {}
 
 // schemaVersion marks the durable entry format written by this plugin. Any
 // other version stops with zero sends. The format requires the
-// domain-separated PrefixFingerprint and has no fallback decoder.
-const schemaVersion = 1
+// domain-separated PrefixFingerprint and has no fallback decoder. Version 2
+// moved the replay artifact out of the entry into bounded part values (see
+// the prefix budget below); a version-1 entry has no readable prefix and is
+// stopped rather than guessed at.
+const schemaVersion = 2
+
+// The prefix budget.
+//
+// The replay artifact is the whole request, base64-encoded, and a realistic
+// coding conversation is far larger than one durable value: Torana's store
+// bounds a single value at 256 KiB by default, which a conversation passes
+// somewhere around forty thousand tokens — well inside the range where
+// prompt caching is worth paying for in the first place. Storing it as one
+// value meant the warmer failed exactly where warming matters most.
+//
+// So the artifact is split across numbered part values, and the budget is
+// declared here rather than discovered at the store:
+//
+//   - maxPartBytes keeps each value comfortably inside the default limit,
+//     with room for the key and the store's own overhead;
+//   - maxPrefixParts caps one conversation's artifact. It is a hard ceiling,
+//     not a target: the per-plugin key cap and the store's total byte budget
+//     are shared with every other plugin, and warming is opt-in for a handful
+//     of conversations at a time.
+//
+// Above the ceiling the warmer does NOT warm. It records why, durably, and
+// spends nothing — see declineWarming. The alternative (store what fits and
+// refresh a truncated prefix) would send a request that is not the
+// conversation, pay for it, and report success.
+const (
+	maxPartBytes   = 128 << 10 // 128 KiB per durable value
+	maxPrefixParts = 8         // ~1 MiB of encoded replay per conversation
+)
+
+// Stop reasons for an artifact that cannot be persisted. They are durable
+// state, not log lines: this plugin holds no logging grant, and the entry is
+// where an operator (or `plugin-state.json`) can see that a conversation they
+// opted in is deliberately not being warmed.
+const (
+	stopPrefixTooLarge      = "replay artifact exceeds the prefix budget"
+	stopPrefixStorageFailed = "durable state refused the replay artifact"
+)
 
 // warmEntry is everything needed to refresh one conversation, stored durably so
 // a restart does not lose track of what it was keeping alive.
@@ -73,12 +119,21 @@ type warmEntry struct {
 	Model          string `json:"model"`
 	Path           string `json:"path"`
 
-	// PrefixPB is the base64 protobuf of the SANITIZED REPLAY REQUEST: a
+	// PrefixDigest and PrefixParts locate the SANITIZED REPLAY REQUEST: a
 	// clone of the accepted request with stream=false and torana_meta_json
 	// cleared, preserving every provider-visible field and ordered block
-	// exactly. It is the artifact replayed on a warming tick (with
-	// max_tokens set to 1), not a truncated prefix.
-	PrefixPB string `json:"prefix_pb"`
+	// exactly, base64-encoded and split across PrefixParts durable values
+	// under PrefixDigest (see partKey). It is the artifact replayed on a
+	// warming tick (with max_tokens set to 1), not a truncated prefix.
+	//
+	// The digest is content-addressed, which is what makes the split safe:
+	// part keys are a pure function of the bytes they hold, so rewriting an
+	// artifact never overwrites a committed one, and reassembly verifies the
+	// digest before anything is decoded or sent. The ENTRY is the commit
+	// point — parts are written first, and an entry naming them is what
+	// makes them live.
+	PrefixDigest string `json:"prefix_digest"`
+	PrefixParts  int    `json:"prefix_parts"`
 
 	// PrefixFingerprint is the fixed, domain-separated digest of the SDK
 	// observable projection at observation time — the identity the replay
@@ -163,7 +218,10 @@ func (c config) warms(conversationID string) bool {
 
 func (c config) any() bool { return strings.TrimSpace(c.Conversations) != "" }
 
-const entryPrefix = "warm/"
+const (
+	entryPrefix = "warm/"
+	partPrefix  = "part/"
+)
 
 // isAdvisory reports whether err is an advisory refusal (NOT_CONFIGURED or
 // UNAVAILABLE) — the operator/transient class a plugin may decline safely.
@@ -177,6 +235,115 @@ func isAdvisory(err error) bool {
 			refusal.Code == pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE
 	}
 	return false
+}
+
+// isStoreRejection reports whether err is the durable store refusing the
+// VALUE rather than the call: over the per-value limit, over the per-plugin
+// key cap, or over the store's total byte budget. The host reports those as
+// INTERNAL, which is neither advisory (retrying changes nothing) nor a
+// contract defect by this plugin (the call was well formed and permitted).
+// It is the signal that this conversation cannot be warmed.
+func isStoreRejection(err error) bool {
+	var refusal *sdk.HostCallRefusalError
+	return errors.As(err, &refusal) && refusal.Code == pbv1.ErrorCode_ERROR_CODE_INTERNAL
+}
+
+// replayDigest is the content address of an encoded replay artifact. It names
+// the artifact's part keys and is re-verified on reassembly, so a partially
+// written or partially collected artifact can never be decoded as a whole one.
+func replayDigest(encoded string) string {
+	sum := sha256.Sum256([]byte(encoded))
+	return hex.EncodeToString(sum[:])
+}
+
+func partKey(digest string, index int) string {
+	return fmt.Sprintf("%s%s/%d", partPrefix, digest, index)
+}
+
+// partDigestOf reads the digest back out of a part key. An unparseable key in
+// this plugin's own namespace has no owner and is garbage by definition.
+func partDigestOf(key string) string {
+	rest := strings.TrimPrefix(key, partPrefix)
+	if i := strings.LastIndex(rest, "/"); i > 0 {
+		return rest[:i]
+	}
+	return ""
+}
+
+// storePrefix writes the artifact's parts and returns the digest and count an
+// entry needs to find them again. Parts are written BEFORE the entry that
+// names them: a crash here leaves values nothing references, which the tick
+// collects, rather than an entry pointing at bytes that were never stored.
+func storePrefix(encoded string) (string, int, error) {
+	if encoded == "" {
+		return "", 0, fmt.Errorf("cache_warmer: empty replay artifact")
+	}
+	digest := replayDigest(encoded)
+	parts := 0
+	for offset := 0; offset < len(encoded); offset += maxPartBytes {
+		end := offset + maxPartBytes
+		if end > len(encoded) {
+			end = len(encoded)
+		}
+		if err := sdk.StateSet(partKey(digest, parts), encoded[offset:end]); err != nil {
+			return "", 0, err
+		}
+		parts++
+	}
+	return digest, parts, nil
+}
+
+// loadPrefix reassembles the artifact an entry names.
+//
+// ok is false when the artifact is not intact — a missing part, or bytes that
+// do not hash to the recorded digest. That is a data defect that stops the
+// entry; it is never treated as absence, and never sent. An error is a host
+// failure the caller classifies.
+func loadPrefix(entry *warmEntry) (string, bool, error) {
+	var buf strings.Builder
+	for i := 0; i < entry.PrefixParts; i++ {
+		part, found, err := sdk.StateGet(partKey(entry.PrefixDigest, i))
+		if err != nil {
+			return "", false, err
+		}
+		if !found {
+			return "", false, nil
+		}
+		buf.WriteString(part)
+	}
+	encoded := buf.String()
+	if encoded == "" || replayDigest(encoded) != entry.PrefixDigest {
+		return "", false, nil
+	}
+	return encoded, true, nil
+}
+
+// collectPrefixParts deletes every part value no live entry names.
+//
+// Necessary, not hygiene: each real turn stores a larger artifact under a new
+// digest, so without collection one warmed conversation would add parts on
+// every turn until it hit the store's key cap or its byte budget — and that
+// budget is shared with every other plugin.
+//
+// referenced is built from the entries this tick actually read, so a part
+// written by a request whose entry has not committed yet can be collected.
+// The cost of losing that race is bounded and visible: the entry that arrives
+// afterwards names parts that are gone, the next tick stops it with
+// "stored prefix is incomplete" having sent nothing, and the next real turn
+// stores the artifact again.
+func collectPrefixParts(keys []string, referenced map[string]bool) error {
+	for _, key := range keys {
+		if !strings.HasPrefix(key, partPrefix) {
+			continue
+		}
+		if referenced[partDigestOf(key)] {
+			continue
+		}
+		if err := sdk.StateDelete(key); err != nil && !isAdvisory(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 type thinkingReplayStatus uint8
@@ -298,7 +465,6 @@ func init() {
 			Provider:          meta.Provider,
 			Model:             req.Model,
 			Path:              meta.Path,
-			PrefixPB:          encoded,
 			PrefixFingerprint: prefixFingerprint(prefix),
 			LastSeenMillis:    now,
 		}
@@ -307,7 +473,41 @@ func init() {
 		if cfg.WarmForMinutes > 0 {
 			entry.DeadlineMillis = now + int64(cfg.WarmForMinutes)*60_000
 		}
-		if err := sdk.StateSetJSON(entryPrefix+meta.ConversationID, entry); err != nil {
+		key := entryPrefix + meta.ConversationID
+
+		// The bound is checked HERE, before anything is written, so an
+		// artifact that cannot be persisted never half-lands.
+		if len(encoded) > maxPrefixParts*maxPartBytes {
+			if err := declineWarming(key, entry, stopPrefixTooLarge); err != nil {
+				return sdk.RequestResult{}, err
+			}
+			return sdk.PassRequest(), nil
+		}
+		digest, parts, err := storePrefix(encoded)
+		if err != nil {
+			switch {
+			case isAdvisory(err):
+				// No durable state at all: pass with no entry and no future
+				// spend, exactly as an unavailable clock does.
+				return sdk.PassRequest(), nil
+			case isStoreRejection(err):
+				// The store would not take the artifact (a lower configured
+				// value limit, the key cap, a full store). Record it where an
+				// operator can see it instead of claiming warming.
+				if err := declineWarming(key, entry, stopPrefixStorageFailed); err != nil {
+					return sdk.RequestResult{}, err
+				}
+				return sdk.PassRequest(), nil
+			default:
+				return sdk.RequestResult{}, err
+			}
+		}
+		entry.PrefixDigest = digest
+		entry.PrefixParts = parts
+
+		// The entry is the commit point: until it names them, the parts above
+		// are unreferenced and the next tick collects them.
+		if err := sdk.StateSetJSON(key, entry); err != nil {
 			// Entry store: advisory refusal means pass with no entry and no
 			// future spend; contract/protocol failure is a hook error so a
 			// broken enabled plugin is visible.
@@ -333,6 +533,10 @@ func init() {
 
 		refreshed := 0
 		var notes []string
+		// Digests the live entries name. Everything else under partPrefix is
+		// a previous turn's artifact, a collected entry's, or a crash
+		// remnant, and is deleted once the scan below is complete.
+		referenced := make(map[string]bool, len(keys))
 		for _, key := range keys {
 			if len(key) <= len(entryPrefix) || key[:len(entryPrefix)] != entryPrefix {
 				continue
@@ -363,12 +567,20 @@ func init() {
 				continue
 			}
 			if !cfg.warms(entry.ConversationID) {
-				// Opted out since the entry was written: delete it. Advisory
-				// unavailability can be retried next tick; contract defects surface.
+				// Opted out since the entry was written: delete it, and leave
+				// its artifact unreferenced so the collection below reclaims
+				// it. Advisory unavailability can be retried next tick;
+				// contract defects surface.
 				if err := sdk.StateDelete(key); err != nil && !isAdvisory(err) {
 					return sdk.TickResult{}, err
 				}
 				continue
+			}
+			if entry.PrefixDigest != "" {
+				// Guarded: an entry naming nothing must not make the empty
+				// digest "referenced", which is what an unparseable part key
+				// resolves to — those are junk and must stay collectable.
+				referenced[entry.PrefixDigest] = true
 			}
 			// Durable-state shape validation is the FIRST step after decoding
 			// — before pricing and before any spend-related decision. Invalid
@@ -394,6 +606,10 @@ func init() {
 			}
 		}
 
+		if err := collectPrefixParts(keys, referenced); err != nil {
+			return sdk.TickResult{}, err
+		}
+
 		if refreshed == 0 && len(notes) == 0 {
 			return sdk.TickIdle(), nil
 		}
@@ -409,6 +625,19 @@ func persistStop(key string, entry *warmEntry) error {
 		return nil
 	}
 	return err
+}
+
+// declineWarming records that this conversation is NOT being warmed, and why.
+//
+// The entry carries no artifact, so the tick skips it (Stopped is set) and
+// spends nothing, and the reason survives a restart. Silence was the failure
+// this replaces: an operator who opted a conversation in would otherwise see
+// a plugin that was enabled, configured, and doing nothing.
+func declineWarming(key string, entry warmEntry, reason string) error {
+	entry.PrefixDigest = ""
+	entry.PrefixParts = 0
+	entry.Stopped = reason
+	return persistStop(key, &entry)
 }
 
 func stopped(key string, entry *warmEntry, action bool, note string) (bool, string, error) {
@@ -437,7 +666,23 @@ func refreshOne(entry *warmEntry, cfg config, key string, now int64) (bool, stri
 	// REPLAY INTEGRITY FIRST (batch-3 boundary): every validation below runs
 	// BEFORE pricing. Each failure stops the entry with ZERO pricing and ZERO
 	// sends, and the stop reason is persisted durably.
-	req, err := sdk.DecodeRequest(entry.PrefixPB)
+	encoded, intact, err := loadPrefix(entry)
+	if err != nil {
+		if isAdvisory(err) {
+			// Durable state is unconfigured or temporarily unavailable:
+			// nothing about THIS entry is wrong, so leave it alone and try
+			// again on a later tick rather than stopping it permanently.
+			return false, "", nil
+		}
+		return false, "", err
+	}
+	if !intact {
+		// A missing part or bytes that do not match the recorded digest. The
+		// artifact is not the conversation, so it is never sent.
+		entry.Stopped = "stored prefix is incomplete"
+		return stopped(key, entry, false, fmt.Sprintf("%s: stopped, stored prefix is incomplete", short(entry.ConversationID)))
+	}
+	req, err := sdk.DecodeRequest(encoded)
 	if err != nil {
 		entry.Stopped = "stored prefix is unreadable"
 		return stopped(key, entry, false, "")
@@ -693,6 +938,12 @@ func validateEntry(entry *warmEntry, key string) string {
 		return "invalid warm entry"
 	}
 	if entry.PrefixFingerprint == "" {
+		return "invalid warm entry"
+	}
+	// The artifact locator must be within the declared budget: a part count
+	// of zero has nothing to replay, and one above the ceiling was never
+	// written by this plugin.
+	if entry.PrefixDigest == "" || entry.PrefixParts < 1 || entry.PrefixParts > maxPrefixParts {
 		return "invalid warm entry"
 	}
 	if entry.Stopped == "" && entry.AttemptMillis != 0 {

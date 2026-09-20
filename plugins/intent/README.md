@@ -1,6 +1,6 @@
 # Carry the reason for a tool call
 
-Ask the model to include why it is making a tool call, strip the added field before the harness sees the streamed call, and make captured intent available to a compactor.
+Ask the model to include why it is making a tool call, strip the added field before the harness sees the call, and make captured intent available to a compactor.
 
 [All plugins](../../README.md#choose-a-plugin) · [Source](main.go) · [Manifest](plugin.json) · [Settings schema](schema.json)
 
@@ -87,11 +87,11 @@ same inspect/configure/approve/enable flow. Rebuilds need a new digest approval.
 
 ## Try it and check the result
 
-On a test streaming workflow, inspect the provider-facing tool schema for the added `i` field, then confirm that the harness receives the original tool arguments without that added field. Captured intent is restored only for the same host conversation ID, tool-call ID, tool name and inputs. Remapped IDs use heuristic fill, or remain unchanged with `fill: "off"`.
+Inspect the provider-facing tool schema for the added `i` field, then confirm that the harness receives the original tool arguments without it — on a streamed workflow and on a non-streamed one; both response paths capture and strip. Captured intent is restored only for the same host conversation ID, tool-call ID, tool name and inputs. Remapped IDs use heuristic fill, or remain unchanged with `fill: "off"`.
 
 ## Data and failure behavior
 
-Adds a model-facing convention and changes tool schemas/history; it is not a guarantee of intent quality. Captured intent and tool-derived cache data can contain workflow context. Heuristic fill uses stable call information, not newer turns. Missing identity/cache entries cannot recover the original intent. Default failure mode is pass.
+Adds a model-facing convention and changes tool schemas/history; it is not a guarantee of intent quality. Captured intent and tool-derived cache data can contain workflow context, so they go to the cache a compactor reads and never to the plugin log: diagnostics report that an intent was captured or filled and how long it was, never the text. A tool that declares its own `i` keeps it, value and signature untouched. Heuristic fill uses stable call information, not newer turns. Missing identity/cache entries cannot recover the original intent. Default failure mode is pass.
 
 ## Combine or disable
 

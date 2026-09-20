@@ -18,13 +18,24 @@
 // run "intent" plus EITHER keyword_compactor (deterministic, local) OR
 // compactor (operator-bound model summarization) — both read the same intent cache.
 //
-// The response side runs on the SDK's StreamHandler: tool-call fragments are
-// buffered host-side (meta_append, under env.meta_set) and presented to
-// OnToolCall as one complete call. Start/deltas are suppressed and an
-// equivalent assembled start+delta+stop is emitted at block completion.
-// Callback errors are consumed by StreamHandler for fail-open re-emission of
-// the original block — a streamed response must never be truncated by a
-// plugin failure.
+// The response side covers BOTH answer shapes, because the request side
+// injects "i" into both:
+//
+//   - streamed: the SDK's StreamHandler buffers tool-call fragments host-side
+//     (meta_append, under env.meta_set) and presents them to OnToolCall as one
+//     complete call. Start/deltas are suppressed and an equivalent assembled
+//     start+delta+stop is emitted at block completion. Callback errors are
+//     consumed by StreamHandler for fail-open re-emission of the original
+//     block — a streamed response must never be truncated by a plugin failure.
+//   - non-streamed: the after-response hook rewrites the ordered response
+//     blocks in place under the host's replacement rules.
+//
+// Both call captureAndStrip, so the capture protocol and the native-"i" rule
+// have exactly one implementation.
+//
+// Captured intent is never written to the log. It is the user's task in the
+// model's own words, and the plugin's contract is to move it into the cache
+// the compactors read; diagnostics stay content-free.
 package main
 
 import (
@@ -35,6 +46,9 @@ import (
 	"io"
 	"sort"
 	"sync"
+	"unicode/utf8"
+
+	"google.golang.org/protobuf/proto"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
@@ -161,11 +175,63 @@ func init() {
 		return handleToolCall(call)
 	})
 	handler.Register()
+
+	// ── Response side: the same capture and strip, not streamed ───────
+	//
+	// The request side injects "i" into every tool schema whether or not the
+	// caller asked for a stream, so a non-streamed answer arrives carrying
+	// the field Torana added. Without this hook the harness receives it: an
+	// argument the tool never declared, which strict tools reject and lax
+	// tools act on, and the intent is never captured for the compactors.
+	//
+	// The host contract for replace_response decides the mechanics:
+	//
+	//   - observational dispatches (a streamed response — already handled by
+	//     the stream hook — or an upstream error) carry no body to rewrite
+	//     and are passed untouched;
+	//   - blocks keep their cardinality, arm and position, and tool identity
+	//     is host-owned: only arguments_json is rewritten, in place;
+	//   - clearing the provider signature is the prescribed response to
+	//     changing the content it covers, so a stripped call drops its token
+	//     and an untouched call keeps it (dropping provenance over unchanged
+	//     content is rejected as forgery).
+	sdk.OnAfterResponse(func(ctx context.Context, resp *pbv1.ChatResponse, mutable bool) (sdk.ResponseResult, error) {
+		if !mutable || resp.GetMessage() == nil {
+			return sdk.PassResponse(), nil
+		}
+		// Mutate a CLONE so a failure part-way through cannot leave the
+		// accepted response half-stripped.
+		out, ok := proto.Clone(resp).(*pbv1.ChatResponse)
+		if !ok {
+			return sdk.ResponseResult{}, fmt.Errorf("intent: response clone")
+		}
+		changed := false
+		for _, block := range out.Message.Blocks {
+			call := block.GetToolCall()
+			if call == nil {
+				continue
+			}
+			stripped, did, err := captureAndStrip(call.Name, call.Id, string(call.ArgumentsJson))
+			if err != nil {
+				return sdk.ResponseResult{}, err
+			}
+			if !did {
+				continue
+			}
+			call.ArgumentsJson = []byte(stripped)
+			call.Signature = ""
+			changed = true
+		}
+		if !changed {
+			return sdk.PassResponse(), nil
+		}
+		return sdk.ReplaceResponse(out), nil
+	})
 }
 
-// handleToolCall extracts and caches the intent from one assembled tool call,
-// then strips "i" (unless the tool natively declares it) so the harness never
-// sees the field Torana injected.
+// handleToolCall extracts and caches the intent from one assembled STREAMED
+// tool call, then strips "i" (unless the tool natively declares it) so the
+// harness never sees the field Torana injected.
 //
 // Pass-through is SEMANTIC: whenever the plugin does not actually delete a
 // field, the ORIGINAL argument bytes and the bound signature must travel
@@ -175,15 +241,39 @@ func handleToolCall(call sdk.ToolCall) (sdk.ToolCallAction, error) {
 	// The "i" convention belongs to JSON-object function arguments. A
 	// provider-native free-form payload is opaque text and must never be
 	// parsed, cached, stripped, or converted into a function call.
+	//
+	// The non-streaming path has no counterpart to this gate: a response
+	// tool call carries arguments_json and no invocation kind.
 	if call.InvocationKind != pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FUNCTION {
 		return sdk.PassToolCall(), nil
 	}
+	stripped, changed, err := captureAndStrip(call.Name, call.ID, call.Arguments)
+	if err != nil {
+		return sdk.ToolCallAction{}, err
+	}
+	if !changed {
+		return sdk.PassToolCall(), nil
+	}
+	return sdk.ReplaceToolArguments(stripped), nil
+}
+
+// captureAndStrip is the ONE implementation of the response-side convention,
+// shared by the streamed and non-streamed paths so the two cannot drift: the
+// capture protocol, the observability, the native-"i" rule and the
+// pass-through rule are decided in exactly one place.
+//
+// It returns the replacement arguments and whether they actually differ. A
+// false `changed` means the caller must emit the ORIGINAL bytes — not a
+// re-marshal of an equal object — so a bound provider signature stays valid.
+// An error is a contract failure the caller turns into its path's fail-open
+// (stream re-emission, or a hook error the host resolves by failure_mode).
+func captureAndStrip(name, id, arguments string) (string, bool, error) {
 	// Parse regardless of leading whitespace (the JSON decoder accepts it);
 	// invalid, non-object, and "null" arguments (args stays nil) are not
 	// representable and pass the exact bytes.
-	args, err := decodeJSONObject([]byte(call.Arguments))
+	args, err := decodeJSONObject([]byte(arguments))
 	if err != nil || args == nil {
-		return sdk.PassToolCall(), nil
+		return arguments, false, nil
 	}
 
 	// Extract and cache intent. Phase 0 observability: count how often the
@@ -191,7 +281,7 @@ func handleToolCall(call sdk.ToolCall) (sdk.ToolCallAction, error) {
 	// CAPTURE VALIDITY are independent facts: only a non-empty string is a
 	// usable intent, but ANY present "i" key is Torana's injected field
 	// unless the tool natively declares it (decided by the hadI marker).
-	labels := map[string]string{"tool": call.Name}
+	labels := map[string]string{"tool": name}
 	rawI, hasIntent := args[intentField]
 	intent, usable := rawI.(string)
 	if usable && intent != "" {
@@ -203,12 +293,12 @@ func handleToolCall(call sdk.ToolCall) (sdk.ToolCallAction, error) {
 		// CacheSet is best-effort: a refusal affects FUTURE compaction, not
 		// the validity of this response, so it is logged and the current
 		// tool call still completes. The host records the refusal itself.
-		if err := sdk.SharedCacheSet(intentCacheKey+":"+call.ID, intent); err != nil {
-			sdk.Log(fmt.Sprintf("intent: cache_set %s:%s refused: %v", intentCacheKey, call.ID, err), sdk.LogLevelInfo)
+		if err := sdk.SharedCacheSet(intentCacheKey+":"+id, intent); err != nil {
+			sdk.Log(fmt.Sprintf("intent: cache_set %s:%s refused: %v", intentCacheKey, id, err), sdk.LogLevelInfo)
 		}
 		conversation, _, err := sdk.MetaGet("intent:conversation")
 		if err == nil {
-			if key := occurrenceKey(conversation, call.ID, call.Name, args); key != "" {
+			if key := occurrenceKey(conversation, id, name, args); key != "" {
 				if err := sdk.CacheSet(key, intent); err != nil {
 					sdk.Log(fmt.Sprintf("intent: cache_set occurrence refused: %v", err), sdk.LogLevelInfo)
 				}
@@ -223,50 +313,56 @@ func handleToolCall(call sdk.ToolCall) (sdk.ToolCallAction, error) {
 			sdk.Log("intent: occurrence capture skipped: context_lookup_failed", sdk.LogLevelInfo)
 		}
 		sdk.EmitMetric("torana_intent_captured_total", sdk.MetricCounter, 1, labels)
-		// Debug visibility for dogfooding: intent QUALITY (goal vs action
-		// description) is only judgeable by reading the values.
-		sdk.Log(fmt.Sprintf("intent[%s %s]: %s", call.Name, call.ID, truncateRunes(intent, 160)), sdk.LogLevelDebug)
+		// CONTENT-FREE diagnostics only. The captured value is the user's
+		// task in the model's words — file paths, product names, customer
+		// context — and a debug line is still a log line: it lands in the
+		// host log file and in anything shipping those logs onward. The
+		// plugin's job is to move intent into the cache the compactors read,
+		// not to publish it. Length is the one fact worth keeping here: it
+		// separates "the model emitted a real intent" from a one-word
+		// placeholder without reproducing either.
+		sdk.Log(fmt.Sprintf("intent[%s %s]: captured %d runes", name, id, utf8.RuneCountInString(intent)), sdk.LogLevelDebug)
 	} else {
 		sdk.EmitMetric("torana_intent_absent_total", sdk.MetricCounter, 1, labels)
-		sdk.Log(fmt.Sprintf("intent[%s %s]: ABSENT", call.Name, call.ID), sdk.LogLevelDebug)
+		sdk.Log(fmt.Sprintf("intent[%s %s]: ABSENT", name, id), sdk.LogLevelDebug)
 	}
 
 	// No "i" key at all: absent observability already emitted, exact pass
 	// with NO marker lookup, marshal, or signature change.
 	if !hasIntent {
-		return sdk.PassToolCall(), nil
+		return arguments, false, nil
 	}
 
 	// Any present "i" value (string, empty, number, object, boolean, null)
 	// is Torana's injected field unless the tool natively declares it. A
 	// refusal to READ the hadI marker is a protocol failure (the key is only
-	// written by this plugin's request side): log and return an error so
-	// StreamHandler re-emits the original block — never a guess about
-	// whether to strip.
+	// written by this plugin's request side): log and return an error so the
+	// caller re-emits the original call — never a guess about whether to
+	// strip.
 	hadI := ""
-	if call.Name != "" {
+	if name != "" {
 		var err error
-		hadI, _, err = sdk.MetaGet("hadI:" + call.Name)
+		hadI, _, err = sdk.MetaGet("hadI:" + name)
 		if err != nil {
 			sdk.Log(fmt.Sprintf("intent: hadI meta_get refused: %v", err), sdk.LogLevelInfo)
-			return sdk.ToolCallAction{}, fmt.Errorf("intent: hadI meta_get failed: %v", err)
+			return arguments, false, fmt.Errorf("intent: hadI meta_get failed: %v", err)
 		}
 	}
 	if hadI == "true" {
-		// Native field: the original block (with "i" of ANY value and its
+		// Native field: the original call (with "i" of ANY value and its
 		// signature) passes byte-identical.
-		return sdk.PassToolCall(), nil
+		return arguments, false, nil
 	}
 
-	// Injected "i" of ANY type/value: delete it, marshal the changed
-	// object, and replace — the arguments changed, so StreamHandler clears
-	// the bound signature.
+	// Injected "i" of ANY type/value: delete it and marshal the changed
+	// object. The arguments changed, so the caller clears the bound
+	// signature.
 	delete(args, intentField)
 	modifiedJSON, err := json.Marshal(args)
 	if err != nil {
-		return sdk.PassToolCall(), nil
+		return arguments, false, nil
 	}
-	return sdk.ReplaceToolArguments(string(modifiedJSON)), nil
+	return string(modifiedJSON), true, nil
 }
 
 // ==========================================================================
@@ -369,7 +465,11 @@ func rehydrateHistoryIntents(req *pbv1.ChatRequest) (bool, error) {
 				// so compaction quality is driven by real intents.
 				intent = heuristicFill(tc.Name, args)
 				sdk.EmitMetric("torana_intent_filled_total", sdk.MetricCounter, 1, map[string]string{"tool": tc.Name})
-				sdk.Log(fmt.Sprintf("intent-fill[%s %s]: %s", tc.Name, tc.Id, intent), sdk.LogLevelDebug)
+				// Content-free: the fill is DERIVED from the call's own
+				// arguments (a path, a query, a command line), so logging it
+				// would leak the same workflow context as logging a captured
+				// intent.
+				sdk.Log(fmt.Sprintf("intent-fill[%s %s]: filled %d runes", tc.Name, tc.Id, utf8.RuneCountInString(intent)), sdk.LogLevelDebug)
 				filled++
 			}
 			args[intentField] = intent
