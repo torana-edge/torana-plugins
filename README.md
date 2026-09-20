@@ -47,9 +47,10 @@ torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/pl
 Installation compiles source locally. It never approves or enables a plugin.
 Open Torana's local control plane and select the plugin you installed. For
 `pii`, configure the required scanner binding before reviewing its permissions
-and model-call limits. `pii_guard` requests only two permissions and no model
-resource. Follow the [PII guide](plugins/pii/README.md) or the deterministic
-guard's [safe walkthrough](plugins/pii_guard/README.md#try-it-safely).
+and model-call limits. `pii_guard` makes no model or network calls; review its
+requested tool-result and state permissions before enabling it. Follow the
+[PII guide](plugins/pii/README.md) or the deterministic guard's
+[safe walkthrough](plugins/pii_guard/README.md#try-it-safely).
 
 Prefer terminal or agent automation? Each plugin guide covers its configuration
 and lifecycle commands. Other plugins may need their own settings or resource
