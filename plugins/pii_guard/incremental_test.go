@@ -27,8 +27,8 @@ func resultText(t *testing.T, message *pbv1.Message) (string, bool) {
 }
 
 func TestOnlyTrailingToolResultBatchIsNewWork(t *testing.T) {
-	oldSecret := "old@example.com"
-	newSecret := "new@example.com"
+	oldSecret := "sk_test_old_torana_demo_not_a_real_key_123"
+	newSecret := "sk_test_new_torana_demo_not_a_real_key_123"
 	old := toolResult("old", "read", oldSecret)
 	latest := toolResult("new", "read", newSecret)
 	req := &pbv1.ChatRequest{Messages: []*pbv1.Message{old, textMessage("continue"), latest}}
@@ -56,19 +56,19 @@ func TestStableReplayToolCallIDKeepsGeminiSemanticIdentity(t *testing.T) {
 }
 
 func TestNewestToolResultPrecedingInjectedDeveloperMessageIsScanned(t *testing.T) {
-	latest := toolResult("new", "exec", "contact: newest@example.com")
+	latest := toolResult("new", "exec", "key: sk_test_newest_torana_demo_not_a_real_key_123")
 	developer := &pbv1.Message{Role: "developer", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "injected harness metadata"}}}}}
 	h := newHarness(t)
 	if res := h.BeforeRequest(&pbv1.ChatRequest{Messages: []*pbv1.Message{latest, developer}}); res.Err != nil || res.Request == nil {
 		t.Fatalf("result = %+v", res)
 	}
-	if text, isError := resultText(t, latest); strings.Contains(text, "newest@example.com") || !isError {
+	if text, isError := resultText(t, latest); strings.Contains(text, "sk_test_newest_torana_demo_not_a_real_key_123") || !isError {
 		t.Fatalf("tool output before developer metadata was not scanned: text=%q error=%v", text, isError)
 	}
 }
 
 func TestReplaySurvivesMarkerMovement(t *testing.T) {
-	secret := "replay@example.com"
+	secret := "sk_test_replay_torana_demo_not_a_real_key_123"
 	withMarker := func(id, name string, markerFirst bool) *pbv1.Message {
 		content := []*pbv1.ToolResultContentBlock{
 			{Kind: &pbv1.ToolResultContentBlock_Text{Text: &pbv1.ToolResultTextBlock{Text: secret}}},
@@ -95,7 +95,7 @@ func TestReplaySurvivesMarkerMovement(t *testing.T) {
 }
 
 func TestReplayIsIsolatedByConversation(t *testing.T) {
-	secret := "same@example.com"
+	secret := "sk_test_same_torana_demo_not_a_real_key_123"
 	h := newHarness(t)
 	h.SetConversationID("conversation-b")
 	if res := h.BeforeRequest(&pbv1.ChatRequest{Messages: []*pbv1.Message{toolResult("call", "read", secret)}}); res.Err != nil || res.Request == nil {
@@ -124,7 +124,7 @@ func TestReplayReadFailureFailsClosed(t *testing.T) {
 }
 
 func TestPriorReplacementReplaysOutsideLatestBatch(t *testing.T) {
-	secret := "replay@example.com"
+	secret := "sk_test_replay_torana_demo_not_a_real_key_123"
 	h := newHarness(t)
 	first := &pbv1.ChatRequest{Messages: []*pbv1.Message{toolResult("call", "read", secret)}}
 	if res := h.BeforeRequest(first); res.Err != nil {

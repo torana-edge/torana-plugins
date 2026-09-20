@@ -64,7 +64,6 @@ type sensitivePattern struct {
 // declaration that the tool result is clean; use the model-backed pii plugin
 // when contextual coverage is required.
 var sensitivePatterns = []sensitivePattern{
-	{"email", "@", regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)},
 	{"us_ssn", "-", regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)},
 	{"aws_access_key", "AKIA", regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`)},
 	{"private_key", "-----BEGIN ", regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`)},

@@ -34,7 +34,6 @@ func TestRecognizedPatternsBecomeRecoverableErrorsWithoutModelOrNetworkCalls(t *
 		value    string
 		category string
 	}{
-		{"email", "contact someone@example.com", "email"},
 		{"US SSN", "ssn=123-45-6789", "us_ssn"},
 		{"AWS key", "AKIA1234567890ABCDEF", "aws_access_key"},
 		{"private key", "-----BEGIN PRIVATE KEY-----", "private_key"},
@@ -72,6 +71,7 @@ func TestRecognizedPatternsBecomeRecoverableErrorsWithoutModelOrNetworkCalls(t *
 func TestUnmatchedAndPlaceholderValuesPass(t *testing.T) {
 	for _, value := range []string{
 		"ordinary tool output",
+		"commit author someone@example.com",
 		"API_KEY=replace-me",
 		"sk_test_short",
 		"github_pat_placeholder",
@@ -85,7 +85,7 @@ func TestUnmatchedAndPlaceholderValuesPass(t *testing.T) {
 }
 
 func TestToolAllowlistAndUnknownName(t *testing.T) {
-	secret := "someone@example.com"
+	secret := "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
 	h := newHarness(t)
 	h.StubHostCall("env.plugin_config", func(string) (string, error) {
 		return sdktest.HostResultValue([]byte(`{"tools":["shell"]}`)), nil
@@ -136,10 +136,10 @@ func TestConfigRefusalIsRetryable(t *testing.T) {
 func TestMultipleTextArmsKeepStableLineNumbers(t *testing.T) {
 	result := sdk.ToolResultView{Content: []sdk.ToolResultContentView{
 		{Text: "safe"},
-		{Text: "also safe\nsomeone@example.com"},
+		{Text: "also safe\nssn=123-45-6789"},
 	}}
 	findings := scanToolResult(result)
 	if len(findings) != 1 || findings[0].line != 3 {
-		t.Fatalf("findings=%+v, want email on line 3", findings)
+		t.Fatalf("findings=%+v, want US SSN on line 3", findings)
 	}
 }

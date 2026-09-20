@@ -74,7 +74,7 @@ func TestNewestToolResultPrecedingInjectedDeveloperMessageIsScanned(t *testing.T
 }
 
 func TestReplaySurvivesMarkerMovement(t *testing.T) {
-	secret := "contact replay@example.com"
+	secret := "key sk_test_replay_torana_demo_not_a_real_key_123"
 	h := newHarness(t)
 	first := toolMsg("stable-call", "read", textArm(secret), markerArm())
 	if result := h.BeforeRequest(reqWith(first)); result.Err != nil || result.Request == nil {
