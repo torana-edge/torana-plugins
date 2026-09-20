@@ -4,7 +4,7 @@
   "additionalProperties": false,
   "required": ["decision_model", "question", "routes"],
   "properties": {
-    "decision_model": {"type": "string", "minLength": 1, "maxLength": 256, "title": "Decision model", "description": "Model identifier understood by the bound System One server, such as jev-latest, von-1.0.0, or a local Hugging Face model ID."},
+    "decision_model": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^\\S(?:.*\\S)?$", "title": "Decision model", "description": "Model identifier understood by the bound System One server, such as jev-latest, von-1.0.0, or a local Hugging Face model ID. Leading and trailing whitespace are rejected."},
     "question": {"type": "string", "minLength": 1, "maxLength": 2000, "title": "Routing question", "description": "The closed question the decision service answers from the latest user turn and bounded request facts."},
     "routes": {
       "type": "object", "minProperties": 2, "maxProperties": 32, "title": "Routes", "description": "Choice IDs and their approved Torana provider/model targets.",
@@ -13,8 +13,8 @@
         "type": "object", "additionalProperties": false, "required": ["description"],
         "properties": {
           "description": {"type": "string", "minLength": 1, "maxLength": 1000},
-          "provider": {"type": "string", "minLength": 1, "maxLength": 128},
-          "model": {"type": "string", "minLength": 1, "maxLength": 256}
+          "provider": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^\\S(?:.*\\S)?$"},
+          "model": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^\\S(?:.*\\S)?$"}
         },
         "anyOf": [{"required": ["provider"]}, {"required": ["model"]}]
       }

@@ -83,6 +83,10 @@ current provider. Keep `sticky` enabled unless deliberate per-request switching
 is worth changing the provider/model identity—and potentially its prompt cache—
 on later turns.
 
+An installed plugin with the untouched empty `{}` configuration is a safe
+no-op. Once you start configuring it, the complete policy is required; Torana
+reports malformed or partial settings instead of guessing a route.
+
 ## Bind TypeSafe Jev
 
 Create a Torana credential such as `typesafe-jev`; do not put the token in the
@@ -162,14 +166,46 @@ policy, not as an unquestioned oracle.
 
 ## Approve, enable and observe
 
+Put `decision_router` before `compactor` or `keyword_compactor`. Torana applies
+routing before plugin-owned model work and rejects an incompatible order. First
+approve the bundle, then read the current pipeline:
+
 ```bash
 torana plugin approve decision_router --file approval.json --yes
+torana pipeline get > pipeline.json
+```
+
+If a compactor is already enabled, pass the **complete** enabled-plugin order
+back with the router before it (keep every other plugin in its current relative
+position). `pipeline order` both sets that order and enables the approved
+router:
+
+```bash
+torana pipeline order decision_router compactor --yes
+# Or, when using the deterministic compactor:
+torana pipeline order decision_router keyword_compactor --yes
+```
+
+The short examples show two-plugin pipelines. If `pipeline.json` lists more
+plugins, include all of them in `pipeline order`; the command replaces the full
+enabled order rather than inserting one name. Without a compactor, enable the
+router normally:
+
+```bash
 torana plugin enable decision_router --yes
+```
+
+Then verify the loaded pipeline and actual routing outcomes:
+
+```bash
 torana plugin status
 torana feed
 ```
 
-Metrics count `routed`, `sticky`, and value-free fallback reasons. Logs never
+Metrics count `selected`, `sticky`, and value-free fallback reasons. `selected`
+means the plugin staged a validated route request; the Torana host still owns
+route validation and application. `torana feed` and host routing telemetry are
+authoritative for whether a route was actually applied. Logs never
 include prompts, response bodies or credentials. Route choice IDs may appear as
 metric labels, so use short operational IDs rather than user data.
 

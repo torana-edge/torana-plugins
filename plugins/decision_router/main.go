@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"regexp"
 	"sort"
@@ -104,36 +105,44 @@ type choiceAnswer struct {
 
 func sticky(cfg config) bool { return cfg.Sticky == nil || *cfg.Sticky }
 
-func loadConfig() (config, string, error) {
+func loadConfig() (config, string, bool, error) {
 	raw, err := sdk.PluginConfig()
 	if err != nil {
-		return config{}, "", fmt.Errorf("decision_router: load config: %w", err)
+		return config{}, "", false, fmt.Errorf("decision_router: load config: %w", err)
+	}
+	// Edge publishes the exact empty object when a plugin has no operator
+	// settings. An enabled-but-not-yet-configured router must be a no-op: a
+	// configuration form should not turn ordinary requests into guest traps.
+	// Any non-empty document remains strict below, so partial policies and
+	// malformed JSON are still operator errors rather than silent defaults.
+	if strings.TrimSpace(raw) == "{}" || strings.TrimSpace(raw) == "" {
+		return config{}, "", false, nil
 	}
 	cfg := config{MinimumConfidence: 0.8, MaxStateBytes: defaultStateBytes, TimeoutMS: defaultTimeoutMS, Authentication: "none"}
-	if strings.TrimSpace(raw) == "" {
-		raw = "{}"
-	}
 	dec := json.NewDecoder(strings.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {
-		return config{}, "", fmt.Errorf("decision_router: invalid config: %w", err)
+		return config{}, "", false, fmt.Errorf("decision_router: invalid config: %w", err)
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return config{}, "", false, errors.New("decision_router: invalid config: trailing JSON")
 	}
 	if err := validateConfig(cfg); err != nil {
-		return config{}, "", fmt.Errorf("decision_router: invalid config: %w", err)
+		return config{}, "", false, fmt.Errorf("decision_router: invalid config: %w", err)
 	}
 	normalizedSticky := sticky(cfg)
 	cfg.Sticky = &normalizedSticky
 	canonical, err := json.Marshal(cfg)
 	if err != nil {
-		return config{}, "", err
+		return config{}, "", false, err
 	}
 	sum := sha256.Sum256(canonical)
-	return cfg, hex.EncodeToString(sum[:]), nil
+	return cfg, hex.EncodeToString(sum[:]), true, nil
 }
 
 func validateConfig(cfg config) error {
-	if strings.TrimSpace(cfg.DecisionModel) == "" || len(cfg.DecisionModel) > maximumModelBytes {
-		return errors.New("decision_model must be 1-256 bytes")
+	if cfg.DecisionModel != strings.TrimSpace(cfg.DecisionModel) || cfg.DecisionModel == "" || len(cfg.DecisionModel) > maximumModelBytes {
+		return errors.New("decision_model must be 1-256 bytes without leading or trailing whitespace")
 	}
 	if strings.TrimSpace(cfg.Question) == "" || len(cfg.Question) > 2_000 {
 		return errors.New("question must be 1-2000 bytes")
@@ -147,6 +156,9 @@ func validateConfig(cfg config) error {
 		}
 		if strings.TrimSpace(target.Description) == "" || len(target.Description) > 1_000 {
 			return fmt.Errorf("route %q needs a description of at most 1000 bytes", id)
+		}
+		if target.Provider != strings.TrimSpace(target.Provider) || target.Model != strings.TrimSpace(target.Model) {
+			return fmt.Errorf("route %q provider/model must not have leading or trailing whitespace", id)
 		}
 		if target.Provider == "" && target.Model == "" {
 			return fmt.Errorf("route %q must set provider or model", id)
@@ -172,9 +184,12 @@ func validateConfig(cfg config) error {
 
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
-		cfg, policyHash, err := loadConfig()
+		cfg, policyHash, configured, err := loadConfig()
 		if err != nil {
 			return sdk.RequestResult{}, err
+		}
+		if !configured {
+			return sdk.PassRequest(), nil
 		}
 
 		conversationID := conversationID(req)
@@ -222,7 +237,7 @@ func init() {
 		if err := sdk.RouteRequest(target.Provider, target.Model); err != nil {
 			return fallback("route_failed"), nil
 		}
-		emit("routed", choice)
+		emit("selected", choice)
 		return sdk.PassRequest(), nil
 	})
 }

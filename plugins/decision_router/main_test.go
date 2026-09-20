@@ -112,6 +112,10 @@ func TestRoutesFromValidatedClosedChoice(t *testing.T) {
 	if sent.Endpoint != endpointSlot || sent.Path != decisionPath || sent.Method != "POST" || sent.TimeoutMs != 5000 {
 		t.Fatalf("outbound request = %+v", sent)
 	}
+	metrics := h.Metrics()
+	if len(metrics) != 1 || metrics[0].Name != metricDecisionName || metrics[0].Labels["outcome"] != "selected" {
+		t.Fatalf("metrics = %+v", metrics)
+	}
 	var body systemOneRequest
 	if err := json.Unmarshal(sent.Body, &body); err != nil {
 		t.Fatal(err)
@@ -324,9 +328,47 @@ func TestLatestTurnIsUTF8Bounded(t *testing.T) {
 	}
 }
 
-func TestInvalidConfigSurfacesOperatorError(t *testing.T) {
-	h := sdktest.New(t).SetConfig(`{"decision_model":"jev","question":"q","routes":{"only":{"description":"one","model":"m"}}}`)
-	if res := h.BeforeRequest(request("invalid", "hello")); res.Err == nil {
-		t.Fatal("invalid config was silently accepted")
+func TestEmptyDefaultConfigPassesWithoutGuestError(t *testing.T) {
+	h := sdktest.New(t).SetConfig(`{}`)
+	req := request("unconfigured", "hello")
+	before := proto.Clone(req).(*pbv1.ChatRequest)
+	if res := h.BeforeRequest(req); res.Err != nil {
+		t.Fatalf("empty default config returned an error: %v", res.Err)
+	}
+	if httpCalls(h) != 0 || len(routes(h)) != 0 || !proto.Equal(req, before) {
+		t.Fatal("empty default config did not pass unchanged")
+	}
+}
+
+func TestNonEmptyInvalidConfigSurfacesOperatorError(t *testing.T) {
+	tests := map[string]string{
+		"partial":   `{"decision_model":"jev","question":"q","routes":{"only":{"description":"one","model":"m"}}}`,
+		"malformed": `{"decision_model":`,
+		"trailing":  baseConfig + `{}`,
+	}
+	for name, raw := range tests {
+		t.Run(name, func(t *testing.T) {
+			h := sdktest.New(t).SetConfig(raw)
+			if res := h.BeforeRequest(request("invalid-"+name, "hello")); res.Err == nil {
+				t.Fatal("invalid non-empty config was silently accepted")
+			}
+		})
+	}
+}
+
+func TestWhitespaceInDecisionAndRouteCoordinatesIsRejected(t *testing.T) {
+	tests := map[string]string{
+		"decision model leading":  strings.Replace(baseConfig, `"decision_model":"jev-latest"`, `"decision_model":" jev-latest"`, 1),
+		"decision model trailing": strings.Replace(baseConfig, `"decision_model":"jev-latest"`, `"decision_model":"jev-latest "`, 1),
+		"provider whitespace":     strings.Replace(baseConfig, `"provider":"fast-provider"`, `"provider":"   "`, 1),
+		"model trailing":          strings.Replace(baseConfig, `"model":"fast-model"`, `"model":"fast-model "`, 1),
+	}
+	for name, raw := range tests {
+		t.Run(name, func(t *testing.T) {
+			h := sdktest.New(t).SetConfig(raw)
+			if res := h.BeforeRequest(request("whitespace-"+name, "hello")); res.Err == nil {
+				t.Fatal("whitespace-bearing coordinate was accepted")
+			}
+		})
 	}
 }
