@@ -290,3 +290,109 @@ func TestNoUnauthorizedCalls(t *testing.T) {
 		t.Fatal("otel emitted no metrics")
 	}
 }
+
+// ==========================================================================
+// Cache token series
+// ==========================================================================
+
+// respUsage builds a response carrying a complete provider usage report.
+func respUsage(model string, status int32, usage *pbv1.Usage) *pbv1.ChatResponse {
+	return &pbv1.ChatResponse{Model: model, UpstreamStatus: status, Usage: usage}
+}
+
+// tokenSeries maps the emitted token directions to their values.
+func tokenSeries(t *testing.T, out []emission) map[string]float64 {
+	t.Helper()
+	seen := map[string]float64{}
+	for _, m := range out {
+		if m.Name != "torana_plugin_tokens" {
+			continue
+		}
+		direction := m.Labels["direction"]
+		switch direction {
+		case "input", "output", "cache_read", "cache_write":
+		default:
+			t.Fatalf("unbounded direction label %q — the vocabulary must stay finite", direction)
+		}
+		if _, dup := seen[direction]; dup {
+			t.Fatalf("direction %q emitted twice", direction)
+		}
+		seen[direction] = m.Value
+	}
+	return seen
+}
+
+// TestCacheTokenDirectionsAreEmitted — cache reads and writes are what say
+// whether prompt caching is paying for itself, and they are reported
+// separately by the provider rather than derivable from input/output.
+func TestCacheTokenDirectionsAreEmitted(t *testing.T) {
+	out := responseMetrics(respUsage("claude-sonnet-4", 200, &pbv1.Usage{
+		InputTokens: 100, OutputTokens: 20, CacheReadTokens: 4096, CacheWriteTokens: 512,
+	}))
+	got := tokenSeries(t, out)
+	want := map[string]float64{"input": 100, "output": 20, "cache_read": 4096, "cache_write": 512}
+	if len(got) != len(want) {
+		t.Fatalf("token series = %v, want all four directions", got)
+	}
+	for direction, value := range want {
+		if got[direction] != value {
+			t.Errorf("direction %q = %v, want %v", direction, got[direction], value)
+		}
+	}
+	for _, m := range out {
+		if m.Labels["status_class"] != "2xx" || m.Labels["model_family"] != "claude" {
+			t.Errorf("%s (direction=%q) lost a shared label: %v", m.Name, m.Labels["direction"], m.Labels)
+		}
+	}
+}
+
+// TestUnreportedCacheTokensAreNotEmitted — cache_write_tokens is documented as
+// 0 when the provider does not report it, so a zero must not be published as a
+// measured zero.
+func TestUnreportedCacheTokensAreNotEmitted(t *testing.T) {
+	got := tokenSeries(t, responseMetrics(respUsage("gpt-4", 200, &pbv1.Usage{
+		InputTokens: 100, OutputTokens: 20,
+	})))
+	if _, present := got["cache_read"]; present {
+		t.Error("emitted a cache_read series the provider never reported")
+	}
+	if _, present := got["cache_write"]; present {
+		t.Error("emitted a cache_write series the provider never reported")
+	}
+}
+
+// TestCacheOnlyUsageStillEmits — a fully cached prefix can report cache reads
+// with no fresh input tokens at all.
+func TestCacheOnlyUsageStillEmits(t *testing.T) {
+	got := tokenSeries(t, responseMetrics(respUsage("claude-sonnet-4", 200, &pbv1.Usage{
+		CacheReadTokens: 8192, OutputTokens: 5,
+	})))
+	if got["cache_read"] != 8192 {
+		t.Fatalf("cache_read = %v, want 8192", got["cache_read"])
+	}
+	if _, present := got["input"]; present {
+		t.Error("claimed input tokens that were not reported")
+	}
+}
+
+// TestHookEmitsCacheSeries — the same four directions through the real hook.
+func TestHookEmitsCacheSeries(t *testing.T) {
+	h := sdktest.New(t)
+	res := h.AfterResponse(respUsage("claude-sonnet-4", 200, &pbv1.Usage{
+		InputTokens: 10, OutputTokens: 2, CacheReadTokens: 30, CacheWriteTokens: 4,
+	}), false)
+	if res.Err != nil || !res.PassedThrough {
+		t.Fatalf("otel must pass responses through, err=%v", res.Err)
+	}
+	seen := map[string]float64{}
+	for _, m := range h.Metrics() {
+		if m.Name == "torana_plugin_tokens" {
+			seen[m.Labels["direction"]] = m.Value
+		}
+	}
+	for direction, want := range map[string]float64{"input": 10, "output": 2, "cache_read": 30, "cache_write": 4} {
+		if seen[direction] != want {
+			t.Errorf("hook emitted %q = %v, want %v", direction, seen[direction], want)
+		}
+	}
+}

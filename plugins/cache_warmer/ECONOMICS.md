@@ -49,7 +49,12 @@ workload cost. A cache read alone is not evidence that a warmer caused it.
 Compare with leaving the prefix alone under similar traffic and idle gaps.
 
 The plugin stops at its deadline, break-even count, a cache-write response, or
-an unresolved refresh outcome. An unknown outcome is not permission to retry
+an unresolved refresh outcome. It also declines a conversation whose replayable
+request does not fit its durable storage budget (about a megabyte encoded,
+covering conversations far larger than the point where caching pays off) —
+refusing rather than refreshing a partial prefix, because a refresh that is not
+the conversation costs money and warms nothing. The reason is recorded in the
+conversation's durable entry; see [the setup guide](README.md#try-it-and-check-the-result). An unknown outcome is not permission to retry
 spending automatically. Configure the provider/model policy resource from
 verified rates and refresh semantics; provider configuration alone does not
 approve that resource. See [the setup guide](README.md#data-and-failure-behavior).

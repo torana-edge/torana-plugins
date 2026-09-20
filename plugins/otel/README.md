@@ -1,6 +1,6 @@
 # Add request metrics
 
-Emit request shape, latency, observed status classes and provider-reported token usage through Torana's metrics host.
+Emit request shape, latency, observed status classes and provider-reported token usage — input, output, cache read and cache write — through Torana's metrics host.
 
 [All plugins](../../README.md#choose-a-plugin) · [Source](main.go) · [Manifest](plugin.json) · [Settings schema](schema.json)
 
@@ -71,11 +71,11 @@ same inspect/configure/approve/enable flow. Rebuilds need a new digest approval.
 
 ## Try it and check the result
 
-Send an inference request, then open `http://127.0.0.1:8080/_torana/plugin/otel/` for its minimal status page. `torana agent discover` lists its declared status operation. The page is not a metrics dashboard: inspect your configured host metrics exporter for the `torana_plugin_requests_total` and response series.
+Send an inference request, then open `http://127.0.0.1:8080/_torana/plugin/otel/` for its minimal status page. `torana agent discover` lists its declared status operation. The page is not a metrics dashboard: inspect your configured host metrics exporter for the `torana_plugin_requests_total` and response series. Token counts arrive as one `torana_plugin_tokens` series labelled `direction`, with four values: `input`, `output`, `cache_read` and `cache_write`. A direction the provider did not report is absent rather than zero, so a provider that reports no cache usage produces no cache series.
 
 ## Data and failure behavior
 
-No payload rewrite or content export. Labels describe request/model shape. Missing status or usage is not invented. Logging/metrics imports are best effort; a status page alone does not prove collector ingestion. Default failure mode is pass.
+No payload rewrite or content export. Labels describe request/model shape, and the `direction` vocabulary is fixed at four values. Missing status or usage is not invented: an unreported token direction emits nothing rather than a measured zero. Logging/metrics imports are best effort; a status page alone does not prove collector ingestion. Default failure mode is pass.
 
 ## Combine or disable
 

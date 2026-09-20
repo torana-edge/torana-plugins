@@ -55,6 +55,61 @@ func warmPrefix(t *testing.T) string {
 	return enc
 }
 
+// prefixArtifacts records the encoded artifact behind every digest a test
+// built with setPrefix, so seedEntry can store the parts the entry names.
+// Tests in this package are sequential by design (see newHarness).
+var prefixArtifacts = map[string]string{}
+
+// setPrefix points an entry at an encoded replay artifact the way the request
+// path does: the entry NAMES the artifact (digest + part count) and the bytes
+// live in separate part values, seeded by seedEntry.
+func setPrefix(e *warmEntry, encoded string) {
+	e.PrefixDigest = replayDigest(encoded)
+	e.PrefixParts = (len(encoded) + maxPartBytes - 1) / maxPartBytes
+	prefixArtifacts[e.PrefixDigest] = encoded
+}
+
+// seedPrefixParts stores the parts an entry names. An entry pointing at an
+// artifact no test recorded gets no parts, which is exactly the seeded shape
+// of a collected or half-written artifact.
+func seedPrefixParts(h *sdktest.Harness, e warmEntry) {
+	encoded, ok := prefixArtifacts[e.PrefixDigest]
+	if !ok {
+		return
+	}
+	for i := 0; i < e.PrefixParts; i++ {
+		start := i * maxPartBytes
+		if start >= len(encoded) {
+			// A part count larger than the artifact (an invalid-entry row):
+			// there is nothing to seed for the surplus parts.
+			return
+		}
+		end := start + maxPartBytes
+		if end > len(encoded) {
+			end = len(encoded)
+		}
+		h.SeedState(partKey(e.PrefixDigest, i), encoded[start:end])
+	}
+}
+
+// storedPrefix reassembles the artifact the PLUGIN wrote, reading the part
+// values back out of the fake host exactly as the tick does.
+func storedPrefix(t *testing.T, h *sdktest.Harness, e warmEntry) string {
+	t.Helper()
+	if e.PrefixDigest == "" || e.PrefixParts == 0 {
+		t.Fatalf("entry names no replay artifact: %+v", e)
+	}
+	var buf strings.Builder
+	for i := 0; i < e.PrefixParts; i++ {
+		part, ok := h.State(partKey(e.PrefixDigest, i))
+		if !ok {
+			t.Fatalf("part %d of the stored artifact is missing", i)
+		}
+		buf.WriteString(part)
+	}
+	return buf.String()
+}
+
 // warmFingerprint is the domain-separated fingerprint of the SAME request,
 // via the production helper (write and replay must agree).
 func warmFingerprint(t *testing.T) string {
@@ -86,18 +141,19 @@ func uReq() *pbv1.ChatRequest {
 // warmEntrySeed builds a due, valid entry.
 func warmEntrySeed(t *testing.T) warmEntry {
 	t.Helper()
-	return warmEntry{
+	entry := warmEntry{
 		SchemaVersion:     schemaVersion,
 		ConversationID:    "conv-1",
 		Provider:          "anthropic",
 		Model:             "claude-sonnet-4",
 		Path:              "/v1/messages",
-		PrefixPB:          warmPrefix(t),
 		PrefixFingerprint: warmFingerprint(t),
 		LastSeenMillis:    1_000,
 		LastRefreshMillis: 1_000,
 		DeadlineMillis:    0,
 	}
+	setPrefix(&entry, warmPrefix(t))
+	return entry
 }
 
 // pricingStub returns a warmable two-tier pricing envelope.
@@ -149,6 +205,7 @@ func seedEntry(t *testing.T, h *sdktest.Harness, entry warmEntry) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	seedPrefixParts(h, entry)
 	h.SeedState("warm/conv-1", string(b))
 }
 
@@ -548,10 +605,16 @@ func TestTickEntryValidationStopsWithZeroSends(t *testing.T) {
 		name string
 		mut  func(*warmEntry)
 	}{
-		{"unsupported schema", func(e *warmEntry) { e.SchemaVersion = 2 }},
-		{"unreadable prefix", func(e *warmEntry) { e.PrefixPB = "not base64 protobuf" }},
-		{"mid tool call", func(e *warmEntry) { e.PrefixPB = midToolPrefix() }},
-		{"model mismatch", func(e *warmEntry) { e.PrefixPB = badPrefix() }},
+		{"unsupported schema", func(e *warmEntry) { e.SchemaVersion = 1 }},
+		{"unreadable prefix", func(e *warmEntry) { setPrefix(e, "not base64 protobuf") }},
+		{"incomplete prefix", func(e *warmEntry) {
+			// The entry names an artifact whose parts are not in state:
+			// a collected or half-written artifact, never a sendable one.
+			e.PrefixDigest = replayDigest("an artifact nothing stored")
+			e.PrefixParts = 1
+		}},
+		{"mid tool call", func(e *warmEntry) { setPrefix(e, midToolPrefix()) }},
+		{"model mismatch", func(e *warmEntry) { setPrefix(e, badPrefix()) }},
 		{"fingerprint drift", func(e *warmEntry) {
 			// REAL drift: a provider-visible field BEFORE the marker changes
 			// and the request is re-encoded, while the stored fingerprint is
@@ -559,7 +622,7 @@ func TestTickEntryValidationStopsWithZeroSends(t *testing.T) {
 			req := warmRequest()
 			req.Messages[0].Blocks[0].GetText().Text = "mutated before the marker"
 			enc, _ := sdk.EncodeRequest(req)
-			e.PrefixPB = enc
+			setPrefix(e, enc)
 		}},
 		{"missing fingerprint", func(e *warmEntry) { e.PrefixFingerprint = "" }},
 		{"malformed fingerprint", func(e *warmEntry) { e.PrefixFingerprint = "not-a-valid-shape" }},
@@ -567,12 +630,14 @@ func TestTickEntryValidationStopsWithZeroSends(t *testing.T) {
 			bad := warmRequest()
 			bad.Messages[0].Blocks = bad.Messages[0].Blocks[:0]
 			enc, _ := sdk.EncodeRequest(bad)
-			e.PrefixPB = enc
+			setPrefix(e, enc)
 		}},
 		{"missing provider", func(e *warmEntry) { e.Provider = "" }},
 		{"missing path", func(e *warmEntry) { e.Path = "" }},
 		{"negative accounting", func(e *warmEntry) { e.RefreshesSpent = -1 }},
-		{"no breakpoint", func(e *warmEntry) { e.PrefixPB = noBreakpointPrefix() }},
+		{"no breakpoint", func(e *warmEntry) { setPrefix(e, noBreakpointPrefix()) }},
+		{"no artifact named", func(e *warmEntry) { e.PrefixDigest, e.PrefixParts = "", 0 }},
+		{"part count beyond the budget", func(e *warmEntry) { e.PrefixParts = maxPrefixParts + 1 }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -641,7 +706,7 @@ func TestTickManualThinkingStopsBeforePricingOrReservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	entry := warmEntrySeed(t)
-	entry.PrefixPB = encoded
+	setPrefix(&entry, encoded)
 	entry.PrefixFingerprint = prefixFingerprint(prefix)
 	seedEntry(t, h, entry)
 	tickAt(h, 300_000)
@@ -720,7 +785,7 @@ func TestNonManualThinkingRemainsWarmable(t *testing.T) {
 				t.Fatal(err)
 			}
 			entry := warmEntrySeed(t)
-			entry.PrefixPB = encoded
+			setPrefix(&entry, encoded)
 			entry.PrefixFingerprint = prefixFingerprint(prefix)
 			seedEntry(t, h, entry)
 			tickAt(h, 300_000)
@@ -732,18 +797,25 @@ func TestNonManualThinkingRemainsWarmable(t *testing.T) {
 }
 
 // TestTickOptedOutDeletesEntry — opted out since the write: the entry is
-// deleted with zero sends.
+// deleted with zero sends, and the replay artifact it was the only reference
+// to is collected with it. Leaving the artifact behind would hold up to a
+// megabyte of a store shared with every other plugin, for a conversation
+// nobody asked to keep warm.
 func TestTickOptedOutDeletesEntry(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(`{"conversations":""}`) // no longer opted in
 	h.StubHostCall("env.cache_policy", pricingStub())
-	seedEntry(t, h, warmEntrySeed(t))
+	entry := warmEntrySeed(t)
+	seedEntry(t, h, entry)
 	tickAt(h, 300_000)
 	if n := countCommand(h, "torana_send_request"); n != 0 {
 		t.Fatalf("an opted-out entry must not spend, got %d", n)
 	}
-	if n := countCommand(h, "env.state_delete"); n != 1 {
-		t.Fatalf("an opted-out entry must be deleted, got %d deletes", n)
+	if _, ok := h.State("warm/conv-1"); ok {
+		t.Fatal("an opted-out entry must be deleted")
+	}
+	if _, ok := h.State(partKey(entry.PrefixDigest, 0)); ok {
+		t.Fatal("the opted-out conversation's replay artifact was left in the store")
 	}
 }
 
@@ -1073,7 +1145,7 @@ func TestRequestPathSanitizedReplayAndFingerprint(t *testing.T) {
 	}
 	// Decoded replay == the INDEPENDENT sanitized expected (clone with
 	// stream=false + meta cleared; nothing else changes).
-	decoded, err := sdk.DecodeRequest(entry.PrefixPB)
+	decoded, err := sdk.DecodeRequest(storedPrefix(t, h, entry))
 	if err != nil {
 		t.Fatalf("decode replay: %v", err)
 	}
@@ -1217,7 +1289,7 @@ func TestRequestPathValidNonTerminalSuffix(t *testing.T) {
 	raw, _ := h.State("warm/conv-1")
 	var entry warmEntry
 	_ = json.Unmarshal([]byte(raw), &entry)
-	decoded, err := sdk.DecodeRequest(entry.PrefixPB)
+	decoded, err := sdk.DecodeRequest(storedPrefix(t, h, entry))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1386,7 +1458,7 @@ func TestTickExactSendPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	richSeed := warmEntrySeed(t)
-	richSeed.PrefixPB = enc
+	setPrefix(&richSeed, enc)
 	richSeed.PrefixFingerprint = sdk.ContentAddressedCacheKey("cache_warmer/prefix", string(projection))
 	seedEntry(t, h, richSeed)
 	tickAt(h, 300_000)
@@ -1400,7 +1472,7 @@ func TestTickExactSendPayload(t *testing.T) {
 	}
 	// INDEPENDENT expected: clone the decoded stored replay, set ONLY
 	// MaxTokens=1.
-	replay, err := sdk.DecodeRequest(richSeed.PrefixPB)
+	replay, err := sdk.DecodeRequest(prefixArtifacts[richSeed.PrefixDigest])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1535,7 +1607,7 @@ func TestRequestPathCarrierFingerprintMatrix(t *testing.T) {
 				t.Fatal(err)
 			}
 			// Replay == the independent sanitized full input.
-			decoded, err := sdk.DecodeRequest(entry.PrefixPB)
+			decoded, err := sdk.DecodeRequest(storedPrefix(t, h, entry))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1606,7 +1678,7 @@ func TestRequestPathFingerprintSensitivity(t *testing.T) {
 		raw, _ := h.State("warm/conv-1")
 		var entry warmEntry
 		_ = json.Unmarshal([]byte(raw), &entry)
-		decoded, _ := sdk.DecodeRequest(entry.PrefixPB)
+		decoded, _ := sdk.DecodeRequest(storedPrefix(t, h, entry))
 		return entry, decoded
 	}
 	base := carrierInputs()["outer"]
@@ -1694,12 +1766,12 @@ func TestRequestPathTerminalSuffixPreservesEntry(t *testing.T) {
 	// would be visible.
 	seed := warmEntrySeed(t)
 	seed.Model = "claude-opus-4"
-	seed.PrefixPB = func() string {
+	setPrefix(&seed, func() string {
 		req := warmRequest()
 		req.Model = "claude-opus-4"
 		enc, _ := sdk.EncodeRequest(req)
 		return enc
-	}()
+	}())
 	seed.PrefixFingerprint = func() string {
 		req := warmRequest()
 		req.Model = "claude-opus-4"

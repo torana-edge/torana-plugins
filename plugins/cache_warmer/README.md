@@ -114,9 +114,28 @@ same inspect/configure/approve/enable flow. Rebuilds need a new digest approval.
 
 First use the empty conversation list to observe without warming. Run `torana conversations --json`, select one ID, set it in `conversations`, then send another real turn so its eligible prefix is captured. During an idle gap, look for attributed `plugin-egress` refreshes. No explicit marker, unsupported refresh semantics, missing state or exhausted budgets should produce no refresh.
 
+If an opted-in conversation is never refreshed, read the plugin's durable
+entry for that conversation (`plugin-state.json` beside the host
+configuration, under key `warm/<conversation-id>`). Its `stopped` field says
+why — including `replay artifact exceeds the prefix budget` and `durable state
+refused the replay artifact`, the two ways a conversation can be too large to
+store. The plugin holds no logging grant, so the entry is where those reasons
+are recorded.
+
 ## Data and failure behavior
 
 Stores opted-in prefixes in durable private state and sends them again to the configured provider, including while you are idle. It can spend money. Stops at the deadline, break-even count, or a refresh reporting a cache write. It does not extend Gemini cache-resource TTLs or manage automatic OpenAI/DeepSeek prefix caches. Default failure mode is pass; a tick error is logged, not proof of successful warming.
+
+The stored prefix is the whole replayable request, so it is bounded: Torana
+caps one durable value at 256 KiB by default, and this plugin splits the
+encoded request across at most eight such values — roughly a megabyte, which
+covers conversations well past the size where caching pays for itself. A
+conversation above that ceiling, or one the store refuses for its own
+reasons, is **not warmed**: no partial prefix is kept, nothing is sent, and
+the entry records the reason. Superseded prefixes are deleted on the next
+tick, so a warmed conversation does not grow the store turn after turn. The
+durable store is shared with every other plugin and has a total budget of its
+own; warm a handful of conversations, never everything.
 
 ## Combine or disable
 

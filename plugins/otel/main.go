@@ -1,9 +1,10 @@
 // otel emits request-shape metrics on the way in and, on the way out, the
 // per-request signals the host exposes: latency, upstream status class, and
-// provider-reported token usage. Core ops metrics the host can observe more
-// reliably (every response, including vetoes) are also emitted host-side (see
-// internal/metrics); the plugin-side series exist so operators can slice by
-// whatever labels plugins add.
+// provider-reported token usage (input, output, cache read and cache write).
+// Core ops metrics the host can observe more reliably (every response,
+// including vetoes) are also emitted host-side (see internal/metrics); the
+// plugin-side series exist so operators can slice by whatever labels plugins
+// add.
 //
 // The response hook is dispatched for mutable JSON responses, for
 // OBSERVATIONAL stream-shaped dispatches (mutable=false, Message=nil, with
@@ -137,13 +138,30 @@ func responseMetrics(resp *pbv1.ChatResponse) []emission {
 		{"torana_plugin_request_duration_ms", sdk.MetricHistogram, float64(resp.DurationMs), labels},
 	}
 	if resp.Usage != nil {
-		if resp.Usage.InputTokens > 0 {
-			out = append(out, emission{"torana_plugin_tokens", sdk.MetricCounter,
-				float64(resp.Usage.InputTokens), withLabel(labels, "direction", "input")})
-		}
-		if resp.Usage.OutputTokens > 0 {
-			out = append(out, emission{"torana_plugin_tokens", sdk.MetricCounter,
-				float64(resp.Usage.OutputTokens), withLabel(labels, "direction", "output")})
+		// One series, four bounded directions. Cache reads and writes are the
+		// numbers that decide whether prompt caching is paying for itself —
+		// a warmed prefix shows up as reads, a lapsed one as writes — and
+		// they are not derivable from input/output: the provider reports
+		// them separately and they overlap the input tally differently per
+		// provider. Emitting them as directions rather than as new metric
+		// names keeps one query shape and cannot grow the label vocabulary.
+		//
+		// Zero stays unemitted, as it already does for input and output:
+		// cache_write_tokens is documented as 0 when unreported, so emitting
+		// it would claim a measured zero the provider never sent.
+		for _, series := range []struct {
+			direction string
+			tokens    int32
+		}{
+			{"input", resp.Usage.InputTokens},
+			{"output", resp.Usage.OutputTokens},
+			{"cache_read", resp.Usage.CacheReadTokens},
+			{"cache_write", resp.Usage.CacheWriteTokens},
+		} {
+			if series.tokens > 0 {
+				out = append(out, emission{"torana_plugin_tokens", sdk.MetricCounter,
+					float64(series.tokens), withLabel(labels, "direction", series.direction)})
+			}
 		}
 	}
 	return out
