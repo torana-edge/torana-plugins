@@ -3,8 +3,8 @@
 // textual user turn plus bounded request facts are included in state.
 //
 // A decision is durable and conversation-sticky by default. The stored record
-// is bound to the exact normalized policy hash; editing the question, model,
-// threshold, authentication mode, or any route forces a fresh decision.
+// is bound to the exact normalized policy hash; editing any policy field,
+// including timeout or input bound, forces a fresh decision.
 // Request contents are never mutated, preserving provider prompt-prefix bytes.
 package main
 
@@ -97,10 +97,9 @@ type systemOneResponse struct {
 }
 
 type choiceAnswer struct {
-	Type          string             `json:"type"`
-	Choice        string             `json:"choice"`
-	Confidence    *float64           `json:"confidence"`
-	Probabilities map[string]float64 `json:"probabilities,omitempty"`
+	Type       string   `json:"type"`
+	Choice     string   `json:"choice"`
+	Confidence *float64 `json:"confidence"`
 }
 
 func sticky(cfg config) bool { return cfg.Sticky == nil || *cfg.Sticky }
@@ -141,11 +140,11 @@ func loadConfig() (config, string, bool, error) {
 }
 
 func validateConfig(cfg config) error {
-	if cfg.DecisionModel != strings.TrimSpace(cfg.DecisionModel) || cfg.DecisionModel == "" || len(cfg.DecisionModel) > maximumModelBytes {
-		return errors.New("decision_model must be 1-256 bytes without leading or trailing whitespace")
+	if cfg.DecisionModel != strings.TrimSpace(cfg.DecisionModel) || cfg.DecisionModel == "" || utf8.RuneCountInString(cfg.DecisionModel) > maximumModelBytes {
+		return errors.New("decision_model must be 1-256 characters without leading or trailing whitespace")
 	}
-	if strings.TrimSpace(cfg.Question) == "" || len(cfg.Question) > 2_000 {
-		return errors.New("question must be 1-2000 bytes")
+	if strings.TrimSpace(cfg.Question) == "" || utf8.RuneCountInString(cfg.Question) > 2_000 {
+		return errors.New("question must be 1-2000 characters")
 	}
 	if len(cfg.Routes) < 2 || len(cfg.Routes) > maximumRoutes {
 		return fmt.Errorf("routes must contain 2-%d choices", maximumRoutes)
@@ -154,8 +153,8 @@ func validateConfig(cfg config) error {
 		if !choiceIDPattern.MatchString(id) {
 			return fmt.Errorf("route %q has an invalid choice id", id)
 		}
-		if strings.TrimSpace(target.Description) == "" || len(target.Description) > 1_000 {
-			return fmt.Errorf("route %q needs a description of at most 1000 bytes", id)
+		if strings.TrimSpace(target.Description) == "" || utf8.RuneCountInString(target.Description) > 1_000 {
+			return fmt.Errorf("route %q needs a description of at most 1000 characters", id)
 		}
 		if target.Provider != strings.TrimSpace(target.Provider) || target.Model != strings.TrimSpace(target.Model) {
 			return fmt.Errorf("route %q provider/model must not have leading or trailing whitespace", id)
@@ -163,8 +162,8 @@ func validateConfig(cfg config) error {
 		if target.Provider == "" && target.Model == "" {
 			return fmt.Errorf("route %q must set provider or model", id)
 		}
-		if len(target.Provider) > maximumNameBytes || len(target.Model) > maximumModelBytes {
-			return fmt.Errorf("route %q target is too long", id)
+		if utf8.RuneCountInString(target.Provider) > maximumNameBytes || utf8.RuneCountInString(target.Model) > maximumModelBytes {
+			return fmt.Errorf("route %q provider/model exceeds its character limit", id)
 		}
 	}
 	if math.IsNaN(cfg.MinimumConfidence) || math.IsInf(cfg.MinimumConfidence, 0) || cfg.MinimumConfidence < 0 || cfg.MinimumConfidence > 1 {
@@ -229,6 +228,10 @@ func init() {
 		}
 
 		if sticky(cfg) {
+			// Persist before staging the verdict: a state write failure must
+			// leave this request unchanged. The host may later reject the route;
+			// replaying the same choice is intentional, and host telemetry (not
+			// this record) is authoritative for whether routing actually applied.
 			record := storedDecision{PolicyHash: policyHash, Choice: choice, Provider: target.Provider, Model: target.Model}
 			if err := sdk.StateSetJSON(stateKey, record); err != nil {
 				return fallback("state_write_failed"), nil
@@ -291,9 +294,9 @@ func decide(cfg config, state requestState) (string, float64, bool) {
 		return "", 0, false
 	}
 	var answer choiceAnswer
-	decoder := json.NewDecoder(strings.NewReader(string(raw)))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&answer); err != nil || answer.Type != "choice" || answer.Confidence == nil ||
+	// The service may add response metadata. Decode only fields that control
+	// routing, then validate their type, exact configured choice and confidence.
+	if err := json.Unmarshal(raw, &answer); err != nil || answer.Type != "choice" || answer.Confidence == nil ||
 		math.IsNaN(*answer.Confidence) || math.IsInf(*answer.Confidence, 0) || *answer.Confidence < 0 || *answer.Confidence > 1 {
 		fallback("malformed_answer")
 		return "", 0, false

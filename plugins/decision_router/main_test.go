@@ -35,10 +35,18 @@ func request(conversation, text string) *pbv1.ChatRequest {
 		Messages: []*pbv1.Message{
 			{Role: "system", Blocks: []*pbv1.RequestBlock{textBlock("private historical system prompt")}},
 			{Role: "user", Blocks: []*pbv1.RequestBlock{textBlock("old user turn must not be sent")}},
-			{Role: "assistant", Blocks: []*pbv1.RequestBlock{textBlock("old answer must not be sent")}},
+			{Role: "assistant", Blocks: []*pbv1.RequestBlock{
+				textBlock("old answer must not be sent"),
+				{Kind: &pbv1.RequestBlock_ToolUse{ToolUse: &pbv1.RequestToolUseBlock{
+					Id: "call-1", Name: "read", ArgumentsJson: []byte(`{"canary":"private-tool-arguments-731"}`),
+				}}},
+			}},
+			{Role: "tool", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolResult{ToolResult: &pbv1.RequestToolResultBlock{
+				ToolCallId: "call-1", ToolName: "read", Content: []*pbv1.ToolResultContentBlock{{Kind: &pbv1.ToolResultContentBlock_Text{Text: &pbv1.ToolResultTextBlock{Text: "private-tool-result-839"}}}},
+			}}}}},
 			{Role: "user", Blocks: []*pbv1.RequestBlock{textBlock(text)}},
 		},
-		Tools:          []*pbv1.ToolDef{{Name: "read", ParametersJson: []byte(`{"type":"object"}`)}, {Name: "shell", ParametersJson: []byte(`{"type":"object"}`)}},
+		Tools:          []*pbv1.ToolDef{{Name: "read", ParametersJson: []byte(`{"type":"object","description":"private-tool-schema-427"}`)}, {Name: "shell", ParametersJson: []byte(`{"type":"object"}`)}},
 		ToranaMetaJson: []byte(`{"_conversation_id":"` + conversation + `","_provider":"original"}`),
 	}
 }
@@ -124,7 +132,7 @@ func TestRoutesFromValidatedClosedChoice(t *testing.T) {
 		t.Fatalf("state = %+v", body.State)
 	}
 	wire := string(sent.Body)
-	for _, forbidden := range []string{"private historical", "old user turn", "old answer"} {
+	for _, forbidden := range []string{"private historical", "old user turn", "old answer", "private-tool-schema-427", "private-tool-arguments-731", "private-tool-result-839"} {
 		if strings.Contains(wire, forbidden) {
 			t.Fatalf("sent historical content %q", forbidden)
 		}
@@ -233,7 +241,7 @@ func TestSafeFallbacksNeverRoute(t *testing.T) {
 		{"missing answer", 200, []byte(`{"answers":{}}`), baseConfig, false},
 		{"unknown choice", 200, response("attacker-provider", 0.99), baseConfig, false},
 		{"low confidence", 200, response("fast", 0.79), baseConfig, false},
-		{"adversarial extra field", 200, []byte(`{"answers":{"route":{"type":"choice","choice":"fast","confidence":0.99,"provider":"attacker"}}}`), baseConfig, false},
+		{"wrong answer type", 200, []byte(`{"answers":{"route":{"type":"score","choice":"fast","confidence":0.99}}}`), baseConfig, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -254,6 +262,49 @@ func TestSafeFallbacksNeverRoute(t *testing.T) {
 			}
 			if !proto.Equal(req, before) {
 				t.Fatal("fallback mutated request")
+			}
+		})
+	}
+}
+
+func TestUnknownResponseMetadataCannotChangeConfiguredRoute(t *testing.T) {
+	h := sdktest.New(t).SetConfig(baseConfig)
+	stubDecision(h, 200, []byte(`{"answers":{"route":{"type":"choice","choice":"fast","confidence":0.99,"provider":"attacker-provider","future_metadata":{"x":1}}}}`), nil)
+	if res := h.BeforeRequest(request("future-fields", "route me")); res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	got := routes(h)
+	if len(got) != 1 || got[0].Provider != "fast-provider" || got[0].Model != "fast-model" {
+		t.Fatalf("unknown response field changed the configured route: %+v", got)
+	}
+}
+
+func TestUnicodeConfigLimitsMatchSchemaCharacters(t *testing.T) {
+	tests := []struct {
+		name  string
+		set   func(*config, string)
+		limit int
+	}{
+		{"decision model", func(c *config, s string) { c.DecisionModel = s }, maximumModelBytes},
+		{"question", func(c *config, s string) { c.Question = s }, 2_000},
+		{"description", func(c *config, s string) { r := c.Routes["fast"]; r.Description = s; c.Routes["fast"] = r }, 1_000},
+		{"provider", func(c *config, s string) { r := c.Routes["fast"]; r.Provider = s; c.Routes["fast"] = r }, maximumNameBytes},
+		{"route model", func(c *config, s string) { r := c.Routes["fast"]; r.Model = s; c.Routes["fast"] = r }, maximumModelBytes},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, row := range []struct {
+				length int
+				valid  bool
+			}{{tc.limit, true}, {tc.limit + 1, false}} {
+				var cfg config
+				if err := json.Unmarshal([]byte(baseConfig), &cfg); err != nil {
+					t.Fatal(err)
+				}
+				tc.set(&cfg, strings.Repeat("雪", row.length))
+				if err := validateConfig(cfg); (err == nil) != row.valid {
+					t.Fatalf("%d Unicode code points: validateConfig err=%v, want valid=%v", row.length, err, row.valid)
+				}
 			}
 		})
 	}
