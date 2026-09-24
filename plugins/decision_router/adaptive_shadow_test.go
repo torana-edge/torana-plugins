@@ -8,6 +8,7 @@ import (
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"github.com/torana-edge/torana-plugin-sdk/sdktest"
+	"google.golang.org/protobuf/proto"
 )
 
 const shadowConfigJSON = `{
@@ -152,6 +153,40 @@ func TestShadowRecoversCorruptState(t *testing.T) {
 	var state shadowState
 	if !found || json.Unmarshal([]byte(raw), &state) != nil || state.UserTurns != 1 {
 		t.Fatalf("state was not reset: found=%v value=%q", found, raw)
+	}
+}
+
+func TestShadowResultIdentityHandlesMissingCallIDsAndUnflaggedFormats(t *testing.T) {
+	flagged := true
+	req := &pbv1.ChatRequest{Messages: []*pbv1.Message{{Role: "tool", Blocks: []*pbv1.RequestBlock{
+		{Kind: &pbv1.RequestBlock_ToolResult{ToolResult: &pbv1.RequestToolResultBlock{ToolName: "search", IsError: &flagged}}},
+		{Kind: &pbv1.RequestBlock_ToolResult{ToolResult: &pbv1.RequestToolResultBlock{ToolName: "search"}}},
+	}}}}
+	results := shadowNewResultCandidates(req)
+	if len(results) != 2 || results[0].ID == results[1].ID || !results[0].Error || results[1].Error {
+		t.Fatalf("result observations = %+v", results)
+	}
+}
+
+func TestShadowClassifierRunsOnceAcrossStateConflicts(t *testing.T) {
+	var policy map[string]any
+	if err := json.Unmarshal([]byte(shadowConfigJSON), &policy); err != nil {
+		t.Fatal(err)
+	}
+	policy["classifier"] = map[string]any{"enabled": true, "decision_model": "jev-latest", "question": "How hard is this task?"}
+	raw, _ := json.Marshal(policy)
+	h := sdktest.New(t).SetConfig(string(raw))
+	classifications := 0
+	stubDecision(h, 200, response("strong", 0.95), func(*pbv1.OutboundHTTPRequestArgs) { classifications++ })
+	h.StubHostCall("env.state_compare_and_set", func(string) (string, error) {
+		result, _ := proto.Marshal(&pbv1.StateMutationResult{Applied: false})
+		return sdktest.HostResultValue(result), nil
+	})
+	if result := h.BeforeRequest(request("conflict-session", "Fix this race")); result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	if classifications != 1 || len(routes(h)) != 0 {
+		t.Fatalf("classifications=%d routes=%v", classifications, routes(h))
 	}
 }
 
