@@ -37,7 +37,7 @@ func TestManifestContract(t *testing.T) {
 	if manifest.ABI != "v1" || manifest.FailureMode != "pass" {
 		t.Fatalf("abi/failure = %s/%s", manifest.ABI, manifest.FailureMode)
 	}
-	if len(manifest.Hooks) != 1 || manifest.Hooks[0].Name != "run_before_request" {
+	if len(manifest.Hooks) != 2 || manifest.Hooks[0].Name != "run_before_request" || manifest.Hooks[1].Name != "run_after_response" {
 		t.Fatalf("hooks = %+v", manifest.Hooks)
 	}
 	var got []string
@@ -50,7 +50,7 @@ func TestManifestContract(t *testing.T) {
 		got = append(got, permission.Name)
 	}
 	sort.Strings(got)
-	want := []string{"env.credential_get", "env.emit_metric", "env.http_request", "env.log", "env.plugin_config", "env.state_get", "env.state_set"}
+	want := []string{"env.credential_get", "env.emit_metric", "env.http_request", "env.log", "env.meta_get", "env.meta_set", "env.plugin_config", "env.state_get", "env.state_set"}
 	if len(got) != len(want) {
 		t.Fatalf("permissions = %v, want %v", got, want)
 	}

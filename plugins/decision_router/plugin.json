@@ -8,7 +8,7 @@
   "failure_mode": "pass",
   "repository": "https://github.com/torana-edge/torana-plugins",
   "description": "Measures adaptive model-ladder suggestions without changing any request or route.",
-  "hooks": [{"name": "run_before_request"}],
+  "hooks": [{"name": "run_before_request"}, {"name": "run_after_response"}],
   "permissions": [
     {"name": "env.plugin_config", "description": "Read the operator's shadow-mode model ladder and signal thresholds"},
     {"name": "env.http_request", "description": "Ask the approved System One endpoint for an optional closed-set shadow classification"},
@@ -16,7 +16,9 @@
     {"name": "env.state_get", "description": "Read this conversation's shadow measurement state"},
     {"name": "env.state_set", "description": "Remember shadow measurements across turns and Torana restarts"},
     {"name": "env.emit_metric", "description": "Record possible suggestions and value-free fallback outcomes"},
-    {"name": "env.log", "description": "Report value-free fallback reasons without prompts, responses, or credentials"}
+    {"name": "env.log", "description": "Report value-free fallback reasons without prompts, responses, or credentials"},
+    {"name": "env.meta_get", "description": "Find this request's shadow-state key after the response"},
+    {"name": "env.meta_set", "description": "Carry this request's shadow-state key to the after-response hook"}
   ],
   "credentials": [
     {"slot": "api-key", "description": "Bearer token for an authenticated System One endpoint", "required": false}
