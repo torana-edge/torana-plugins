@@ -3,14 +3,14 @@
   "type": "object",
   "additionalProperties": false,
   "oneOf": [
-    {"required": ["decision_model", "question", "routes"], "not": {"required": ["mode"]}},
-    {"required": ["mode", "ladders"], "properties": {"mode": {"const": "shadow"}}}
+    {"required": ["mode", "ladders"], "properties": {"mode": {"const": "shadow"}}},
+    {"required": ["mode"], "properties": {"mode": {"const": "off"}}, "maxProperties": 1}
   ],
   "properties": {
-    "mode": {"type": "string", "const": "shadow", "title": "Adaptive shadow mode", "description": "Measure possible ladder changes without routing any request."},
+    "mode": {"type": "string", "enum": ["shadow", "off"], "title": "Mode", "description": "Measure possible route suggestions without changing requests, or turn the plugin off."},
     "ladders": {
       "type": "object", "minProperties": 1, "maxProperties": 32,
-      "title": "Provider ladders", "description": "Shadow-only ordered model steps for each Torana provider.",
+      "title": "Provider ladders", "description": "Ordered model steps for each Torana provider.",
       "propertyNames": {"pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
       "additionalProperties": {
         "type": "object", "additionalProperties": false, "required": ["start", "steps"],
@@ -18,7 +18,11 @@
           "start": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
           "steps": {"type": "array", "minItems": 2, "maxItems": 32, "items": {
             "type": "object", "additionalProperties": false, "required": ["id", "description", "model"],
-            "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"}, "description": {"type": "string", "minLength": 1, "maxLength": 1000, "pattern": "\\S"}, "model": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S"}}
+            "properties": {
+              "id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+              "description": {"type": "string", "minLength": 1, "maxLength": 1000, "pattern": "\\S"},
+              "model": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S"}
+            }
           }}
         }
       }
@@ -27,7 +31,8 @@
       "type": "object", "additionalProperties": false,
       "properties": {
         "enabled": {"type": "boolean", "default": false},
-        "decision_model": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^\\S(?:.*\\S)?$"}, "question": {"type": "string", "minLength": 1, "maxLength": 2000, "pattern": "\\S"},
+        "decision_model": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^\\S(?:.*\\S)?$"},
+        "question": {"type": "string", "minLength": 1, "maxLength": 2000, "pattern": "\\S"},
         "minimum_confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "max_state_bytes": {"type": "integer", "minimum": 256, "maximum": 65536},
         "timeout_ms": {"type": "integer", "minimum": 100, "maximum": 1500},
@@ -42,26 +47,6 @@
         "reevaluate_every_user_turns": {"type": "integer", "minimum": 1, "maximum": 100},
         "suggestion_cooldown_user_turns": {"type": "integer", "minimum": 1, "maximum": 100}
       }
-    },
-    "decision_model": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^\\S(?:.*\\S)?$", "title": "Decision model", "description": "Model identifier understood by the bound System One server, such as jev-latest, von-1.0.0, or a local Hugging Face model ID. Leading and trailing whitespace are rejected."},
-    "question": {"type": "string", "minLength": 1, "maxLength": 2000, "title": "Routing question", "description": "The closed question the decision service answers from the latest user turn and bounded request facts."},
-    "routes": {
-      "type": "object", "minProperties": 2, "maxProperties": 32, "title": "Routes", "description": "Choice IDs and their approved Torana provider/model targets.",
-      "propertyNames": {"pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
-      "additionalProperties": {
-        "type": "object", "additionalProperties": false, "required": ["description"],
-        "properties": {
-          "description": {"type": "string", "minLength": 1, "maxLength": 1000},
-          "provider": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^\\S(?:.*\\S)?$"},
-          "model": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^\\S(?:.*\\S)?$"}
-        },
-        "anyOf": [{"required": ["provider"]}, {"required": ["model"]}]
-      }
-    },
-    "minimum_confidence": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.8, "title": "Minimum confidence", "description": "Keep the current route when the returned confidence is below this value."},
-    "max_state_bytes": {"type": "integer", "minimum": 256, "maximum": 65536, "default": 8192, "title": "Maximum user-turn bytes", "description": "Maximum UTF-8 bytes from the latest textual user turn sent to the decision service."},
-    "timeout_ms": {"type": "integer", "minimum": 100, "maximum": 90000, "default": 5000, "title": "Timeout (ms)"},
-    "authentication": {"type": "string", "enum": ["none", "bearer"], "default": "none", "title": "Authentication", "description": "Use none for local endpoints, or bearer with the separately bound api-key credential."},
-    "sticky": {"type": "boolean", "default": true, "title": "Keep route for conversation", "description": "Reuse the decision across turns and restarts. Disable only when deliberate per-request rerouting is worth changing model/provider and prompt-cache identity."}
+    }
   }
 }

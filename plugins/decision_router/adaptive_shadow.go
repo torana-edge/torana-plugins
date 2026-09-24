@@ -70,13 +70,6 @@ type shadowState struct {
 	SuggestedAtTurn int    `json:"suggested_at_turn"`
 }
 
-func shadowPolicySelected(raw string) bool {
-	var header struct {
-		Mode string `json:"mode"`
-	}
-	return json.Unmarshal([]byte(raw), &header) == nil && header.Mode == "shadow"
-}
-
 func loadShadowPolicy(raw string) (shadowPolicy, string, error) {
 	var policy shadowPolicy
 	if err := jsontext.Validate([]byte(raw)); err != nil {
