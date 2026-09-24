@@ -153,7 +153,7 @@ type pluginContract struct {
 	conflictsWith    []string
 }
 
-// pluginContracts is the executable twelve-plugin release contract. Every
+// pluginContracts is the executable thirteen-plugin release contract. Every
 // manifest must match its row exactly.
 var pluginContracts = map[string]pluginContract{
 	"auth": {hooks: []string{"run_before_request"},
@@ -165,6 +165,8 @@ var pluginContracts = map[string]pluginContract{
 	"compactor": {hooks: []string{"run_before_request"},
 		permissions:   []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.host_call.torana_evaluate_compaction", "env.host_call.torana_record_savings", "env.model_complete", "env.model_pricing", "env.plugin_config", "env.shared_cache_get", "ir.tool_results.write"},
 		conflictsWith: []string{"torana/keyword_compactor"}},
+	"decision_router": {hooks: []string{"run_before_request"},
+		permissions: []string{"env.credential_get", "env.emit_metric", "env.http_request", "env.log", "env.plugin_config", "env.route_request", "env.state_get", "env.state_set"}},
 	"intent": {hooks: []string{"run_before_request", "run_after_response", "run_on_stream_chunk"},
 		permissions: []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.log", "env.meta_get", "env.meta_set", "env.plugin_config", "env.shared_cache_set", "ir.cache_control.write", "ir.messages.write.assistant", "ir.messages.write.developer", "ir.messages.write.other", "ir.messages.write.system", "ir.messages.write.tool", "ir.messages.write.user", "ir.stream.write", "ir.tool_results.write", "ir.tools.write"}},
 	"keyword_compactor": {hooks: []string{"run_before_request"},
@@ -297,7 +299,7 @@ func main() {
 		// dependency or incompatibility declaration fails here.
 		contract, ok := pluginContracts[entry.Name()]
 		if !ok {
-			panic(fmt.Sprintf("%s: no entry in the eleven-plugin contract table", entry.Name()))
+			panic(fmt.Sprintf("%s: no entry in the thirteen-plugin contract table", entry.Name()))
 		}
 		if !sameStringSet(contract.hooks, hookNames(m.Hooks)) {
 			panic(fmt.Sprintf("%s: hooks %v do not match the contract %v", entry.Name(), hookNames(m.Hooks), contract.hooks))

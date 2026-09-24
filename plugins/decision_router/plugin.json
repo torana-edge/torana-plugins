@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "id": "torana/decision_router",
+  "name": "decision_router",
+  "version": "0.1.0",
+  "abi_version": "v1",
+  "minimum_torana_version": "0.1.0",
+  "failure_mode": "pass",
+  "repository": "https://github.com/torana-edge/torana-plugins",
+  "description": "Routes each conversation using one closed-set decision from an operator-approved System One endpoint, then keeps that route stable across later turns and restarts.",
+  "hooks": [{"name": "run_before_request"}],
+  "permissions": [
+    {"name": "env.plugin_config", "description": "Read the routing question, confidence threshold, and operator-defined route map"},
+    {"name": "env.http_request", "description": "Ask the approved System One endpoint for a closed-set route decision"},
+    {"name": "env.credential_get", "description": "Read the separately bound API key when bearer authentication is enabled"},
+    {"name": "env.state_get", "description": "Read the route already chosen for this conversation and exact policy"},
+    {"name": "env.state_set", "description": "Remember the chosen route across turns and Torana restarts"},
+    {"name": "env.route_request", "description": "Apply only a provider/model route explicitly configured by the operator"},
+    {"name": "env.emit_metric", "description": "Count routing, sticky reuse, and bounded fallback outcomes"},
+    {"name": "env.log", "description": "Report value-free fallback reasons without prompts, responses, or credentials"}
+  ],
+  "credentials": [
+    {"slot": "api-key", "description": "Bearer token for an authenticated System One endpoint", "required": false}
+  ],
+  "http_endpoints": [
+    {"name": "decision-service", "description": "System One-compatible decision endpoint", "origin": "https://api.typesafe.ai", "methods": ["POST"], "required": true, "timeout_ms": 90000, "max_request_bytes": 131072, "max_response_bytes": 65536, "max_calls_per_minute": 60}
+  ]
+}
