@@ -137,6 +137,37 @@ func TestShadowSeparatesSideRequestsWithinOneHarnessSession(t *testing.T) {
 	}
 }
 
+func TestShadowThreadRootIgnoresMovingCacheBreakpoints(t *testing.T) {
+	breakpoint := func() *pbv1.RequestBlock {
+		return &pbv1.RequestBlock{Kind: &pbv1.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pbv1.RequestCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}}
+	}
+	first := request("marker-session", "Refactor the scheduler")
+	first.Messages[0].Blocks = append(first.Messages[0].Blocks, breakpoint())
+	first.Messages[1].Blocks = append(first.Messages[1].Blocks, breakpoint())
+	second := proto.Clone(first).(*pbv1.ChatRequest)
+	second.Messages[0].Blocks = second.Messages[0].Blocks[:1]
+	second.Messages[1].Blocks = second.Messages[1].Blocks[:1]
+	second.Messages = append(second.Messages,
+		&pbv1.Message{Role: "assistant", Blocks: []*pbv1.RequestBlock{textBlock("ok")}},
+		&pbv1.Message{Role: "user", Blocks: []*pbv1.RequestBlock{textBlock("next"), breakpoint()}},
+	)
+	key := shadowStateKey("marker-session", first)
+	if key == "" || key != shadowStateKey("marker-session", second) {
+		t.Fatal("moving cache breakpoint changed the thread state key")
+	}
+	h := sdktest.New(t).SetConfig(shadowConfigJSON)
+	for _, req := range []*pbv1.ChatRequest{first, second} {
+		if result := h.BeforeRequest(req); result.Err != nil {
+			t.Fatal(result.Err)
+		}
+	}
+	raw, found := h.State(key)
+	var state shadowState
+	if !found || json.Unmarshal([]byte(raw), &state) != nil || state.UserTurns != 2 {
+		t.Fatalf("lost state across marker move: found=%v state=%+v", found, state)
+	}
+}
+
 func TestShadowRecoversCorruptState(t *testing.T) {
 	req := request("corrupt-session", "Fix the service")
 	key := shadowStateKey("corrupt-session", req)

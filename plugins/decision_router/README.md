@@ -125,7 +125,8 @@ Use this alternative `config` object to run shadow mode on an existing
 
 The ladder belongs to a Torana provider name. An unknown provider is left
 alone. Shadow state is durable per conversation thread (the first system/user
-messages distinguish side requests within a harness session). Known old tool
+text distinguishes side requests within a harness session). Moving cache
+breakpoints do not reset it; a changed system prompt does. Known old tool
 results replayed by the harness are not counted as new failures; when a
 compacted history loses the replay anchor, shadow mode conservatively starts a
 new baseline. A new user turn can produce a

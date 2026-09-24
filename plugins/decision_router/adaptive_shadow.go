@@ -14,7 +14,6 @@ import (
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"github.com/torana-edge/torana-plugin-sdk/pb/v1/jsontext"
-	"google.golang.org/protobuf/proto"
 )
 
 const maximumShadowTimeoutMS = 1500
@@ -243,22 +242,40 @@ func shadowStepForModel(ladder shadowLadder, model string) string {
 
 func shadowStateKey(conversationID string, req *pbv1.ChatRequest) string {
 	// A harness session can contain title generation, side requests and
-	// subagents. Their first system/user messages form a conservative thread
-	// root, preventing those requests from moving the main thread's ladder.
-	var root []*pbv1.Message
+	// subagents. Use only stable text in their leading system messages and
+	// first user message. Cache markers and signatures move between turns.
+	if req == nil {
+		return ""
+	}
+	type rootMessage struct {
+		Role string   `json:"role"`
+		Text []string `json:"text"`
+	}
+	var root []rootMessage
+	seenUser := false
 	for _, msg := range req.Messages {
 		if msg == nil {
 			continue
 		}
-		if msg.Role == "system" && len(root) == 0 {
-			root = append(root, msg)
+		if msg.Role != "system" && msg.Role != "user" {
+			continue
 		}
+		part := rootMessage{Role: msg.Role}
+		for _, block := range msg.Blocks {
+			if block != nil && block.GetText() != nil {
+				part.Text = append(part.Text, block.GetText().Text)
+			}
+		}
+		root = append(root, part)
 		if msg.Role == "user" {
-			root = append(root, msg)
+			seenUser = true
 			break
 		}
 	}
-	encoded, _ := proto.MarshalOptions{Deterministic: true}.Marshal(&pbv1.ChatRequest{Messages: root})
+	if !seenUser {
+		return ""
+	}
+	encoded, _ := json.Marshal(root)
 	sum := sha256.Sum256(append(append([]byte(conversationID), 0), encoded...))
 	return "decision/v2/shadow/" + hex.EncodeToString(sum[:])
 }
@@ -292,6 +309,10 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 		return sdk.PassRequest(), nil
 	}
 	key := shadowStateKey(conversation, req)
+	if key == "" {
+		emit("shadow_missing_thread_root", "")
+		return sdk.PassRequest(), nil
+	}
 	var classified bool
 	var candidate string
 	var confidence float64
