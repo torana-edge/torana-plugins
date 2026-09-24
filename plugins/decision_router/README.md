@@ -121,16 +121,24 @@ Use this alternative `config` object to run shadow mode on an existing
 ```
 
 The ladder belongs to a Torana provider name. An unknown provider is left
-alone. Shadow state is durable per conversation; old tool results replayed by
-the harness are not counted as new failures. A new user turn can produce a
+alone. Shadow state is durable per conversation thread (the first system/user
+messages distinguish side requests within a harness session). Known old tool
+results replayed by the harness are not counted as new failures; when a
+compacted history loses the replay anchor, shadow mode conservatively starts a
+new baseline. A new user turn can produce a
 `would_suggest` metric with configured step IDs. **No model is switched and no
 request content is changed.** Without a `classifier` block, shadow mode makes
 no call to the decision endpoint. To evaluate the latest user turn with a
 System One-compatible service, add `classifier.enabled: true` plus its
 `decision_model`, `question`, and optional timeout/authentication fields, then
 bind the `decision-service` endpoint as described below. Shadow mode sends no
-history or tool results to that service. If bearer authentication is enabled,
+history or tool results to that service. Its decision call is bounded to 1.5
+seconds. If bearer authentication is enabled,
 it sends the separately bound service credential as an authorization header.
+
+The explicit tool-error trigger currently observes Anthropic-format tool
+results, whose error bit survives canonicalization. Other supported formats
+do not reliably provide that bit; their results do not count as failures.
 
 Tool errors are an observation signal, not proof that a stronger model will
 help: broken tools and permissions also cause repeated failures. Shadow mode

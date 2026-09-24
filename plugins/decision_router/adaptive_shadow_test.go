@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"github.com/torana-edge/torana-plugin-sdk/sdktest"
 )
@@ -28,7 +29,7 @@ func TestShadowObservesNewFailuresWithoutRouting(t *testing.T) {
 		t.Fatal("shadow policy routed the first request")
 	}
 	var state shadowState
-	raw, found := h.State(shadowStateKey("shadow-session"))
+	raw, found := h.State(shadowStateKey("shadow-session", req))
 	if !found || json.Unmarshal([]byte(raw), &state) != nil || state.Step != "fast" || state.UserTurns != 1 {
 		t.Fatalf("initial shadow state: found=%v state=%+v", found, state)
 	}
@@ -37,7 +38,7 @@ func TestShadowObservesNewFailuresWithoutRouting(t *testing.T) {
 	if res := h.BeforeRequest(req); res.Err != nil {
 		t.Fatal(res.Err)
 	}
-	raw, _ = h.State(shadowStateKey("shadow-session"))
+	raw, _ = h.State(shadowStateKey("shadow-session", req))
 	if err := json.Unmarshal([]byte(raw), &state); err != nil || state.UserTurns != 1 {
 		t.Fatalf("retry counted as a new turn: %+v, %v", state, err)
 	}
@@ -75,7 +76,7 @@ func TestShadowObservesNewFailuresWithoutRouting(t *testing.T) {
 	if res := h.BeforeRequest(req); res.Err != nil {
 		t.Fatal(res.Err)
 	}
-	raw, _ = h.State(shadowStateKey("shadow-session"))
+	raw, _ = h.State(shadowStateKey("shadow-session", req))
 	if err := json.Unmarshal([]byte(raw), &state); err != nil || state.Step != "strong" {
 		t.Fatalf("harness switch not reconciled: %+v, %v", state, err)
 	}
@@ -94,6 +95,63 @@ func TestShadowRejectsMalformedLadders(t *testing.T) {
 		if _, _, err := loadShadowPolicy(raw); err == nil {
 			t.Fatalf("accepted invalid policy: %s", raw)
 		}
+	}
+}
+
+func TestShadowSeparatesSideRequestsWithinOneHarnessSession(t *testing.T) {
+	h := sdktest.New(t).SetConfig(shadowConfigJSON)
+	main := request("one-session", "Fix the service")
+	main.Model = "strong-model"
+	side := request("one-session", "Generate a title")
+	side.Messages[1].Blocks = []*pbv1.RequestBlock{textBlock("Title-only side request")}
+	side.Model = "fast-model"
+	if shadowStateKey("one-session", main) == shadowStateKey("one-session", side) {
+		t.Fatal("side request shares the main thread's state key")
+	}
+	for _, req := range []*pbv1.ChatRequest{main, side, main} {
+		if result := h.BeforeRequest(req); result.Err != nil {
+			t.Fatal(result.Err)
+		}
+	}
+	var mainState, sideState shadowState
+	for key, dst := range map[string]*shadowState{
+		shadowStateKey("one-session", main): &mainState,
+		shadowStateKey("one-session", side): &sideState,
+	} {
+		raw, found := h.State(key)
+		if !found || json.Unmarshal([]byte(raw), dst) != nil {
+			t.Fatalf("missing or invalid state for %s", key)
+		}
+	}
+	if mainState.Step != "strong" || sideState.Step != "fast" || mainState.UserTurns != 1 || sideState.UserTurns != 1 {
+		t.Fatalf("main=%+v side=%+v", mainState, sideState)
+	}
+	for _, metric := range h.Metrics() {
+		if metric.Labels["outcome"] == "user_switch_unprompted" {
+			t.Fatalf("side request produced a false switch: %+v", metric)
+		}
+	}
+	if len(routes(h)) != 0 {
+		t.Fatal("shadow mode routed a request")
+	}
+}
+
+func TestShadowRecoversCorruptState(t *testing.T) {
+	req := request("corrupt-session", "Fix the service")
+	key := shadowStateKey("corrupt-session", req)
+	h := sdktest.New(t).SetConfig(shadowConfigJSON)
+	h.Run(func() {
+		if err := sdk.StateSet(key, "not-json"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if result := h.BeforeRequest(req); result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	raw, found := h.State(key)
+	var state shadowState
+	if !found || json.Unmarshal([]byte(raw), &state) != nil || state.UserTurns != 1 {
+		t.Fatalf("state was not reset: found=%v value=%q", found, raw)
 	}
 }
 

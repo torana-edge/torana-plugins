@@ -9,11 +9,15 @@ import (
 	"io"
 	"math"
 	"strings"
+	"unicode/utf8"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"github.com/torana-edge/torana-plugin-sdk/pb/v1/jsontext"
+	"google.golang.org/protobuf/proto"
 )
+
+const maximumShadowTimeoutMS = 1500
 
 // Shadow mode is a separate, non-routing policy. It measures whether a
 // conversation would benefit from a later ladder step without silently
@@ -37,13 +41,13 @@ type shadowStep struct {
 }
 
 type shadowClassifier struct {
-	Enabled           bool    `json:"enabled"`
-	DecisionModel     string  `json:"decision_model"`
-	Question          string  `json:"question"`
-	MinimumConfidence float64 `json:"minimum_confidence"`
-	MaxStateBytes     int     `json:"max_state_bytes"`
-	TimeoutMS         uint32  `json:"timeout_ms"`
-	Authentication    string  `json:"authentication"`
+	Enabled           bool     `json:"enabled"`
+	DecisionModel     string   `json:"decision_model"`
+	Question          string   `json:"question"`
+	MinimumConfidence *float64 `json:"minimum_confidence"`
+	MaxStateBytes     int      `json:"max_state_bytes"`
+	TimeoutMS         uint32   `json:"timeout_ms"`
+	Authentication    string   `json:"authentication"`
 }
 
 type shadowTriggers struct {
@@ -97,7 +101,7 @@ func loadShadowPolicy(raw string) (shadowPolicy, string, error) {
 		ids := make(map[string]bool, len(ladder.Steps))
 		for _, step := range ladder.Steps {
 			if !choiceIDPattern.MatchString(step.ID) || step.ID == "hold" || ids[step.ID] || strings.TrimSpace(step.Model) == "" ||
-				strings.TrimSpace(step.Description) == "" || len(step.Model) > maximumModelBytes || len(step.Description) > 1000 {
+				strings.TrimSpace(step.Description) == "" || utf8.RuneCountInString(step.Model) > maximumModelBytes || utf8.RuneCountInString(step.Description) > 1000 {
 				return policy, "", fmt.Errorf("invalid or repeated ladder step for provider %q", provider)
 			}
 			ids[step.ID] = true
@@ -125,23 +129,27 @@ func loadShadowPolicy(raw string) (shadowPolicy, string, error) {
 		return policy, "", errors.New("invalid shadow triggers")
 	}
 	if policy.Classifier.Enabled {
-		if policy.Classifier.MinimumConfidence == 0 {
-			policy.Classifier.MinimumConfidence = 0.8
+		if policy.Classifier.MinimumConfidence == nil {
+			defaultConfidence := 0.8
+			policy.Classifier.MinimumConfidence = &defaultConfidence
 		}
 		if policy.Classifier.MaxStateBytes == 0 {
 			policy.Classifier.MaxStateBytes = defaultStateBytes
 		}
 		if policy.Classifier.TimeoutMS == 0 {
-			policy.Classifier.TimeoutMS = defaultTimeoutMS
+			policy.Classifier.TimeoutMS = maximumShadowTimeoutMS
 		}
 		if policy.Classifier.Authentication == "" {
 			policy.Classifier.Authentication = "none"
 		}
-		if policy.Classifier.DecisionModel == "" || policy.Classifier.Question == "" ||
+		if policy.Classifier.DecisionModel == "" || strings.TrimSpace(policy.Classifier.DecisionModel) != policy.Classifier.DecisionModel ||
+			strings.TrimSpace(policy.Classifier.Question) == "" ||
+			utf8.RuneCountInString(policy.Classifier.DecisionModel) > maximumModelBytes ||
+			utf8.RuneCountInString(policy.Classifier.Question) > 2000 ||
 			policy.Classifier.MaxStateBytes < 256 || policy.Classifier.MaxStateBytes > maximumStateBytes ||
-			policy.Classifier.TimeoutMS < 100 || policy.Classifier.TimeoutMS > maximumTimeoutMS ||
+			policy.Classifier.TimeoutMS < 100 || policy.Classifier.TimeoutMS > maximumShadowTimeoutMS ||
 			(policy.Classifier.Authentication != "none" && policy.Classifier.Authentication != "bearer") ||
-			math.IsNaN(policy.Classifier.MinimumConfidence) || math.IsInf(policy.Classifier.MinimumConfidence, 0) || policy.Classifier.MinimumConfidence < 0 || policy.Classifier.MinimumConfidence > 1 {
+			math.IsNaN(*policy.Classifier.MinimumConfidence) || math.IsInf(*policy.Classifier.MinimumConfidence, 0) || *policy.Classifier.MinimumConfidence < 0 || *policy.Classifier.MinimumConfidence > 1 {
 			return policy, "", errors.New("invalid shadow classifier")
 		}
 	}
@@ -200,7 +208,13 @@ func shadowNewResultCandidates(req *pbv1.ChatRequest) []shadowResult {
 		for _, result := range sdk.ToolResults(msg) {
 			// Call identity, not content, deduplicates history replay. Two
 			// independent failures with identical text remain distinct.
-			sum := sha256.Sum256([]byte(result.ToolCallId + "\x00" + result.ToolName))
+			identity := result.ToolCallId
+			if identity == "" {
+				// Some formats have no call ID. Position distinguishes repeated
+				// same-name calls while a stable replay prefix is present.
+				identity = fmt.Sprintf("position:%d", len(results))
+			}
+			sum := sha256.Sum256([]byte(identity + "\x00" + result.ToolName))
 			results = append(results, shadowResult{
 				ID: hex.EncodeToString(sum[:]), Error: result.IsError != nil && *result.IsError,
 			})
@@ -227,8 +241,25 @@ func shadowStepForModel(ladder shadowLadder, model string) string {
 	return ""
 }
 
-func shadowStateKey(conversationID string) string {
-	sum := sha256.Sum256([]byte(conversationID))
+func shadowStateKey(conversationID string, req *pbv1.ChatRequest) string {
+	// A harness session can contain title generation, side requests and
+	// subagents. Their first system/user messages form a conservative thread
+	// root, preventing those requests from moving the main thread's ladder.
+	var root []*pbv1.Message
+	for _, msg := range req.Messages {
+		if msg == nil {
+			continue
+		}
+		if msg.Role == "system" && len(root) == 0 {
+			root = append(root, msg)
+		}
+		if msg.Role == "user" {
+			root = append(root, msg)
+			break
+		}
+	}
+	encoded, _ := proto.MarshalOptions{Deterministic: true}.Marshal(&pbv1.ChatRequest{Messages: root})
+	sum := sha256.Sum256(append(append([]byte(conversationID), 0), encoded...))
 	return "decision/v2/shadow/" + hex.EncodeToString(sum[:])
 }
 
@@ -260,7 +291,11 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 		emit("shadow_missing_conversation", "")
 		return sdk.PassRequest(), nil
 	}
-	key := shadowStateKey(conversation)
+	key := shadowStateKey(conversation, req)
+	var classified bool
+	var candidate string
+	var confidence float64
+	var classOK bool
 	for attempt := 0; attempt < 3; attempt++ {
 		stored, found, err := sdk.StateGetVersioned(key)
 		if err != nil {
@@ -271,7 +306,8 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 		var version *string
 		if found {
 			if err := json.Unmarshal([]byte(stored.Value), &state); err != nil {
-				return sdk.RequestResult{}, fmt.Errorf("shadow state: %w", err)
+				emit("shadow_state_corrupt", "")
+				found = false
 			}
 			version = &stored.Version
 		}
@@ -332,8 +368,14 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 				target = ladder.Steps[index+1].ID
 			}
 			if policy.Classifier.Enabled {
-				candidate, confidence, classified := shadowClassify(req, policy.Classifier, ladder, errorCount, state.UserTurns)
-				if classified && confidence >= policy.Classifier.MinimumConfidence && candidate != "hold" {
+				if !classified {
+					candidate, confidence, classOK = shadowClassify(req, policy.Classifier, ladder, errorCount, state.UserTurns)
+					classified = true
+					if !classOK {
+						emit("shadow_classifier_unavailable", "")
+					}
+				}
+				if classOK && confidence >= *policy.Classifier.MinimumConfidence && candidate != "hold" {
 					want := shadowStepIndex(ladder, candidate)
 					if want > index && index+1 < len(ladder.Steps) {
 						target = ladder.Steps[index+1].ID
@@ -345,6 +387,7 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 			state.UserTurns-state.SuggestedAtTurn < policy.Triggers.SuggestionCooldown {
 			target = state.Step
 		}
+		repeatSuggestion := target != state.Step && target == state.LastSuggestion
 		if target != state.Step {
 			state.LastSuggestion, state.SuggestedAtTurn = target, state.UserTurns
 			state.RecentErrors = nil // a new failure batch is needed to repeat this signal
@@ -365,6 +408,7 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 		if target != state.Step {
 			sdk.EmitMetric(metricDecisionName, sdk.MetricCounter, 1, map[string]string{
 				"outcome": "would_suggest", "provider": provider, "from": state.Step, "to": target,
+				"repeat": fmt.Sprintf("%t", repeatSuggestion),
 			})
 		} else if shouldEvaluate {
 			emit("shadow_hold", state.Step)
