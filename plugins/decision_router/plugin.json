@@ -2,12 +2,12 @@
   "schema_version": 1,
   "id": "torana/decision_router",
   "name": "decision_router",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "abi_version": "v1",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "pass",
   "repository": "https://github.com/torana-edge/torana-plugins",
-  "description": "Routes each conversation using one closed-set decision from an operator-approved System One endpoint, then keeps that route stable across later turns and restarts.",
+  "description": "Routes a conversation with a closed-set decision, or measures adaptive ladder suggestions in opt-in shadow mode without changing requests.",
   "hooks": [{"name": "run_before_request"}],
   "permissions": [
     {"name": "env.plugin_config", "description": "Read the routing question, confidence threshold, and operator-defined route map"},
@@ -23,6 +23,6 @@
     {"slot": "api-key", "description": "Bearer token for an authenticated System One endpoint", "required": false}
   ],
   "http_endpoints": [
-    {"name": "decision-service", "description": "System One-compatible decision endpoint", "origin": "https://api.typesafe.ai", "methods": ["POST"], "required": true, "timeout_ms": 90000, "max_request_bytes": 131072, "max_response_bytes": 65536, "max_calls_per_minute": 60}
+    {"name": "decision-service", "description": "System One-compatible decision endpoint", "origin": "https://api.typesafe.ai", "methods": ["POST"], "required": false, "timeout_ms": 90000, "max_request_bytes": 131072, "max_response_bytes": 65536, "max_calls_per_minute": 60}
   ]
 }

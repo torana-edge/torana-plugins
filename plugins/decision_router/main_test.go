@@ -25,6 +25,22 @@ const baseConfig = `{
   "sticky":true
 }`
 
+func TestMissingDecisionServiceIsExplicitAndDoesNotRoute(t *testing.T) {
+	h := sdktest.New(t).SetConfig(baseConfig)
+	if result := h.BeforeRequest(request("missing-endpoint", "Fix this race")); result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	if len(routes(h)) != 0 {
+		t.Fatal("routed without a bound decision service")
+	}
+	for _, metric := range h.Metrics() {
+		if metric.Name == metricDecisionName && metric.Labels["outcome"] == "decision_service_not_configured" {
+			return
+		}
+	}
+	t.Fatal("missing decision service did not produce a classified configuration outcome")
+}
+
 func textBlock(text string) *pbv1.RequestBlock {
 	return &pbv1.RequestBlock{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: text}}}
 }

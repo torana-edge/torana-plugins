@@ -71,8 +71,9 @@ type storedDecision struct {
 }
 
 type requestState struct {
-	LatestUserTurn string       `json:"latest_user_turn"`
-	Request        requestFacts `json:"request"`
+	LatestUserTurn string             `json:"latest_user_turn"`
+	Request        requestFacts       `json:"request"`
+	Signals        *shadowSignalFacts `json:"signals,omitempty"`
 }
 
 type requestFacts struct {
@@ -183,6 +184,13 @@ func validateConfig(cfg config) error {
 
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
+		// Adaptive shadow policies are deliberately disjoint from the v1 sticky
+		// policy: a shadow run must never stage a routing verdict.
+		if raw, err := sdk.PluginConfig(); err != nil {
+			return sdk.RequestResult{}, err
+		} else if shadowPolicySelected(raw) {
+			return runAdaptiveShadow(req, raw)
+		}
 		cfg, policyHash, configured, err := loadConfig()
 		if err != nil {
 			return sdk.RequestResult{}, err
@@ -271,6 +279,12 @@ func decide(cfg config, state requestState) (string, float64, bool) {
 	response, err := sdk.HTTPRequest(&pbv1.OutboundHTTPRequestArgs{
 		Endpoint: endpointSlot, Method: "POST", Path: decisionPath, Headers: headers, Body: body, TimeoutMs: cfg.TimeoutMS,
 	})
+	var refusal *sdk.HostCallRefusalError
+	if errors.As(err, &refusal) && refusal.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED {
+		sdk.Debug("decision_router: bind the decision-service endpoint before enabling a classifier")
+		emit("decision_service_not_configured", "")
+		return "", 0, false
+	}
 	if err != nil || response == nil {
 		fallback("endpoint_failed")
 		return "", 0, false
