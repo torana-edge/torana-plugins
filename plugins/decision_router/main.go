@@ -279,6 +279,12 @@ func decide(cfg config, state requestState) (string, float64, bool) {
 	response, err := sdk.HTTPRequest(&pbv1.OutboundHTTPRequestArgs{
 		Endpoint: endpointSlot, Method: "POST", Path: decisionPath, Headers: headers, Body: body, TimeoutMs: cfg.TimeoutMS,
 	})
+	var refusal *sdk.HostCallRefusalError
+	if errors.As(err, &refusal) && refusal.Code == pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED {
+		sdk.Log("decision_router: bind the decision-service endpoint before enabling a policy that uses a classifier", sdk.LogLevelInfo)
+		fallback("decision_service_not_configured")
+		return "", 0, false
+	}
 	if err != nil || response == nil {
 		fallback("endpoint_failed")
 		return "", 0, false

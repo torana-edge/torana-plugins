@@ -92,6 +92,9 @@ on later turns.
 An installed plugin with the untouched empty `{}` configuration is a safe
 no-op. Once you start configuring it, the complete policy is required; Torana
 reports malformed or partial settings instead of guessing a route.
+Fixed routing also needs a bound `decision-service` endpoint. Without one,
+Torana keeps the current route and records `decision_service_not_configured`
+in metrics. Shadow mode with its classifier disabled needs no endpoint.
 
 ### Measure an adaptive ladder without switching
 
