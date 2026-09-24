@@ -62,7 +62,7 @@ func TestManifestContract(t *testing.T) {
 	if len(manifest.Credentials) != 1 || manifest.Credentials[0].Slot != credentialSlot || manifest.Credentials[0].Required {
 		t.Fatalf("credentials = %+v", manifest.Credentials)
 	}
-	if len(manifest.Endpoints) != 1 || manifest.Endpoints[0].Name != endpointSlot || !manifest.Endpoints[0].Required || len(manifest.Endpoints[0].Methods) != 1 || manifest.Endpoints[0].Methods[0] != "POST" {
+	if len(manifest.Endpoints) != 1 || manifest.Endpoints[0].Name != endpointSlot || manifest.Endpoints[0].Required || len(manifest.Endpoints[0].Methods) != 1 || manifest.Endpoints[0].Methods[0] != "POST" {
 		t.Fatalf("endpoints = %+v", manifest.Endpoints)
 	}
 }

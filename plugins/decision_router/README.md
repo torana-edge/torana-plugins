@@ -10,6 +10,12 @@ System One-compatible `POST /v1/systemone` services, including hosted
 The plugin is named for what it does, not for one vendor. The endpoint and API
 key are operator bindings; they are never arbitrary plugin configuration.
 
+An opt-in **adaptive shadow mode** can instead watch a provider-specific
+model ladder as a conversation evolves. It records when it *would* suggest a
+stronger model but never changes a route. This measures real sessions before
+enabling mid-conversation switching. The existing sticky policy remains
+unchanged when `mode` is omitted.
+
 [All plugins](../../README.md#choose-a-plugin) · [Source](main.go) · [Manifest](plugin.json) · [Settings schema](schema.json)
 
 ## What leaves your machine
@@ -86,6 +92,50 @@ on later turns.
 An installed plugin with the untouched empty `{}` configuration is a safe
 no-op. Once you start configuring it, the complete policy is required; Torana
 reports malformed or partial settings instead of guessing a route.
+
+### Measure an adaptive ladder without switching
+
+Use this alternative `config` object to run shadow mode on an existing
+`anthropic` provider:
+
+```json
+{
+  "mode": "shadow",
+  "ladders": {
+    "anthropic": {
+      "start": "sonnet",
+      "steps": [
+        {"id": "haiku", "description": "Routine mechanical work", "model": "claude-haiku-4-5"},
+        {"id": "sonnet", "description": "Normal coding work", "model": "claude-sonnet-5"},
+        {"id": "opus", "description": "Difficult debugging or architecture", "model": "claude-opus-5"}
+      ]
+    }
+  },
+  "triggers": {
+    "tool_error_window": 6,
+    "tool_error_threshold": 3,
+    "reevaluate_every_user_turns": 3,
+    "suggestion_cooldown_user_turns": 3
+  }
+}
+```
+
+The ladder belongs to a Torana provider name. An unknown provider is left
+alone. Shadow state is durable per conversation; old tool results replayed by
+the harness are not counted as new failures. A new user turn can produce a
+`would_suggest` metric with configured step IDs. **No model is switched and no
+request content is changed.** Without a `classifier` block, shadow mode makes
+no call to the decision endpoint. To evaluate the latest user turn with a
+System One-compatible service, add `classifier.enabled: true` plus its
+`decision_model`, `question`, and optional timeout/authentication fields, then
+bind the `decision-service` endpoint as described below. Shadow mode sends no
+history or tool results to that service. If bearer authentication is enabled,
+it sends the separately bound service credential as an authorization header.
+
+Tool errors are an observation signal, not proof that a stronger model will
+help: broken tools and permissions also cause repeated failures. Shadow mode
+does not yet compute switch cost, use response-side route outcomes, or offer
+consent. Those require separately reviewed host changes.
 
 ## Bind TypeSafe Jev
 
