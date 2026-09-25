@@ -80,24 +80,29 @@ type shadowTriggers struct {
 }
 
 type shadowState struct {
-	PolicyHash        string  `json:"policy_hash"`
-	Provider          string  `json:"provider"`
-	Step              string  `json:"step"`
-	LastClientModel   string  `json:"last_client_model"`
-	LastUserTurnKey   string  `json:"last_user_turn_key"`
-	UserTurns         int     `json:"user_turns"`
-	LastEvaluation    int     `json:"last_evaluation"`
-	RecentErrors      []bool  `json:"recent_errors"`
-	LastResultID      string  `json:"last_result_id"`
-	LastSuggestion    string  `json:"last_suggestion"`
-	SuggestedAtTurn   int     `json:"suggested_at_turn"`
-	ModelSwitches     int     `json:"model_switches"`
-	ContextTokens     int64   `json:"context_tokens"`
-	AvgOutputTokens   float64 `json:"avg_output_tokens"`
-	ResponseCount     int     `json:"response_count"`
-	MaxTokensFinishes int     `json:"max_tokens_finishes"`
-	RequestsPerTurn   int     `json:"requests_per_turn"`
-	RetryStreak       int     `json:"retry_streak"`
+	PolicyHash         string  `json:"policy_hash"`
+	Provider           string  `json:"provider"`
+	Step               string  `json:"step"`
+	LastClientModel    string  `json:"last_client_model"`
+	LastUserTurnKey    string  `json:"last_user_turn_key"`
+	UserTurns          int     `json:"user_turns"`
+	LastEvaluation     int     `json:"last_evaluation"`
+	RecentErrors       []bool  `json:"recent_errors"`
+	LastResultID       string  `json:"last_result_id"`
+	LastSuggestion     string  `json:"last_suggestion"`
+	SuggestedAtTurn    int     `json:"suggested_at_turn"`
+	ModelSwitches      int     `json:"model_switches"`
+	ContextTokens      int64   `json:"context_tokens"`
+	AvgOutputTokens    float64 `json:"avg_output_tokens"`
+	ResponseCount      int     `json:"response_count"`
+	MaxTokensFinishes  int     `json:"max_tokens_finishes"`
+	RequestsPerTurn    int     `json:"requests_per_turn"`
+	RetryStreak        int     `json:"retry_streak"`
+	LastTurnRequests   int     `json:"last_turn_requests"`
+	LastTurnRetries    int     `json:"last_turn_retries"`
+	LastTurnMaxTokens  int     `json:"last_turn_max_tokens"`
+	AvgRequestsPerTurn float64 `json:"avg_requests_per_turn"`
+	CompletedTurns     int     `json:"completed_turns"`
 }
 
 func loadShadowPolicy(raw string) (shadowPolicy, string, error) {
@@ -437,10 +442,18 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 		turnKey, userTurn := shadowUserTurn(req)
 		newTurn := userTurn && turnKey != state.LastUserTurnKey
 		if newTurn {
+			if state.UserTurns > 0 {
+				state.LastTurnRequests = state.RequestsPerTurn
+				state.LastTurnRetries = state.RetryStreak
+				state.LastTurnMaxTokens = state.MaxTokensFinishes
+				state.AvgRequestsPerTurn = (state.AvgRequestsPerTurn*float64(state.CompletedTurns) + float64(state.RequestsPerTurn)) / float64(state.CompletedTurns+1)
+				state.CompletedTurns++
+			}
 			state.UserTurns++
 			state.LastUserTurnKey = turnKey
 			state.RequestsPerTurn = 1
 			state.RetryStreak = 0
+			state.MaxTokensFinishes = 0
 		} else {
 			state.RequestsPerTurn++
 			if userTurn {
@@ -482,8 +495,11 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 				errorCount++
 			}
 		}
+		previousTurnSignal := state.LastTurnRetries >= policy.Triggers.RetryStreak ||
+			state.LastTurnRequests >= policy.Triggers.RequestsPerUserTurn ||
+			state.LastTurnMaxTokens >= policy.Triggers.MaxTokensFinishes
 		shouldEvaluate := newTurn && (fresh || state.UserTurns-state.LastEvaluation >= policy.Triggers.ReevaluateUserTurns ||
-			errorCount >= policy.Triggers.ToolErrorThreshold)
+			errorCount >= policy.Triggers.ToolErrorThreshold || previousTurnSignal)
 		var decision policyDecision
 		if shouldEvaluate {
 			state.LastEvaluation = state.UserTurns
@@ -504,9 +520,10 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 				contextTokens = int64(proto.Size(req) / 4)
 			}
 			decision = Evaluate(policy, ladder, state, policySignals{
-				RecentToolErrors: errorCount, RetryStreak: state.RetryStreak,
-				RequestsPerUserTurn: state.RequestsPerTurn, ContextTokens: contextTokens,
-				AvgOutputTokens: state.AvgOutputTokens, MaxTokensFinishes: state.MaxTokensFinishes,
+				RecentToolErrors: errorCount, RetryStreak: state.LastTurnRetries,
+				RequestsPerUserTurn: state.LastTurnRequests, AvgRequestsPerTurn: state.AvgRequestsPerTurn,
+				ContextTokens: contextTokens, AvgOutputTokens: state.AvgOutputTokens,
+				MaxTokensFinishes: state.LastTurnMaxTokens,
 			}, candidate)
 		}
 		repeatSuggestion := decision.Target != "" && decision.Target == state.LastSuggestion

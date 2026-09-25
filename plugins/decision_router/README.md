@@ -103,6 +103,12 @@ the replay anchor, it conservatively starts a new baseline. Error bits survive
 canonicalization on some API shapes better than others, so `would_suggest` is
 an observation, not proof that switching models would fix a broken tool.
 
+Request retries, requests per user turn, and max-token finishes are collected
+through the whole turn and considered when the next user turn begins. A
+non-max-token finish does not erase earlier max-token finishes in that turn.
+The per-turn cost comparison uses the observed average requests per user turn;
+it remains an estimate, not a provider quote.
+
 Editing the policy starts a new measurement baseline. The plugin never mutates
 provider-visible content, preserving the prompt prefix and cache markers.
 

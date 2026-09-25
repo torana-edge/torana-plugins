@@ -29,6 +29,12 @@ func TestPolicyEconomicsAndBoundaries(t *testing.T) {
 		math.Abs(decision.RebuildUSD-.375) > 1e-9 || math.Abs(decision.PerTurnDelta-.033) > 1e-9 {
 		t.Fatalf("upgrade economics = %+v", decision)
 	}
+	threeRequests := signals
+	threeRequests.AvgRequestsPerTurn = 3
+	perTurn := Evaluate(policy, ladder, base, threeRequests, "")
+	if math.Abs(perTurn.PerTurnDelta-.099) > 1e-9 {
+		t.Fatalf("three-request turn economics = %+v", perTurn)
+	}
 
 	downgrade := base
 	downgrade.Step = "opus"

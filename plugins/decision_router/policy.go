@@ -18,6 +18,7 @@ type policySignals struct {
 	RecentToolErrors    int
 	RetryStreak         int
 	RequestsPerUserTurn int
+	AvgRequestsPerTurn  float64
 	MaxTokensFinishes   int
 	ContextTokens       int64
 	AvgOutputTokens     float64
@@ -74,7 +75,11 @@ func Evaluate(policy shadowPolicy, ladder shadowLadder, state shadowState, signa
 	context := float64(signals.ContextTokens) / 1e6
 	output := signals.AvgOutputTokens / 1e6
 	decision.RebuildUSD = context * *to.Pricing.CacheWrite
-	decision.PerTurnDelta = context*(*to.Pricing.CacheRead-*from.Pricing.CacheRead) + output*(*to.Pricing.Output-*from.Pricing.Output)
+	requestsPerTurn := signals.AvgRequestsPerTurn
+	if requestsPerTurn < 1 {
+		requestsPerTurn = 1
+	}
+	decision.PerTurnDelta = requestsPerTurn * (context*(*to.Pricing.CacheRead-*from.Pricing.CacheRead) + output*(*to.Pricing.Output-*from.Pricing.Output))
 	if target < current && decision.PerTurnDelta < 0 {
 		decision.PaybackTurns = decision.RebuildUSD / -decision.PerTurnDelta
 	}

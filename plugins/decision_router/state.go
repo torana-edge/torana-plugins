@@ -41,8 +41,6 @@ func init() {
 			}
 			if strings.EqualFold(response.FinishReason, "length") || strings.EqualFold(response.FinishReason, "max_tokens") {
 				state.MaxTokensFinishes++
-			} else {
-				state.MaxTokensFinishes = 0
 			}
 			version := stored.Version
 			applied, err := saveShadowState(key, state, &version)
