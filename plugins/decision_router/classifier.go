@@ -31,7 +31,7 @@ type config struct {
 	Authentication string
 }
 type requestState struct {
-	LatestUserTurn string             `json:"latest_user_turn"`
+	LatestUserTurn string             `json:"latest_user_turn,omitempty"`
 	Signals        *shadowSignalFacts `json:"signals,omitempty"`
 }
 type systemOneRequest struct {

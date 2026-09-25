@@ -76,6 +76,7 @@ Add a `classifier` block when you have a bound decision-service endpoint:
   "enabled": true,
   "decision_model": "jev-latest",
   "question": "Which model tier fits this coding task?",
+  "inputs": "user_turn+signals",
   "minimum_confidence": 0.8,
   "timeout_ms": 1500,
   "authentication": "none"
@@ -86,7 +87,8 @@ Bind the `decision-service` endpoint to a local or hosted System
 One-compatible server. For bearer authentication, select `"bearer"` and bind
 the separately approved `api-key` credential. The classifier receives the
 latest textual user turn (bounded by `max_state_bytes`) and bounded signal
-counts. It does **not** receive the system prompt, earlier conversation, tool
+counts by default. Set `"inputs": "signals"` to send only those counts—no user
+text. It does **not** receive the system prompt, earlier conversation, tool
 definitions, tool arguments, or tool results. A hosted endpoint still receives
 that latest turn; use a local endpoint if it should stay on your machine.
 

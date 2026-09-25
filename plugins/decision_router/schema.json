@@ -41,6 +41,7 @@
         "enabled": {"type": "boolean", "default": false},
         "decision_model": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^\\S(?:.*\\S)?$"},
         "question": {"type": "string", "minLength": 1, "maxLength": 2000, "pattern": "\\S"},
+        "inputs": {"type": "string", "enum": ["user_turn+signals", "signals"], "default": "user_turn+signals", "description": "Send only the latest user turn and bounded signals, or signals alone, to the classifier."},
         "minimum_confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "max_state_bytes": {"type": "integer", "minimum": 256, "maximum": 65536},
         "timeout_ms": {"type": "integer", "minimum": 100, "maximum": 1500},

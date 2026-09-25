@@ -63,6 +63,7 @@ type shadowClassifier struct {
 	Enabled           bool     `json:"enabled"`
 	DecisionModel     string   `json:"decision_model"`
 	Question          string   `json:"question"`
+	Inputs            string   `json:"inputs"`
 	MinimumConfidence *float64 `json:"minimum_confidence"`
 	MaxStateBytes     int      `json:"max_state_bytes"`
 	TimeoutMS         uint32   `json:"timeout_ms"`
@@ -204,7 +205,13 @@ func loadShadowPolicy(raw string) (shadowPolicy, string, error) {
 		policy.Triggers.SuggestionCooldown < 1 || policy.Triggers.SuggestionCooldown > 100 {
 		return policy, "", errors.New("invalid shadow triggers")
 	}
+	if policy.Classifier.Inputs != "" && policy.Classifier.Inputs != "user_turn+signals" && policy.Classifier.Inputs != "signals" {
+		return policy, "", errors.New("invalid classifier inputs")
+	}
 	if policy.Classifier.Enabled {
+		if policy.Classifier.Inputs == "" {
+			policy.Classifier.Inputs = "user_turn+signals"
+		}
 		if policy.Classifier.MinimumConfidence == nil {
 			defaultConfidence := 0.8
 			policy.Classifier.MinimumConfidence = &defaultConfidence
@@ -571,13 +578,15 @@ func shadowClassify(req *pbv1.ChatRequest, classifier shadowClassifier, ladder s
 		routes[step.ID] = route{Description: step.Description}
 	}
 	routes["hold"] = route{Description: "The current model remains suitable for this turn"}
-	text := latestUserText(req)
-	if strings.TrimSpace(text) == "" {
-		return "", 0, false
-	}
 	state := requestState{
-		LatestUserTurn: truncateUTF8(text, classifier.MaxStateBytes),
-		Signals:        &shadowSignalFacts{RecentToolErrors: recentErrors, UserTurns: userTurns},
+		Signals: &shadowSignalFacts{RecentToolErrors: recentErrors, UserTurns: userTurns},
+	}
+	if classifier.Inputs != "signals" {
+		text := latestUserText(req)
+		if strings.TrimSpace(text) == "" {
+			return "", 0, false
+		}
+		state.LatestUserTurn = truncateUTF8(text, classifier.MaxStateBytes)
 	}
 	return decide(config{
 		DecisionModel: classifier.DecisionModel, Question: classifier.Question,
