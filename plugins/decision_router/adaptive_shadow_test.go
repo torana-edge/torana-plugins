@@ -14,8 +14,8 @@ import (
 const shadowConfigJSON = `{
   "mode":"shadow",
   "ladders":{"original":{"start":"fast","steps":[
-    {"id":"fast","description":"Routine work","model":"fast-model"},
-    {"id":"strong","description":"Hard reasoning","model":"strong-model"}
+    {"id":"fast","description":"Routine work","model":"fast-model","pricing":{"input":1,"output":5,"cache_read":0.1,"cache_write":1.25}},
+    {"id":"strong","description":"Hard reasoning","model":"strong-model","pricing":{"input":5,"output":25,"cache_read":0.5,"cache_write":6.25}}
   ]}},
   "triggers":{"tool_error_window":3,"tool_error_threshold":1,"reevaluate_every_user_turns":3}
 }`

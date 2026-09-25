@@ -14,6 +14,7 @@ import (
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"github.com/torana-edge/torana-plugin-sdk/pb/v1/jsontext"
+	"google.golang.org/protobuf/proto"
 )
 
 const maximumShadowTimeoutMS = 1500
@@ -22,10 +23,12 @@ const maximumShadowTimeoutMS = 1500
 // conversation would benefit from a later ladder step without silently
 // switching the model the harness believes it is using.
 type shadowPolicy struct {
-	Mode       string                  `json:"mode"`
-	Ladders    map[string]shadowLadder `json:"ladders"`
-	Classifier shadowClassifier        `json:"classifier"`
-	Triggers   shadowTriggers          `json:"triggers"`
+	Mode         string                  `json:"mode"`
+	Ladders      map[string]shadowLadder `json:"ladders"`
+	Classifier   shadowClassifier        `json:"classifier"`
+	Triggers     shadowTriggers          `json:"triggers"`
+	Escalation   shadowEscalation        `json:"escalation"`
+	ManageEffort bool                    `json:"manage_effort"`
 }
 
 type shadowLadder struct {
@@ -34,9 +37,26 @@ type shadowLadder struct {
 }
 
 type shadowStep struct {
-	ID          string `json:"id"`
-	Description string `json:"description"`
-	Model       string `json:"model"`
+	ID          string         `json:"id"`
+	Description string         `json:"description"`
+	Model       string         `json:"model"`
+	Effort      string         `json:"effort,omitempty"`
+	Aliases     []string       `json:"aliases,omitempty"`
+	Pricing     *shadowPricing `json:"pricing,omitempty"`
+}
+
+type shadowPricing struct {
+	Input      *float64 `json:"input"`
+	Output     *float64 `json:"output"`
+	CacheRead  *float64 `json:"cache_read"`
+	CacheWrite *float64 `json:"cache_write"`
+}
+
+type shadowEscalation struct {
+	MaxModelSwitches               int     `json:"max_model_switches"`
+	MaxSwitchCostUSD               float64 `json:"max_switch_cost_usd"`
+	SuggestDeescalation            bool    `json:"suggest_deescalation"`
+	MinUserTurnsBeforeDeescalation int     `json:"min_user_turns_before_deescalation"`
 }
 
 type shadowClassifier struct {
@@ -52,22 +72,37 @@ type shadowClassifier struct {
 type shadowTriggers struct {
 	ToolErrorWindow     int `json:"tool_error_window"`
 	ToolErrorThreshold  int `json:"tool_error_threshold"`
+	RetryStreak         int `json:"retry_streak"`
+	RequestsPerUserTurn int `json:"requests_per_user_turn"`
+	MaxTokensFinishes   int `json:"max_tokens_finishes"`
 	ReevaluateUserTurns int `json:"reevaluate_every_user_turns"`
 	SuggestionCooldown  int `json:"suggestion_cooldown_user_turns"`
 }
 
 type shadowState struct {
-	PolicyHash      string `json:"policy_hash"`
-	Provider        string `json:"provider"`
-	Step            string `json:"step"`
-	LastClientModel string `json:"last_client_model"`
-	LastUserTurnKey string `json:"last_user_turn_key"`
-	UserTurns       int    `json:"user_turns"`
-	LastEvaluation  int    `json:"last_evaluation"`
-	RecentErrors    []bool `json:"recent_errors"`
-	LastResultID    string `json:"last_result_id"`
-	LastSuggestion  string `json:"last_suggestion"`
-	SuggestedAtTurn int    `json:"suggested_at_turn"`
+	PolicyHash         string  `json:"policy_hash"`
+	Provider           string  `json:"provider"`
+	Step               string  `json:"step"`
+	LastClientModel    string  `json:"last_client_model"`
+	LastUserTurnKey    string  `json:"last_user_turn_key"`
+	UserTurns          int     `json:"user_turns"`
+	LastEvaluation     int     `json:"last_evaluation"`
+	RecentErrors       []bool  `json:"recent_errors"`
+	LastResultID       string  `json:"last_result_id"`
+	LastSuggestion     string  `json:"last_suggestion"`
+	SuggestedAtTurn    int     `json:"suggested_at_turn"`
+	ModelSwitches      int     `json:"model_switches"`
+	ContextTokens      int64   `json:"context_tokens"`
+	AvgOutputTokens    float64 `json:"avg_output_tokens"`
+	ResponseCount      int     `json:"response_count"`
+	MaxTokensFinishes  int     `json:"max_tokens_finishes"`
+	RequestsPerTurn    int     `json:"requests_per_turn"`
+	RetryStreak        int     `json:"retry_streak"`
+	LastTurnRequests   int     `json:"last_turn_requests"`
+	LastTurnRetries    int     `json:"last_turn_retries"`
+	LastTurnMaxTokens  int     `json:"last_turn_max_tokens"`
+	AvgRequestsPerTurn float64 `json:"avg_requests_per_turn"`
+	CompletedTurns     int     `json:"completed_turns"`
 }
 
 func loadShadowPolicy(raw string) (shadowPolicy, string, error) {
@@ -91,10 +126,32 @@ func loadShadowPolicy(raw string) (shadowPolicy, string, error) {
 			return policy, "", fmt.Errorf("invalid ladder for provider %q", provider)
 		}
 		ids := make(map[string]bool, len(ladder.Steps))
+		coordinates := make(map[string]bool, len(ladder.Steps))
+		modelAliases := make(map[string]bool, len(ladder.Steps))
 		for _, step := range ladder.Steps {
 			if !choiceIDPattern.MatchString(step.ID) || step.ID == "hold" || ids[step.ID] || strings.TrimSpace(step.Model) == "" ||
-				strings.TrimSpace(step.Description) == "" || utf8.RuneCountInString(step.Model) > maximumModelBytes || utf8.RuneCountInString(step.Description) > 1000 {
+				step.Model != strings.TrimSpace(step.Model) || strings.TrimSpace(step.Description) == "" ||
+				utf8.RuneCountInString(step.Model) > maximumModelBytes || utf8.RuneCountInString(step.Description) > 1000 {
 				return policy, "", fmt.Errorf("invalid or repeated ladder step for provider %q", provider)
+			}
+			if step.Effort != "" {
+				if !policy.ManageEffort || !validStepEffort(step.Effort) {
+					return policy, "", fmt.Errorf("step %q needs explicit manage_effort and a valid effort", step.ID)
+				}
+			}
+			if step.Pricing != nil && !validShadowPricing(*step.Pricing) {
+				return policy, "", fmt.Errorf("step %q has invalid pricing", step.ID)
+			}
+			coordinate := step.Model + "\x00" + step.Effort
+			if coordinates[coordinate] {
+				return policy, "", fmt.Errorf("step %q repeats a model/effort pair", step.ID)
+			}
+			coordinates[coordinate] = true
+			for _, alias := range step.Aliases {
+				if alias == "" || alias != strings.TrimSpace(alias) || utf8.RuneCountInString(alias) > maximumModelBytes || modelAliases[alias] {
+					return policy, "", fmt.Errorf("step %q has an invalid or repeated model alias", step.ID)
+				}
+				modelAliases[alias] = true
 			}
 			ids[step.ID] = true
 		}
@@ -102,11 +159,35 @@ func loadShadowPolicy(raw string) (shadowPolicy, string, error) {
 			return policy, "", fmt.Errorf("start step %q is absent from provider %q", ladder.Start, provider)
 		}
 	}
+	if policy.Escalation.MaxModelSwitches == 0 {
+		policy.Escalation.MaxModelSwitches = 1
+	}
+	if policy.Escalation.MaxSwitchCostUSD == 0 {
+		policy.Escalation.MaxSwitchCostUSD = 0.50
+	}
+	if policy.Escalation.MinUserTurnsBeforeDeescalation == 0 {
+		policy.Escalation.MinUserTurnsBeforeDeescalation = 3
+	}
+	if policy.Escalation.MaxModelSwitches < 0 || policy.Escalation.MaxModelSwitches > 20 ||
+		math.IsNaN(policy.Escalation.MaxSwitchCostUSD) || math.IsInf(policy.Escalation.MaxSwitchCostUSD, 0) ||
+		policy.Escalation.MaxSwitchCostUSD < 0 || policy.Escalation.MaxSwitchCostUSD > 100 ||
+		policy.Escalation.MinUserTurnsBeforeDeescalation < 1 || policy.Escalation.MinUserTurnsBeforeDeescalation > 100 {
+		return policy, "", errors.New("invalid escalation limits")
+	}
 	if policy.Triggers.ToolErrorWindow == 0 {
 		policy.Triggers.ToolErrorWindow = 6
 	}
 	if policy.Triggers.ToolErrorThreshold == 0 {
 		policy.Triggers.ToolErrorThreshold = 3
+	}
+	if policy.Triggers.RetryStreak == 0 {
+		policy.Triggers.RetryStreak = 3
+	}
+	if policy.Triggers.RequestsPerUserTurn == 0 {
+		policy.Triggers.RequestsPerUserTurn = 25
+	}
+	if policy.Triggers.MaxTokensFinishes == 0 {
+		policy.Triggers.MaxTokensFinishes = 2
 	}
 	if policy.Triggers.ReevaluateUserTurns == 0 {
 		policy.Triggers.ReevaluateUserTurns = 3
@@ -116,6 +197,9 @@ func loadShadowPolicy(raw string) (shadowPolicy, string, error) {
 	}
 	if policy.Triggers.ToolErrorWindow < 1 || policy.Triggers.ToolErrorWindow > 64 ||
 		policy.Triggers.ToolErrorThreshold < 1 || policy.Triggers.ToolErrorThreshold > policy.Triggers.ToolErrorWindow ||
+		policy.Triggers.RetryStreak < 1 || policy.Triggers.RetryStreak > 100 ||
+		policy.Triggers.RequestsPerUserTurn < 1 || policy.Triggers.RequestsPerUserTurn > 1000 ||
+		policy.Triggers.MaxTokensFinishes < 1 || policy.Triggers.MaxTokensFinishes > 100 ||
 		policy.Triggers.ReevaluateUserTurns < 1 || policy.Triggers.ReevaluateUserTurns > 100 ||
 		policy.Triggers.SuggestionCooldown < 1 || policy.Triggers.SuggestionCooldown > 100 {
 		return policy, "", errors.New("invalid shadow triggers")
@@ -151,6 +235,24 @@ func loadShadowPolicy(raw string) (shadowPolicy, string, error) {
 	}
 	sum := sha256.Sum256(canonical)
 	return policy, hex.EncodeToString(sum[:]), nil
+}
+
+func validStepEffort(value string) bool {
+	switch value {
+	case "minimal", "low", "medium", "high", "xhigh", "max":
+		return true
+	default:
+		return false
+	}
+}
+
+func validShadowPricing(value shadowPricing) bool {
+	for _, price := range []*float64{value.Input, value.Output, value.CacheRead, value.CacheWrite} {
+		if price != nil && (math.IsNaN(*price) || math.IsInf(*price, 0) || *price < 0) {
+			return false
+		}
+	}
+	return true
 }
 
 func shadowProvider(req *pbv1.ChatRequest) string {
@@ -228,6 +330,11 @@ func shadowStepForModel(ladder shadowLadder, model string) string {
 	for _, step := range ladder.Steps {
 		if step.Model == model {
 			return step.ID
+		}
+		for _, alias := range step.Aliases {
+			if alias == model {
+				return step.ID
+			}
 		}
 	}
 	return ""
@@ -335,8 +442,23 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 		turnKey, userTurn := shadowUserTurn(req)
 		newTurn := userTurn && turnKey != state.LastUserTurnKey
 		if newTurn {
+			if state.UserTurns > 0 {
+				state.LastTurnRequests = state.RequestsPerTurn
+				state.LastTurnRetries = state.RetryStreak
+				state.LastTurnMaxTokens = state.MaxTokensFinishes
+				state.AvgRequestsPerTurn = (state.AvgRequestsPerTurn*float64(state.CompletedTurns) + float64(state.RequestsPerTurn)) / float64(state.CompletedTurns+1)
+				state.CompletedTurns++
+			}
 			state.UserTurns++
 			state.LastUserTurnKey = turnKey
+			state.RequestsPerTurn = 1
+			state.RetryStreak = 0
+			state.MaxTokensFinishes = 0
+		} else {
+			state.RequestsPerTurn++
+			if userTurn {
+				state.RetryStreak++
+			}
 		}
 		// An initial observation establishes the replay baseline; historical
 		// failures must not masquerade as fresh failures on plugin activation.
@@ -362,25 +484,25 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 		clientModelChanged := !fresh && state.LastClientModel != "" && state.LastClientModel != req.Model
 		state.LastClientModel = req.Model
 		if clientModelChanged {
+			state.ModelSwitches++
 			if observed := shadowStepForModel(ladder, req.Model); observed != "" {
 				state.Step = observed
 			}
 		}
-		target := state.Step
 		errorCount := 0
 		for _, failed := range state.RecentErrors {
 			if failed {
 				errorCount++
 			}
 		}
+		previousTurnSignal := state.LastTurnRetries >= policy.Triggers.RetryStreak ||
+			state.LastTurnRequests >= policy.Triggers.RequestsPerUserTurn ||
+			state.LastTurnMaxTokens >= policy.Triggers.MaxTokensFinishes
 		shouldEvaluate := newTurn && (fresh || state.UserTurns-state.LastEvaluation >= policy.Triggers.ReevaluateUserTurns ||
-			errorCount >= policy.Triggers.ToolErrorThreshold)
+			errorCount >= policy.Triggers.ToolErrorThreshold || previousTurnSignal)
+		var decision policyDecision
 		if shouldEvaluate {
 			state.LastEvaluation = state.UserTurns
-			index := shadowStepIndex(ladder, state.Step)
-			if errorCount >= policy.Triggers.ToolErrorThreshold && index+1 < len(ladder.Steps) {
-				target = ladder.Steps[index+1].ID
-			}
 			if policy.Classifier.Enabled {
 				if !classified {
 					candidate, confidence, classOK = shadowClassify(req, policy.Classifier, ladder, errorCount, state.UserTurns)
@@ -389,21 +511,24 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 						emit("shadow_classifier_unavailable", "")
 					}
 				}
-				if classOK && confidence >= *policy.Classifier.MinimumConfidence && candidate != "hold" {
-					want := shadowStepIndex(ladder, candidate)
-					if want > index && index+1 < len(ladder.Steps) {
-						target = ladder.Steps[index+1].ID
-					}
-				}
 			}
+			if !policy.Classifier.Enabled || !classOK || confidence < *policy.Classifier.MinimumConfidence {
+				candidate = ""
+			}
+			contextTokens := state.ContextTokens
+			if contextTokens == 0 {
+				contextTokens = int64(proto.Size(req) / 4)
+			}
+			decision = Evaluate(policy, ladder, state, policySignals{
+				RecentToolErrors: errorCount, RetryStreak: state.LastTurnRetries,
+				RequestsPerUserTurn: state.LastTurnRequests, AvgRequestsPerTurn: state.AvgRequestsPerTurn,
+				ContextTokens: contextTokens, AvgOutputTokens: state.AvgOutputTokens,
+				MaxTokensFinishes: state.LastTurnMaxTokens,
+			}, candidate)
 		}
-		if target != state.Step && target == state.LastSuggestion &&
-			state.UserTurns-state.SuggestedAtTurn < policy.Triggers.SuggestionCooldown {
-			target = state.Step
-		}
-		repeatSuggestion := target != state.Step && target == state.LastSuggestion
-		if target != state.Step {
-			state.LastSuggestion, state.SuggestedAtTurn = target, state.UserTurns
+		repeatSuggestion := decision.Target != "" && decision.Target == state.LastSuggestion
+		if decision.Target != "" && decision.BlockedBy == "" {
+			state.LastSuggestion, state.SuggestedAtTurn = decision.Target, state.UserTurns
 			state.RecentErrors = nil // a new failure batch is needed to repeat this signal
 		}
 		applied, err := saveShadowState(key, state, version)
@@ -414,15 +539,22 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 		if !applied {
 			continue
 		}
+		if err := sdk.MetaSet("decision_router_state_key", key); err != nil {
+			return sdk.RequestResult{}, err
+		}
 		if clientModelChanged {
 			sdk.EmitMetric(metricDecisionName, sdk.MetricCounter, 1, map[string]string{
 				"outcome": "user_switch_unprompted", "provider": provider,
 			})
 		}
-		if target != state.Step {
+		if decision.Target != "" && decision.BlockedBy == "" {
 			sdk.EmitMetric(metricDecisionName, sdk.MetricCounter, 1, map[string]string{
-				"outcome": "would_suggest", "provider": provider, "from": state.Step, "to": target,
+				"outcome": "would_suggest", "provider": provider, "from": state.Step, "to": decision.Target,
 				"repeat": fmt.Sprintf("%t", repeatSuggestion),
+			})
+		} else if decision.BlockedBy != "" {
+			sdk.EmitMetric(metricDecisionName, sdk.MetricCounter, 1, map[string]string{
+				"outcome": "shadow_blocked", "provider": provider, "reason": decision.BlockedBy,
 			})
 		} else if shouldEvaluate {
 			emit("shadow_hold", state.Step)

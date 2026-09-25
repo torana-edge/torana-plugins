@@ -21,7 +21,15 @@
             "properties": {
               "id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
               "description": {"type": "string", "minLength": 1, "maxLength": 1000, "pattern": "\\S"},
-              "model": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S"}
+              "model": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S"},
+              "effort": {"type": "string", "enum": ["minimal", "low", "medium", "high", "xhigh", "max"]},
+              "aliases": {"type": "array", "maxItems": 32, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S"}},
+              "pricing": {"type": "object", "additionalProperties": false, "properties": {
+                "input": {"type": "number", "minimum": 0},
+                "output": {"type": "number", "minimum": 0},
+                "cache_read": {"type": "number", "minimum": 0},
+                "cache_write": {"type": "number", "minimum": 0}
+              }}
             }
           }}
         }
@@ -39,11 +47,21 @@
         "authentication": {"type": "string", "enum": ["none", "bearer"]}
       }
     },
+    "manage_effort": {"type": "boolean", "default": false, "description": "Explicitly let Torana manage effort; otherwise the harness remains authoritative."},
+    "escalation": {"type": "object", "additionalProperties": false, "properties": {
+      "max_model_switches": {"type": "integer", "minimum": 1, "maximum": 20, "default": 1},
+      "max_switch_cost_usd": {"type": "number", "minimum": 0, "maximum": 100, "default": 0.5},
+      "suggest_deescalation": {"type": "boolean", "default": false},
+      "min_user_turns_before_deescalation": {"type": "integer", "minimum": 1, "maximum": 100, "default": 3}
+    }},
     "triggers": {
       "type": "object", "additionalProperties": false,
       "properties": {
         "tool_error_window": {"type": "integer", "minimum": 1, "maximum": 64},
         "tool_error_threshold": {"type": "integer", "minimum": 1, "maximum": 64},
+        "retry_streak": {"type": "integer", "minimum": 1, "maximum": 100},
+        "requests_per_user_turn": {"type": "integer", "minimum": 1, "maximum": 1000},
+        "max_tokens_finishes": {"type": "integer", "minimum": 1, "maximum": 100},
         "reevaluate_every_user_turns": {"type": "integer", "minimum": 1, "maximum": 100},
         "suggestion_cooldown_user_turns": {"type": "integer", "minimum": 1, "maximum": 100}
       }

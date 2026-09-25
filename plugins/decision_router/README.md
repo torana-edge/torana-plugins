@@ -34,19 +34,33 @@ object in its settings:
     "anthropic": {
       "start": "sonnet",
       "steps": [
-        {"id": "haiku", "description": "Routine mechanical work", "model": "claude-haiku-4-5"},
-        {"id": "sonnet", "description": "Normal coding work", "model": "claude-sonnet-5"},
-        {"id": "opus", "description": "Difficult debugging or architecture", "model": "claude-opus-5"}
+        {"id": "haiku", "description": "Routine mechanical work", "model": "claude-haiku-4-5", "pricing": {"input": 1, "output": 5, "cache_read": 0.1, "cache_write": 1.25}},
+        {"id": "sonnet", "description": "Normal coding work", "model": "claude-sonnet-5", "pricing": {"input": 2, "output": 10, "cache_read": 0.2, "cache_write": 2.5}},
+        {"id": "opus", "description": "Difficult debugging or architecture", "model": "claude-opus-5", "pricing": {"input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25}}
       ]
     }
   }
 }
 ```
 
-Change the provider and models to match your Torana configuration. The steps
+The prices are illustrative USD per million tokens, **not live provider
+prices**. Replace them with current rates for your models before trusting a
+cost-based suggestion. Missing prices produce a `pricing_unavailable` shadow
+metric instead of pretending a switch is free. Change the provider and models
+to match your Torana configuration. The steps
 are ordered from lighter to stronger; `start` is the baseline when a
 conversation has not already selected a matching model. An empty `{}` config
 does nothing, and `{"mode":"off"}` explicitly turns measurement off.
+
+The policy evaluates at most one step per new user turn. It considers new tool
+errors, repeated attempts, long turns, and responses that hit the output limit.
+An after-response observation updates the context-token and average-output
+estimates used for the one-time cache rebuild cost. By default it considers at
+most one model switch and blocks suggestions whose estimated rebuild exceeds
+$0.50. The `triggers` and `escalation` settings let you tune those limits.
+An effort step requires `"manage_effort": true`; without that explicit choice,
+the harness's effort setting remains authoritative. Even with it, shadow mode
+still only measures—it does not change effort.
 
 Watch the `torana_decision_router_total` metric with outcome `would_suggest`.
 It includes the provider and the current and proposed step IDs. No actual
@@ -88,6 +102,12 @@ explicit tool-error results rather than replayed history. If compaction removes
 the replay anchor, it conservatively starts a new baseline. Error bits survive
 canonicalization on some API shapes better than others, so `would_suggest` is
 an observation, not proof that switching models would fix a broken tool.
+
+Request retries, requests per user turn, and max-token finishes are collected
+through the whole turn and considered when the next user turn begins. A
+non-max-token finish does not erase earlier max-token finishes in that turn.
+The per-turn cost comparison uses the observed average requests per user turn;
+it remains an estimate, not a provider quote.
 
 Editing the policy starts a new measurement baseline. The plugin never mutates
 provider-visible content, preserving the prompt prefix and cache markers.
