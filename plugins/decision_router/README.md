@@ -92,6 +92,12 @@ text. It does **not** receive the system prompt, earlier conversation, tool
 definitions, tool arguments, or tool results. A hosted endpoint still receives
 that latest turn; use a local endpoint if it should stay on your machine.
 
+In signals-only mode, the service receives these fields: recent tool-error
+count, number of user turns, the previous turn's request, retry, and max-token
+counts, average requests per turn, and a coarse context-size bucket (`0-2k`,
+`2k-8k`, `8k-32k`, `32k-128k`, `128k+`, or `unknown`). Counts are capped at
+1,000. It receives no conversation text.
+
 The answer is a closed choice among your step IDs or `hold`. Low confidence,
 timeouts, malformed answers, and endpoint failures leave the current model
 untouched. Even a valid answer only records what shadow mode *would* suggest.
