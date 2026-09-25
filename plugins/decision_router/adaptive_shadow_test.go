@@ -252,10 +252,26 @@ func TestShadowClassifierReceivesOnlyLatestTurnAndSignals(t *testing.T) {
 			if !bytes.Contains(sent.Body, []byte("recent_tool_errors")) {
 				t.Fatalf("missing bounded signals: %s", sent.Body)
 			}
+			for _, field := range []string{"last_turn_requests", "last_turn_retries", "last_turn_max_tokens", "avg_requests_per_turn", "context_bucket"} {
+				if !bytes.Contains(sent.Body, []byte(field)) {
+					t.Fatalf("missing %s in bounded signals: %s", field, sent.Body)
+				}
+			}
 			containsTurn := bytes.Contains(sent.Body, []byte("Fix this race"))
 			if containsTurn != (inputs == "user_turn+signals") {
 				t.Fatalf("latest turn presence=%t with inputs=%s: %s", containsTurn, inputs, sent.Body)
 			}
 		})
+	}
+}
+
+func TestBoundedShadowSignalsBucketsAndCaps(t *testing.T) {
+	facts := boundedShadowSignals(shadowState{
+		UserTurns: 2000, LastTurnRequests: 4000, LastTurnRetries: 3, LastTurnMaxTokens: 2,
+		AvgRequestsPerTurn: 7.6, ContextTokens: 60000,
+	}, 5)
+	if facts.UserTurns != 1000 || facts.LastTurnRequests != 1000 || facts.LastTurnRetries != 3 ||
+		facts.LastTurnMaxTokens != 2 || facts.AvgRequestsPerTurn != 8 || facts.ContextBucket != "32k-128k" {
+		t.Fatalf("unexpected bounded facts: %+v", facts)
 	}
 }
