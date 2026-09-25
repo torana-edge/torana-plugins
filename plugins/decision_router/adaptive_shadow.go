@@ -63,6 +63,7 @@ type shadowClassifier struct {
 	Enabled           bool     `json:"enabled"`
 	DecisionModel     string   `json:"decision_model"`
 	Question          string   `json:"question"`
+	Inputs            string   `json:"inputs"`
 	MinimumConfidence *float64 `json:"minimum_confidence"`
 	MaxStateBytes     int      `json:"max_state_bytes"`
 	TimeoutMS         uint32   `json:"timeout_ms"`
@@ -204,7 +205,13 @@ func loadShadowPolicy(raw string) (shadowPolicy, string, error) {
 		policy.Triggers.SuggestionCooldown < 1 || policy.Triggers.SuggestionCooldown > 100 {
 		return policy, "", errors.New("invalid shadow triggers")
 	}
+	if policy.Classifier.Inputs != "" && policy.Classifier.Inputs != "user_turn+signals" && policy.Classifier.Inputs != "signals" {
+		return policy, "", errors.New("invalid classifier inputs")
+	}
 	if policy.Classifier.Enabled {
+		if policy.Classifier.Inputs == "" {
+			policy.Classifier.Inputs = "user_turn+signals"
+		}
 		if policy.Classifier.MinimumConfidence == nil {
 			defaultConfidence := 0.8
 			policy.Classifier.MinimumConfidence = &defaultConfidence
@@ -292,8 +299,48 @@ type shadowResult struct {
 }
 
 type shadowSignalFacts struct {
-	RecentToolErrors int `json:"recent_tool_errors"`
-	UserTurns        int `json:"user_turns"`
+	RecentToolErrors   int    `json:"recent_tool_errors"`
+	UserTurns          int    `json:"user_turns"`
+	LastTurnRequests   int    `json:"last_turn_requests"`
+	LastTurnRetries    int    `json:"last_turn_retries"`
+	LastTurnMaxTokens  int    `json:"last_turn_max_tokens"`
+	AvgRequestsPerTurn int    `json:"avg_requests_per_turn"`
+	ContextBucket      string `json:"context_bucket"`
+}
+
+func boundedShadowSignals(state shadowState, recentErrors int) shadowSignalFacts {
+	capCount := func(value int) int {
+		if value < 0 {
+			return 0
+		}
+		if value > 1000 {
+			return 1000
+		}
+		return value
+	}
+	bucket := "unknown"
+	switch tokens := state.ContextTokens; {
+	case tokens > 128000:
+		bucket = "128k+"
+	case tokens > 32000:
+		bucket = "32k-128k"
+	case tokens > 8000:
+		bucket = "8k-32k"
+	case tokens > 2000:
+		bucket = "2k-8k"
+	case tokens > 0:
+		bucket = "0-2k"
+	}
+	average := 0
+	if !math.IsNaN(state.AvgRequestsPerTurn) && !math.IsInf(state.AvgRequestsPerTurn, 0) {
+		average = capCount(int(math.Round(state.AvgRequestsPerTurn)))
+	}
+	return shadowSignalFacts{
+		RecentToolErrors: capCount(recentErrors), UserTurns: capCount(state.UserTurns),
+		LastTurnRequests: capCount(state.LastTurnRequests), LastTurnRetries: capCount(state.LastTurnRetries),
+		LastTurnMaxTokens: capCount(state.LastTurnMaxTokens), AvgRequestsPerTurn: average,
+		ContextBucket: bucket,
+	}
 }
 
 func shadowNewResultCandidates(req *pbv1.ChatRequest) []shadowResult {
@@ -505,7 +552,7 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 			state.LastEvaluation = state.UserTurns
 			if policy.Classifier.Enabled {
 				if !classified {
-					candidate, confidence, classOK = shadowClassify(req, policy.Classifier, ladder, errorCount, state.UserTurns)
+					candidate, confidence, classOK = shadowClassify(req, policy.Classifier, ladder, boundedShadowSignals(state, errorCount))
 					classified = true
 					if !classOK {
 						emit("shadow_classifier_unavailable", "")
@@ -565,19 +612,21 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 	return sdk.PassRequest(), nil
 }
 
-func shadowClassify(req *pbv1.ChatRequest, classifier shadowClassifier, ladder shadowLadder, recentErrors, userTurns int) (string, float64, bool) {
+func shadowClassify(req *pbv1.ChatRequest, classifier shadowClassifier, ladder shadowLadder, signals shadowSignalFacts) (string, float64, bool) {
 	routes := make(map[string]route, len(ladder.Steps)+1)
 	for _, step := range ladder.Steps {
 		routes[step.ID] = route{Description: step.Description}
 	}
 	routes["hold"] = route{Description: "The current model remains suitable for this turn"}
-	text := latestUserText(req)
-	if strings.TrimSpace(text) == "" {
-		return "", 0, false
-	}
 	state := requestState{
-		LatestUserTurn: truncateUTF8(text, classifier.MaxStateBytes),
-		Signals:        &shadowSignalFacts{RecentToolErrors: recentErrors, UserTurns: userTurns},
+		Signals: &signals,
+	}
+	if classifier.Inputs != "signals" {
+		text := latestUserText(req)
+		if strings.TrimSpace(text) == "" {
+			return "", 0, false
+		}
+		state.LatestUserTurn = truncateUTF8(text, classifier.MaxStateBytes)
 	}
 	return decide(config{
 		DecisionModel: classifier.DecisionModel, Question: classifier.Question,

@@ -222,33 +222,56 @@ func TestShadowClassifierRunsOnceAcrossStateConflicts(t *testing.T) {
 }
 
 func TestShadowClassifierReceivesOnlyLatestTurnAndSignals(t *testing.T) {
-	var policy map[string]any
-	if err := json.Unmarshal([]byte(shadowConfigJSON), &policy); err != nil {
-		t.Fatal(err)
+	for _, inputs := range []string{"user_turn+signals", "signals"} {
+		t.Run(inputs, func(t *testing.T) {
+			var policy map[string]any
+			if err := json.Unmarshal([]byte(shadowConfigJSON), &policy); err != nil {
+				t.Fatal(err)
+			}
+			policy["classifier"] = map[string]any{
+				"enabled": true, "decision_model": "jev-latest", "question": "How hard is this task?", "inputs": inputs,
+			}
+			raw, err := json.Marshal(policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := sdktest.New(t).SetConfig(string(raw))
+			var sent *pbv1.OutboundHTTPRequestArgs
+			stubDecision(h, 200, response("strong", 0.95), func(args *pbv1.OutboundHTTPRequestArgs) { sent = args })
+			if res := h.BeforeRequest(request("shadow-private", "Fix this race")); res.Err != nil {
+				t.Fatal(res.Err)
+			}
+			if sent == nil || len(routes(h)) != 0 {
+				t.Fatalf("shadow call=%v routes=%v", sent, routes(h))
+			}
+			for _, secret := range []string{"private historical system prompt", "old user turn", "old answer", "private-tool-result", "private-tool-arguments", "private-tool-schema", "original-model"} {
+				if bytes.Contains(sent.Body, []byte(secret)) {
+					t.Fatalf("shadow classifier received %q", secret)
+				}
+			}
+			if !bytes.Contains(sent.Body, []byte("recent_tool_errors")) {
+				t.Fatalf("missing bounded signals: %s", sent.Body)
+			}
+			for _, field := range []string{"last_turn_requests", "last_turn_retries", "last_turn_max_tokens", "avg_requests_per_turn", "context_bucket"} {
+				if !bytes.Contains(sent.Body, []byte(field)) {
+					t.Fatalf("missing %s in bounded signals: %s", field, sent.Body)
+				}
+			}
+			containsTurn := bytes.Contains(sent.Body, []byte("Fix this race"))
+			if containsTurn != (inputs == "user_turn+signals") {
+				t.Fatalf("latest turn presence=%t with inputs=%s: %s", containsTurn, inputs, sent.Body)
+			}
+		})
 	}
-	policy["classifier"] = map[string]any{
-		"enabled": true, "decision_model": "jev-latest", "question": "How hard is this task?",
-	}
-	raw, err := json.Marshal(policy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := sdktest.New(t).SetConfig(string(raw))
-	var sent *pbv1.OutboundHTTPRequestArgs
-	stubDecision(h, 200, response("strong", 0.95), func(args *pbv1.OutboundHTTPRequestArgs) { sent = args })
-	req := request("shadow-private", "Fix this race")
-	if res := h.BeforeRequest(req); res.Err != nil {
-		t.Fatal(res.Err)
-	}
-	if sent == nil || len(routes(h)) != 0 {
-		t.Fatalf("shadow call=%v routes=%v", sent, routes(h))
-	}
-	for _, secret := range []string{"private historical system prompt", "private-tool-result", "private-tool-arguments", "private-tool-schema", "original-model"} {
-		if bytes.Contains(sent.Body, []byte(secret)) {
-			t.Fatalf("shadow classifier received %q", secret)
-		}
-	}
-	if !bytes.Contains(sent.Body, []byte("Fix this race")) || !bytes.Contains(sent.Body, []byte("recent_tool_errors")) {
-		t.Fatalf("missing bounded latest turn/signals: %s", sent.Body)
+}
+
+func TestBoundedShadowSignalsBucketsAndCaps(t *testing.T) {
+	facts := boundedShadowSignals(shadowState{
+		UserTurns: 2000, LastTurnRequests: 4000, LastTurnRetries: 3, LastTurnMaxTokens: 2,
+		AvgRequestsPerTurn: 7.6, ContextTokens: 60000,
+	}, 5)
+	if facts.UserTurns != 1000 || facts.LastTurnRequests != 1000 || facts.LastTurnRetries != 3 ||
+		facts.LastTurnMaxTokens != 2 || facts.AvgRequestsPerTurn != 8 || facts.ContextBucket != "32k-128k" {
+		t.Fatalf("unexpected bounded facts: %+v", facts)
 	}
 }
