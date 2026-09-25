@@ -93,7 +93,9 @@ Use the same `TORANA_DATA_DIR` as the running instance. Its recorded listener
 is discovered automatically, including a non-default port. To select an instance
 explicitly, use `torana plugin file path --addr 127.0.0.1:9090 usage_logger usage.jsonl`.
 Expect a JSON record with `status`, `duration_ms` and `usage_reported`.
-Missing usage is not zero usage.
+Missing usage is not zero usage. `input_tokens` is the total prompt input;
+reported `cache_read_tokens` and `cache_write_tokens` are subsets of that
+total, not extra tokens to add.
 
 ## Data and failure behavior
 

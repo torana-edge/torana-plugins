@@ -1,6 +1,7 @@
 // otel emits request-shape metrics on the way in and, on the way out, the
 // per-request signals the host exposes: latency, upstream status class, and
-// provider-reported token usage (input, output, cache read and cache write).
+// plugin-visible token usage (total prompt input, output, cache read and cache
+// write). Cache reads and writes are subsets of the input total, not additions.
 // Core ops metrics the host can observe more reliably (every response,
 // including vetoes) are also emitted host-side (see internal/metrics); the
 // plugin-side series exist so operators can slice by whatever labels plugins
