@@ -14,7 +14,7 @@ func textBlock(text string) *pbv1.RequestBlock {
 
 func request(conversation, text string) *pbv1.ChatRequest {
 	return &pbv1.ChatRequest{
-		Model: "original-model",
+		Model: "fast-model",
 		Messages: []*pbv1.Message{
 			{Role: "system", Blocks: []*pbv1.RequestBlock{textBlock("private historical system prompt")}},
 			{Role: "user", Blocks: []*pbv1.RequestBlock{textBlock("old user turn must not be sent")}},
