@@ -12,7 +12,7 @@ optional context experiments.
 
 | Plugin | Use it to… |
 | --- | --- |
-| [`decision_router`](plugins/decision_router/README.md) | Route a conversation with a closed-set System One decision |
+| [`decision_router`](plugins/decision_router/README.md) | Explore adaptive model choices in shadow mode, without changing your route |
 | [`pii`](plugins/pii/README.md) | Use a local model for contextual checks of tool output |
 | [`pii_guard`](plugins/pii_guard/README.md) | Block recognizable PII and secrets without a model |
 | [`usage_logger`](plugins/usage_logger/README.md) | See usage without saving prompts |
