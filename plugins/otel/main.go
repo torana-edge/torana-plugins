@@ -1,6 +1,7 @@
 // otel emits request-shape metrics on the way in and, on the way out, the
 // per-request signals the host exposes: latency, upstream status class, and
-// provider-reported token usage (input, output, cache read and cache write).
+// plugin-visible token usage (total prompt input, output, cache read and cache
+// write). Cache reads and writes are subsets of the input total, not additions.
 // Core ops metrics the host can observe more reliably (every response,
 // including vetoes) are also emitted host-side (see internal/metrics); the
 // plugin-side series exist so operators can slice by whatever labels plugins
@@ -141,9 +142,10 @@ func responseMetrics(resp *pbv1.ChatResponse) []emission {
 		// One series, four bounded directions. Cache reads and writes are the
 		// numbers that decide whether prompt caching is paying for itself —
 		// a warmed prefix shows up as reads, a lapsed one as writes — and
-		// they are not derivable from input/output: the provider reports
-		// them separately and they overlap the input tally differently per
-		// provider. Emitting them as directions rather than as new metric
+		// they are not derivable from the input total: the provider reports
+		// how prompt input splits between cache and fresh tokens. Reads and
+		// writes are subsets of input, not extra tokens to add. Emitting them
+		// as directions rather than as new metric
 		// names keeps one query shape and cannot grow the label vocabulary.
 		//
 		// Zero stays unemitted, as it already does for input and output:

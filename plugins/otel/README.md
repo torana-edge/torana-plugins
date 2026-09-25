@@ -1,6 +1,6 @@
 # Add request metrics
 
-Emit request shape, latency, observed status classes and provider-reported token usage — input, output, cache read and cache write — through Torana's metrics host.
+Emit request shape, latency, observed status classes and token usage visible to plugins — total prompt input, output, cache read and cache write — through Torana's metrics host.
 
 [All plugins](../../README.md#choose-a-plugin) · [Source](main.go) · [Manifest](plugin.json) · [Settings schema](schema.json)
 
@@ -71,7 +71,7 @@ same inspect/configure/approve/enable flow. Rebuilds need a new digest approval.
 
 ## Try it and check the result
 
-Send an inference request, then open `http://127.0.0.1:8080/_torana/plugin/otel/` for its minimal status page. `torana agent discover` lists its declared status operation. The page is not a metrics dashboard: inspect your configured host metrics exporter for the `torana_plugin_requests_total` and response series. Token counts arrive as one `torana_plugin_tokens` series labelled `direction`, with four values: `input`, `output`, `cache_read` and `cache_write`. A direction the provider did not report is absent rather than zero, so a provider that reports no cache usage produces no cache series.
+Send an inference request, then open `http://127.0.0.1:8080/_torana/plugin/otel/` for its minimal status page. `torana agent discover` lists its declared status operation. The page is not a metrics dashboard: inspect your configured host metrics exporter for the `torana_plugin_requests_total` and response series. Token counts arrive as one `torana_plugin_tokens` series labelled `direction`, with four values: `input`, `output`, `cache_read` and `cache_write`. `input` is the total prompt input; reported cache reads and writes are subsets, so do not add them to `input`. A direction the provider did not report is absent rather than zero, so a provider that reports no cache usage produces no cache series.
 
 ## Data and failure behavior
 
