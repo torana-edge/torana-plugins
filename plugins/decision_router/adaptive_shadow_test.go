@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"testing"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
@@ -306,6 +307,7 @@ func TestShadowTwentyTurnsSuggestsOnceWithMeasuredCost(t *testing.T) {
 	h := sdktest.New(t).SetConfig(shadowConfigJSON)
 	req := request("twenty-turns", "Start")
 	req.Model = "fast-model"
+	var expectedRebuildUSD float64
 	for turn := 1; turn <= 20; turn++ {
 		if turn == 4 {
 			failed := true
@@ -319,6 +321,9 @@ func TestShadowTwentyTurnsSuggestsOnceWithMeasuredCost(t *testing.T) {
 		if turn > 1 {
 			req.Messages = append(req.Messages, &pbv1.Message{Role: "user", Blocks: []*pbv1.RequestBlock{textBlock("Turn " + string(rune('A'+turn)))}})
 		}
+		if turn == 4 {
+			expectedRebuildUSD = float64(proto.Size(req)/4) / 1e6 * 6.25
+		}
 		if result := h.BeforeRequest(req); result.Err != nil {
 			t.Fatal(result.Err)
 		}
@@ -330,7 +335,7 @@ func TestShadowTwentyTurnsSuggestsOnceWithMeasuredCost(t *testing.T) {
 		}
 		if metric.Name == "torana_decision_router_switch_cost_usd" {
 			costs++
-			if metric.Value <= 0 || metric.Labels["to"] != "strong" {
+			if math.Abs(metric.Value-expectedRebuildUSD) > 1e-12 || metric.Labels["to"] != "strong" {
 				t.Fatalf("unexpected cost metric: %+v", metric)
 			}
 		}
