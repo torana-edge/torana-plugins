@@ -85,6 +85,7 @@ type shadowState struct {
 	Provider           string  `json:"provider"`
 	Step               string  `json:"step"`
 	LastClientModel    string  `json:"last_client_model"`
+	OffLadder          bool    `json:"off_ladder"`
 	LastUserTurnKey    string  `json:"last_user_turn_key"`
 	UserTurns          int     `json:"user_turns"`
 	LastEvaluation     int     `json:"last_evaluation"`
@@ -484,6 +485,8 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 			state = shadowState{PolicyHash: policyHash, Provider: provider, Step: ladder.Start}
 			if observed := shadowStepForModel(ladder, req.Model); observed != "" {
 				state.Step = observed
+			} else {
+				state.OffLadder = true
 			}
 		}
 		turnKey, userTurn := shadowUserTurn(req)
@@ -531,9 +534,11 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 		clientModelChanged := !fresh && state.LastClientModel != "" && state.LastClientModel != req.Model
 		state.LastClientModel = req.Model
 		if clientModelChanged {
-			state.ModelSwitches++
 			if observed := shadowStepForModel(ladder, req.Model); observed != "" {
 				state.Step = observed
+				state.OffLadder = false
+			} else {
+				state.OffLadder = true
 			}
 		}
 		errorCount := 0
@@ -545,7 +550,7 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 		previousTurnSignal := state.LastTurnRetries >= policy.Triggers.RetryStreak ||
 			state.LastTurnRequests >= policy.Triggers.RequestsPerUserTurn ||
 			state.LastTurnMaxTokens >= policy.Triggers.MaxTokensFinishes
-		shouldEvaluate := newTurn && (fresh || state.UserTurns-state.LastEvaluation >= policy.Triggers.ReevaluateUserTurns ||
+		shouldEvaluate := newTurn && !state.OffLadder && (fresh || state.UserTurns-state.LastEvaluation >= policy.Triggers.ReevaluateUserTurns ||
 			errorCount >= policy.Triggers.ToolErrorThreshold || previousTurnSignal)
 		var decision policyDecision
 		if shouldEvaluate {
@@ -594,10 +599,21 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 				"outcome": "user_switch_unprompted", "provider": provider,
 			})
 		}
+		if (fresh || clientModelChanged) && state.OffLadder {
+			sdk.EmitMetric(metricDecisionName, sdk.MetricCounter, 1, map[string]string{
+				"outcome": "off_ladder", "provider": provider,
+			})
+		}
 		if decision.Target != "" && decision.BlockedBy == "" {
 			sdk.EmitMetric(metricDecisionName, sdk.MetricCounter, 1, map[string]string{
 				"outcome": "would_suggest", "provider": provider, "from": state.Step, "to": decision.Target,
 				"repeat": fmt.Sprintf("%t", repeatSuggestion),
+			})
+			sdk.EmitMetric("torana_decision_router_switch_cost_usd", sdk.MetricHistogram, decision.RebuildUSD, map[string]string{
+				"provider": provider, "from": state.Step, "to": decision.Target,
+			})
+			sdk.EmitMetric("torana_decision_router_escalation_depth", sdk.MetricHistogram, float64(shadowStepIndex(ladder, decision.Target)), map[string]string{
+				"provider": provider,
 			})
 		} else if decision.BlockedBy != "" {
 			sdk.EmitMetric(metricDecisionName, sdk.MetricCounter, 1, map[string]string{

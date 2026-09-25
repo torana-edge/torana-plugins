@@ -117,6 +117,12 @@ non-max-token finish does not erase earlier max-token finishes in that turn.
 The per-turn cost comparison uses the observed average requests per user turn;
 it remains an estimate, not a provider quote.
 
+If the harness is using a model outside the configured ladder, shadow mode
+records `off_ladder` and does not pretend that model is the ladder's starting
+step. An unprompted harness switch is recorded separately; it does not consume
+Torana's future automatic-switch allowance. `would_suggest` also records the
+estimated one-time cache-rebuild cost and escalation depth as histograms.
+
 Editing the policy starts a new measurement baseline. The plugin never mutates
 provider-visible content, preserving the prompt prefix and cache markers.
 

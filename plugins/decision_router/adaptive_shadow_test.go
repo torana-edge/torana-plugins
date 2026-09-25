@@ -244,7 +244,7 @@ func TestShadowClassifierReceivesOnlyLatestTurnAndSignals(t *testing.T) {
 			if sent == nil || len(routes(h)) != 0 {
 				t.Fatalf("shadow call=%v routes=%v", sent, routes(h))
 			}
-			for _, secret := range []string{"private historical system prompt", "old user turn", "old answer", "private-tool-result", "private-tool-arguments", "private-tool-schema", "original-model"} {
+			for _, secret := range []string{"private historical system prompt", "old user turn", "old answer", "private-tool-result", "private-tool-arguments", "private-tool-schema", "fast-model"} {
 				if bytes.Contains(sent.Body, []byte(secret)) {
 					t.Fatalf("shadow classifier received %q", secret)
 				}
@@ -273,5 +273,69 @@ func TestBoundedShadowSignalsBucketsAndCaps(t *testing.T) {
 	if facts.UserTurns != 1000 || facts.LastTurnRequests != 1000 || facts.LastTurnRetries != 3 ||
 		facts.LastTurnMaxTokens != 2 || facts.AvgRequestsPerTurn != 8 || facts.ContextBucket != "32k-128k" {
 		t.Fatalf("unexpected bounded facts: %+v", facts)
+	}
+}
+
+func TestShadowDoesNotTreatOffLadderModelAsStartStep(t *testing.T) {
+	h := sdktest.New(t).SetConfig(shadowConfigJSON)
+	req := request("off-ladder", "Fix this race")
+	req.Model = "user-selected-model"
+	if result := h.BeforeRequest(req); result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	raw, found := h.State(shadowStateKey("off-ladder", req))
+	var state shadowState
+	if !found || json.Unmarshal([]byte(raw), &state) != nil || !state.OffLadder {
+		t.Fatalf("off-ladder state: found=%t state=%+v", found, state)
+	}
+	var offLadder, suggestions int
+	for _, metric := range h.Metrics() {
+		switch metric.Labels["outcome"] {
+		case "off_ladder":
+			offLadder++
+		case "would_suggest":
+			suggestions++
+		}
+	}
+	if offLadder != 1 || suggestions != 0 || len(routes(h)) != 0 {
+		t.Fatalf("off-ladder=%d suggestions=%d routes=%v", offLadder, suggestions, routes(h))
+	}
+}
+
+func TestShadowTwentyTurnsSuggestsOnceWithMeasuredCost(t *testing.T) {
+	h := sdktest.New(t).SetConfig(shadowConfigJSON)
+	req := request("twenty-turns", "Start")
+	req.Model = "fast-model"
+	for turn := 1; turn <= 20; turn++ {
+		if turn == 4 {
+			failed := true
+			req.Messages = append(req.Messages, &pbv1.Message{Role: "tool", Blocks: []*pbv1.RequestBlock{{
+				Kind: &pbv1.RequestBlock_ToolResult{ToolResult: &pbv1.RequestToolResultBlock{
+					ToolCallId: "failure-on-turn-four", ToolName: "shell", IsError: &failed,
+					Content: []*pbv1.ToolResultContentBlock{{Kind: &pbv1.ToolResultContentBlock_Text{Text: &pbv1.ToolResultTextBlock{Text: "test failed"}}}},
+				}},
+			}}})
+		}
+		if turn > 1 {
+			req.Messages = append(req.Messages, &pbv1.Message{Role: "user", Blocks: []*pbv1.RequestBlock{textBlock("Turn " + string(rune('A'+turn)))}})
+		}
+		if result := h.BeforeRequest(req); result.Err != nil {
+			t.Fatal(result.Err)
+		}
+	}
+	var suggestions, costs int
+	for _, metric := range h.Metrics() {
+		if metric.Name == metricDecisionName && metric.Labels["outcome"] == "would_suggest" {
+			suggestions++
+		}
+		if metric.Name == "torana_decision_router_switch_cost_usd" {
+			costs++
+			if metric.Value <= 0 || metric.Labels["to"] != "strong" {
+				t.Fatalf("unexpected cost metric: %+v", metric)
+			}
+		}
+	}
+	if suggestions != 1 || costs != 1 || len(routes(h)) != 0 {
+		t.Fatalf("suggestions=%d costs=%d routes=%v", suggestions, costs, routes(h))
 	}
 }
