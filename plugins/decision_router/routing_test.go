@@ -126,7 +126,6 @@ func TestRouteRefusalDoesNotAdvanceState(t *testing.T) {
 		`{}`,
 		`{"_route_applied":{"provider":"original","model":"strong-model","verdict_plugin":"decision_router","refused":"unsupported_model","served_by":"original","served_model":"fast-model"}}`,
 		`{"_route_applied":{"provider":"original","model":"strong-model","verdict_plugin":"other","served_by":"original","served_model":"strong-model"}}`,
-		`{"_route_applied":{"provider":"original","model":"strong-model","verdict_plugin":"decision_router","served_by":"fallback","served_model":"other-model","failover":true}}`,
 	} {
 		state := shadowState{Step: "fast", PolicyHash: "policy"}
 		h.Run(func() {

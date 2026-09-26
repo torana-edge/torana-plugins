@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
@@ -8,6 +9,19 @@ import (
 )
 
 // Acceptance is not a bypass for current price data, caps, or ownership rules.
+func prepareAcceptance(policy shadowPolicy, ladder shadowLadder, state *shadowState, contextTokens int64) policyDecision {
+	decision := acceptedDecision(policy, ladder, *state, contextTokens)
+	if decision.BlockedBy != "" {
+		finishAcceptance(state, "blocked", decision.BlockedBy)
+	} else if decision.Target == "" {
+		finishAcceptance(state, "applied", "already_selected")
+	} else {
+		state.PendingSuggestion.Status = "applying"
+		state.PendingSuggestion.AttemptedTurn = state.UserTurns
+	}
+	return decision
+}
+
 func acceptedDecision(policy shadowPolicy, ladder shadowLadder, state shadowState, contextTokens int64) policyDecision {
 	target := state.PendingSuggestion.To
 	current, next := shadowStepIndex(ladder, state.Step), shadowStepIndex(ladder, target)
@@ -50,6 +64,12 @@ func requestRoute(provider string, ladder shadowLadder, state shadowState, targe
 	if manageEffort && step.Effort != "" {
 		effort := pbv1.Effort(pbv1.Effort_value["EFFORT_"+strings.ToUpper(step.Effort)])
 		err = sdk.RouteRequestWithEffort(provider, step.Model, effort)
+		var refusal *sdk.HostCallRefusalError
+		current := shadowStepIndex(ladder, state.Step)
+		if errors.As(err, &refusal) && refusal.Code == pbv1.ErrorCode_ERROR_CODE_UNSUPPORTED && current >= 0 && ladder.Steps[current].Model != step.Model {
+			emit("effort_model_only_fallback", "")
+			err = sdk.RouteRequest(provider, step.Model)
+		}
 	} else {
 		err = sdk.RouteRequest(provider, step.Model)
 	}
@@ -74,9 +94,21 @@ func reconcileAppliedRoute(response *pbv1.ChatResponse, state *shadowState) {
 		return
 	}
 	actual, present, err := sdk.RouteApplied(response)
-	if err != nil || !present || actual.VerdictPlugin != "decision_router" || actual.Refused != nil || actual.Failover || actual.Provider != provider || actual.Model != model || actual.ServedBy != provider || actual.ServedModel != model {
-		state.ActiveRoute = ""
+	if err != nil || !present || actual.VerdictPlugin != "decision_router" || actual.Refused != nil || actual.Provider != provider || actual.Model != model {
+		// Missing/foreign outcomes do not revoke an already established route.
+		if present && actual.VerdictPlugin == "decision_router" && actual.Refused != nil {
+			state.ActiveRoute = ""
+		}
+		finishAcceptance(state, "refused", "not_applied")
 		emit("route_not_applied", "")
+		return
+	}
+	if actual.Failover || actual.ServedBy != provider || actual.ServedModel != model {
+		// Keep routing to the selected target across the turn. Failover is an
+		// upstream transport outcome, not permission to downgrade the ladder.
+		state.ActiveRoute = target
+		finishAcceptance(state, "refused", "failover")
+		emit("route_failover", "")
 		return
 	}
 	if state.Step != target {
@@ -92,4 +124,13 @@ func reconcileAppliedRoute(response *pbv1.ChatResponse, state *shadowState) {
 	if state.PendingSuggestion != nil && state.PendingSuggestion.To == target {
 		state.PendingSuggestion.Status = "applied"
 	}
+}
+
+func finishAcceptance(state *shadowState, status, reason string) {
+	p := state.PendingSuggestion
+	if p == nil || (p.Status != "accepted" && p.Status != "applying") {
+		return
+	}
+	p.Status, p.Reason = status, reason
+	emit("acceptance_"+status, reason)
 }

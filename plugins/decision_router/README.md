@@ -29,6 +29,15 @@ in your harness. Approve `env.route_request` for these modes. Effort changes
 also require `manage_effort: true` and `env.route_request.effort`; otherwise
 Torana leaves the harness's effort alone.
 
+The manifest lists all capabilities, but you can approve only what you use:
+shadow needs observation/state grants, advise adds `env.suggest`, and
+confirm/auto add `env.route_request`. Approve `env.route_request.effort` only
+if you enable `manage_effort`. Routing requires both the matching grant and
+confirm/auto mode; approving a grant alone does not turn routing on.
+If effort is unsupported, a model switch falls back to model-only routing;
+effort-only changes are refused. Accepted switches that cannot pass current
+guards or be applied end in a terminal state rather than retrying indefinitely.
+
 It can use repeated tool failures as a local signal. Optionally, an
 operator-bound System One-compatible endpoint can classify the latest user turn
 against the ladder's step descriptions. Hosted

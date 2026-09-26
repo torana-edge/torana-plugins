@@ -591,7 +591,7 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 				MaxTokensFinishes: state.LastTurnMaxTokens,
 			}, candidate)
 			if accepted {
-				decision = acceptedDecision(policy, ladder, state, contextTokens)
+				decision = prepareAcceptance(policy, ladder, &state, contextTokens)
 			}
 		}
 		repeatSuggestion := decision.Target != "" && decision.Target == state.LastSuggestion
