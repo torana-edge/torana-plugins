@@ -37,11 +37,12 @@ func reconcileAdvice(req *pbv1.ChatRequest, ladder shadowLadder, state *shadowSt
 					continue
 				}
 				switch outcome.Status {
-				case "accepted", "dismissed", "expired":
+				case "accepted", "dismissed", "expired", "superseded":
 					p.Status, p.Via = outcome.Status, outcome.Via
 				}
 			}
 		}
+		// Host expiry is authoritative; this is a fallback for missing feedback.
 		if p.Status == "pending" && state.UserTurns > p.ExpiresUserTurn {
 			p.Status = "expired"
 		}
@@ -50,14 +51,14 @@ func reconcileAdvice(req *pbv1.ChatRequest, ladder shadowLadder, state *shadowSt
 		return
 	}
 	via := "harness_switch_unprompted"
-	if p != nil && p.Status != "expired" && p.Status != "dismissed" && state.Step == p.To {
+	if p != nil && (p.Status == "pending" || p.Status == "accepted") && state.Step == p.To {
 		p.Status, p.Via = "accepted", "harness_switch"
 		via = "harness_switch"
 	}
 	if state.Step == previousStep || state.OffLadder {
 		return
 	}
-	if shadowStepIndex(ladder, state.Step) > shadowStepIndex(ladder, previousStep) {
+	if via == "harness_switch" && shadowStepIndex(ladder, state.Step) > shadowStepIndex(ladder, previousStep) {
 		state.ModelSwitches++
 	}
 	state.History = append(state.History, routeHistory{AtUserTurn: state.UserTurns, From: previousStep, To: state.Step, Via: via})
@@ -81,6 +82,7 @@ func rememberAdvice(key, policyHash string, pending *pendingAdvice) {
 			return
 		}
 		if state.PolicyHash != policyHash || state.UserTurns != pending.IssuedTurn || state.LastSuggestion != pending.To {
+			emit("suggestion_state_stale", "")
 			return
 		}
 		if state.PendingSuggestion != nil && state.PendingSuggestion.ID == pending.ID {

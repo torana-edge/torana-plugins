@@ -10,7 +10,7 @@ import (
 
 func TestSuggestionFeedbackRequiresMatchingPersistedID(t *testing.T) {
 	ladder := shadowLadder{Steps: []shadowStep{{ID: "fast", Model: "fast-model"}, {ID: "strong", Model: "strong-model"}}}
-	for _, status := range []string{"accepted", "dismissed", "expired"} {
+	for _, status := range []string{"accepted", "dismissed", "expired", "superseded"} {
 		t.Run(status, func(t *testing.T) {
 			state := shadowState{Step: "fast", UserTurns: 2, PendingSuggestion: &pendingAdvice{ID: "sg_known", To: "strong", ExpiresUserTurn: 5, Status: "pending"}}
 			req := &pbv1.ChatRequest{ToranaMetaJson: []byte(`{"_suggestions":[{"id":"other","status":"accepted"}]}`)}
@@ -45,6 +45,20 @@ func TestHarnessSwitchAndExpiry(t *testing.T) {
 	}
 }
 
+func TestUnpromptedAndSupersededSwitchesDoNotConsumeCap(t *testing.T) {
+	ladder := shadowLadder{Steps: []shadowStep{{ID: "fast", Model: "fast-model"}, {ID: "strong", Model: "strong-model"}}}
+	for _, pending := range []*pendingAdvice{nil, {ID: "sg_old", To: "strong", Status: "superseded", ExpiresUserTurn: 5}} {
+		state := shadowState{Step: "strong", UserTurns: 2, PendingSuggestion: pending}
+		reconcileAdvice(&pbv1.ChatRequest{}, ladder, &state, "fast", true)
+		if state.ModelSwitches != 0 || len(state.History) != 1 || state.History[0].Via != "harness_switch_unprompted" {
+			t.Fatalf("unprompted state = %+v", state)
+		}
+		if pending != nil && pending.Status != "superseded" {
+			t.Fatal("terminal advice was accepted")
+		}
+	}
+}
+
 func TestRememberAdviceMergesIntoLatestState(t *testing.T) {
 	h := sdktest.New(t)
 	state := shadowState{PolicyHash: "policy", UserTurns: 2, LastSuggestion: "strong", ContextTokens: 12345}
@@ -70,5 +84,14 @@ func TestRememberAdviceMergesIntoLatestState(t *testing.T) {
 	}
 	if state.PendingSuggestion.ID != "sg_1" {
 		t.Fatal("stale request overwrote current suggestion")
+	}
+	var stale int
+	for _, metric := range h.Metrics() {
+		if metric.Labels["outcome"] == "suggestion_state_stale" {
+			stale++
+		}
+	}
+	if stale != 1 {
+		t.Fatalf("stale metrics = %d", stale)
 	}
 }
