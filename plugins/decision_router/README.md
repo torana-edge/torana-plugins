@@ -43,9 +43,12 @@ object in its settings:
 }
 ```
 
-The prices are illustrative USD per million tokens, **not live provider
-prices**. Replace them with current rates for your models before trusting a
-cost-based suggestion. Missing prices produce a `pricing_unavailable` shadow
+Torana's declared model capabilities are the preferred source of pricing:
+omit each step's `pricing` to use the rates configured for that provider/model.
+The example's explicit prices are illustrative USD per million tokens, **not
+live provider prices**. Explicit step prices override the declared rates and
+emit a `deprecated_pricing_override` metric; migrate them into your Torana
+model configuration. Missing prices produce a `pricing_unavailable` shadow
 metric instead of pretending a switch is free. Change the provider and models
 to match your Torana configuration. The steps
 are ordered from lighter to stronger; `start` is the baseline when a

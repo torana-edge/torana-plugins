@@ -571,7 +571,7 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 			if contextTokens == 0 {
 				contextTokens = int64(proto.Size(req) / 4)
 			}
-			decision = Evaluate(policy, ladder, state, policySignals{
+			decision = Evaluate(policy, resolveLadderPricing(provider, ladder), state, policySignals{
 				RecentToolErrors: errorCount, RetryStreak: state.LastTurnRetries,
 				RequestsPerUserTurn: state.LastTurnRequests, AvgRequestsPerTurn: state.AvgRequestsPerTurn,
 				ContextTokens: contextTokens, AvgOutputTokens: state.AvgOutputTokens,

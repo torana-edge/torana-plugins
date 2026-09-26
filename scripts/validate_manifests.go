@@ -167,7 +167,7 @@ var pluginContracts = map[string]pluginContract{
 		permissions:   []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.host_call.torana_evaluate_compaction", "env.host_call.torana_record_savings", "env.model_complete", "env.model_pricing", "env.plugin_config", "env.shared_cache_get", "ir.tool_results.write"},
 		conflictsWith: []string{"torana/keyword_compactor"}},
 	"decision_router": {hooks: []string{"run_before_request", "run_after_response"},
-		permissions: []string{"env.credential_get", "env.emit_metric", "env.http_request", "env.log", "env.meta_get", "env.meta_set", "env.plugin_config", "env.state_get", "env.state_set"}},
+		permissions: []string{"env.credential_get", "env.emit_metric", "env.http_request", "env.log", "env.meta_get", "env.meta_set", "env.model_capabilities", "env.plugin_config", "env.state_get", "env.state_set"}},
 	"intent": {hooks: []string{"run_before_request", "run_after_response", "run_on_stream_chunk"},
 		permissions: []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.log", "env.meta_get", "env.meta_set", "env.plugin_config", "env.shared_cache_set", "ir.cache_control.write", "ir.messages.write.assistant", "ir.messages.write.developer", "ir.messages.write.other", "ir.messages.write.system", "ir.messages.write.tool", "ir.messages.write.user", "ir.stream.write", "ir.tool_results.write", "ir.tools.write"}},
 	"keyword_compactor": {hooks: []string{"run_before_request"},
