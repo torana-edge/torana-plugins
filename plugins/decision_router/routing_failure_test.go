@@ -75,13 +75,17 @@ func TestEffortPermissionDenialIsExplicitAndNeverBypassed(t *testing.T) {
 		t.Fatal("permission denial was bypassed with a fallback")
 	}
 	denied := 0
+	refused := 0
 	for _, metric := range h.Metrics() {
+		if metric.Labels["outcome"] == "route_refused" {
+			refused++
+		}
 		if metric.Labels["reason"] == "effort_denied" {
 			denied++
 		}
 	}
-	if denied != 1 {
-		t.Fatalf("effort_denied metrics = %d", denied)
+	if denied != 1 || refused != 1 {
+		t.Fatalf("effort_denied metrics = %d; total refusals = %d", denied, refused)
 	}
 }
 

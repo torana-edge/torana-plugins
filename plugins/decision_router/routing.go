@@ -70,6 +70,7 @@ func requestRoute(provider string, ladder shadowLadder, state shadowState, targe
 		var refusal *sdk.HostCallRefusalError
 		if errors.As(err, &refusal) && refusal.Code == pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED {
 			emitReason("route_refused", "effort_denied")
+			return
 		}
 		current := shadowStepIndex(ladder, state.Step)
 		if errors.As(err, &refusal) && refusal.Code == pbv1.ErrorCode_ERROR_CODE_UNSUPPORTED && current >= 0 && ladder.Steps[current].Model != step.Model {
@@ -80,7 +81,7 @@ func requestRoute(provider string, ladder shadowLadder, state shadowState, targe
 		err = sdk.RouteRequest(provider, step.Model)
 	}
 	if err != nil {
-		emit("route_refused", pricingLookupReason(err))
+		emitReason("route_refused", pricingLookupReason(err))
 	}
 }
 
