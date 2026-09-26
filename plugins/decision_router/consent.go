@@ -91,9 +91,16 @@ func rememberAdvice(key, policyHash string, pending *pendingAdvice) {
 			return
 		}
 		if state.PendingSuggestion != nil && state.PendingSuggestion.ID == pending.ID {
-			return
+			if state.PendingSuggestion.Status != "pending" || state.PendingSuggestion.ExpiresUserTurn >= pending.ExpiresUserTurn {
+				return
+			}
+			// The host refreshed the same live ID/code. Extend only pending
+			// expiry; never overwrite acceptance arriving concurrently.
+			state.PendingSuggestion.ExpiresUserTurn = pending.ExpiresUserTurn
+			state.PendingSuggestion.IssuedTurn = pending.IssuedTurn
+		} else {
+			state.PendingSuggestion = pending
 		}
-		state.PendingSuggestion = pending
 		applied, err := saveShadowState(key, state, &stored.Version)
 		if err != nil {
 			emit("suggestion_state_failed", "")

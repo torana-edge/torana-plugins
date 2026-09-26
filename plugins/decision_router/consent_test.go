@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"github.com/torana-edge/torana-plugin-sdk/sdktest"
 )
@@ -93,5 +94,41 @@ func TestRememberAdviceMergesIntoLatestState(t *testing.T) {
 	}
 	if stale != 1 {
 		t.Fatalf("stale metrics = %d", stale)
+	}
+}
+
+func TestAdviceRefreshExtendsExpiryWithoutReopeningAcceptance(t *testing.T) {
+	h := sdktest.New(t)
+	state := shadowState{PolicyHash: "policy", UserTurns: 5, LastSuggestion: "strong", PendingSuggestion: &pendingAdvice{ID: "sg_1", To: "strong", Status: "pending", ExpiresUserTurn: 5}}
+	h.Run(func() {
+		if ok, err := saveShadowState("session", state, nil); err != nil || !ok {
+			t.Fatalf("save=%t %v", ok, err)
+		}
+		rememberAdvice("session", "policy", &pendingAdvice{ID: "sg_1", To: "strong", IssuedTurn: 5, ExpiresUserTurn: 8, Status: "pending"})
+	})
+	raw, _ := h.State("session")
+	if err := json.Unmarshal([]byte(raw), &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.PendingSuggestion.ExpiresUserTurn != 8 {
+		t.Fatal("refreshed host expiry was not preserved")
+	}
+	h.Run(func() {
+		stored, _, err := sdk.StateGetVersioned("session")
+		if err != nil {
+			t.Fatal(err)
+		}
+		state.PendingSuggestion.Status = "accepted"
+		if ok, err := saveShadowState("session", state, &stored.Version); err != nil || !ok {
+			t.Fatalf("save=%t %v", ok, err)
+		}
+		rememberAdvice("session", "policy", &pendingAdvice{ID: "sg_1", To: "strong", IssuedTurn: 5, ExpiresUserTurn: 9, Status: "pending"})
+	})
+	raw, _ = h.State("session")
+	if err := json.Unmarshal([]byte(raw), &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.PendingSuggestion.Status != "accepted" {
+		t.Fatal("refresh reopened accepted advice")
 	}
 }
