@@ -133,6 +133,7 @@ var knownPermissions = map[string]bool{
 	"env.plugin_config": true, "env.request_headers": true,
 	"env.model_complete": true, "env.model_pricing": true, "env.model_capabilities": true,
 	"env.resource_info":   true,
+	"env.route_request.effort": true,
 	"env.respond_request": true, "env.route_request": true, "env.serve_http": true, "env.set_identity": true, "env.suggest": true,
 	"env.state_get": true, "env.state_keys": true, "env.state_set": true,
 	"env.credential_get": true, "env.file_append": true, "env.file_delete": true,

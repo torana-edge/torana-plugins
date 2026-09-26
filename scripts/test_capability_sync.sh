@@ -117,11 +117,12 @@ command_perms=$(grep -o '"permission"[[:space:]]*:[[:space:]]*"[^"]*"' "$catalog
 hook_perms=$(awk '/"hook_grants"[[:space:]]*:/ {f=1; next} f && /}/ {exit} f' "$catalog" | grep -o '"env\.[^"]*"' | tr -d '"')
 metadata_perms=$(json_array "$catalog" metadata_grants)
 write_perms=$(json_array "$catalog" write_permissions)
-if [[ -z "$command_perms" || -z "$hook_perms" || -z "$metadata_perms" || -z "$write_perms" ]]; then
+extra_perms=$(json_array "$catalog" extra_permissions)
+if [[ -z "$command_perms" || -z "$hook_perms" || -z "$metadata_perms" || -z "$write_perms" || -z "$extra_perms" ]]; then
   echo "capability sync: could not read the SDK capability catalog — its schema changed" >&2
   exit 1
 fi
-sdk_perms=$( { echo "$command_perms"; echo "$hook_perms"; echo "$metadata_perms"; echo "$write_perms"; } | sort -u )
+sdk_perms=$( { echo "$command_perms"; echo "$hook_perms"; echo "$metadata_perms"; echo "$write_perms"; echo "$extra_perms"; } | sort -u )
 hooks_sdk=$(json_array "$catalog" hooks | sort -u)
 validator_perms=$(block "$validator" knownPermissions | sort -u)
 
