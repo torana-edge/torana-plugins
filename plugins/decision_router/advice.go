@@ -30,7 +30,7 @@ func publishAdvice(key, policyHash string, ladder shadowLadder, state shadowStat
 	if decision.Class == "effort_change" {
 		body += " This changes reasoning effort and may invalidate the prompt cache."
 	}
-	_, err := sdk.Suggest(&pbv1.SuggestArgs{
+	result, err := sdk.Suggest(&pbv1.SuggestArgs{
 		Kind: decision.Class, DedupeKey: hex.EncodeToString(digest[:]),
 		Title: adviceText("Consider "+step.Model, 120), Body: adviceText(body, 600), CostUsd: &decision.RebuildUSD,
 		HarnessTargetModel: &harnessModel, ExpiresAfterUserTurns: 3,
@@ -38,6 +38,7 @@ func publishAdvice(key, policyHash string, ladder shadowLadder, state shadowStat
 	if err != nil {
 		emit("suggest_failed", pricingLookupReason(err))
 	} else {
+		rememberAdvice(key, policyHash, &pendingAdvice{ID: result.SuggestionId, To: step.ID, IssuedTurn: state.UserTurns, ExpiresUserTurn: state.UserTurns + 3, Status: "pending"})
 		emit("suggested", step.ID)
 	}
 }
