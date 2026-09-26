@@ -10,6 +10,11 @@ optional suggestions, including estimated cache-rebuild cost and payback for
 cheaper models. Switch models in your harness if you want to follow the advice.
 Torana does not change your route or effort in this mode. Approve the
 `env.suggest` permission when upgrading the plugin to enable these notices.
+Use a Torana release with the suggestion service enabled to display advice.
+The `suggest_failed` metric distinguishes `not_configured`, `denied`,
+and other failures. Repeated advice refreshes the same live suggestion rather
+than replacing its confirmation code. If a harness uses short model names,
+put its target name first in the step's `aliases`; otherwise Torana uses `model`.
 
 It can use repeated tool failures as a local signal. Optionally, an
 operator-bound System One-compatible endpoint can classify the latest user turn

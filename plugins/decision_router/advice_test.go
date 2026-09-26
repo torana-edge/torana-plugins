@@ -24,13 +24,13 @@ func TestAdviceIsCostedBoundedAndNeverRoutes(t *testing.T) {
 		value, err := proto.Marshal(&pbv1.SuggestResult{SuggestionId: "sg_1"})
 		return sdktest.HostResultValue(value), err
 	})
-	ladder := shadowLadder{Steps: []shadowStep{{ID: "strong", Model: "strong-model", Description: strings.Repeat("long\n", 200)}}}
+	ladder := shadowLadder{Steps: []shadowStep{{ID: "strong", Model: "strong-model", Aliases: []string{"strong"}, Description: strings.Repeat("long\n", 200)}}}
 	decision := policyDecision{Target: "strong", Class: "model_switch", RebuildUSD: .25, PerTurnDelta: -.02, PaybackTurns: 12.5}
 	h.Run(func() {
-		publishAdvice("session", "policy", ladder, shadowState{UserTurns: 2}, decision)
-		publishAdvice("session", "policy", ladder, shadowState{UserTurns: 2}, decision)
+		publishAdvice("session", "policy", ladder, shadowState{Step: "fast", UserTurns: 2}, decision)
+		publishAdvice("session", "policy", ladder, shadowState{Step: "fast", UserTurns: 5}, decision)
 	})
-	if len(calls) != 2 || calls[0].DedupeKey != calls[1].DedupeKey || calls[0].GetHarnessTargetModel() != "strong-model" || calls[0].GetCostUsd() != .25 || !strings.Contains(calls[0].Body, "12.5 turns") {
+	if len(calls) != 2 || calls[0].DedupeKey != calls[1].DedupeKey || calls[0].GetHarnessTargetModel() != "strong" || calls[0].GetCostUsd() != .25 || !strings.Contains(calls[0].Body, "12.5 turns") {
 		t.Fatalf("advice = %+v", calls)
 	}
 	if len(routes(h)) != 0 {
