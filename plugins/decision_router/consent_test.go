@@ -132,3 +132,48 @@ func TestAdviceRefreshExtendsExpiryWithoutReopeningAcceptance(t *testing.T) {
 		t.Fatal("refresh reopened accepted advice")
 	}
 }
+
+func TestHostFeedbackCanRecoverOnlyLocalExpiry(t *testing.T) {
+	for _, reason := range []string{"local_expiry", ""} {
+		state := shadowState{UserTurns: 9, PendingSuggestion: &pendingAdvice{ID: "sg_1", Status: "expired", Reason: reason}}
+		req := &pbv1.ChatRequest{ToranaMetaJson: []byte(`{"_suggestions":[{"id":"sg_1","status":"accepted","via":"directive"}]}`)}
+		reconcileAdvice(req, shadowLadder{}, &state, "", false)
+		want := "expired"
+		if reason == "local_expiry" {
+			want = "accepted"
+		}
+		if state.PendingSuggestion.Status != want {
+			t.Fatalf("reason=%q status=%s", reason, state.PendingSuggestion.Status)
+		}
+	}
+}
+
+func TestAdviceRefreshRecoversOnlyLocalExpiry(t *testing.T) {
+	for _, status := range []string{"local_expiry", "expired", "dismissed", "superseded"} {
+		t.Run(status, func(t *testing.T) {
+			h := sdktest.New(t)
+			pending := &pendingAdvice{ID: "sg_1", Status: status, ExpiresUserTurn: 2}
+			if status == "local_expiry" {
+				pending.Status, pending.Reason = "expired", "local_expiry"
+			}
+			state := shadowState{PolicyHash: "policy", UserTurns: 5, LastSuggestion: "strong", PendingSuggestion: pending}
+			h.Run(func() {
+				if ok, err := saveShadowState("session", state, nil); !ok || err != nil {
+					t.Fatal(err)
+				}
+				rememberAdvice("session", "policy", &pendingAdvice{ID: "sg_1", To: "strong", IssuedTurn: 5, ExpiresUserTurn: 8, Status: "pending"})
+			})
+			raw, _ := h.State("session")
+			if err := json.Unmarshal([]byte(raw), &state); err != nil {
+				t.Fatal(err)
+			}
+			want := status
+			if status == "local_expiry" {
+				want = "pending"
+			}
+			if state.PendingSuggestion.Status != want {
+				t.Fatalf("status=%s want=%s", state.PendingSuggestion.Status, want)
+			}
+		})
+	}
+}

@@ -38,18 +38,19 @@ func reconcileAdvice(req *pbv1.ChatRequest, ladder shadowLadder, state *shadowSt
 			emit("suggestion_feedback_invalid", "")
 		} else {
 			for _, outcome := range outcomes {
-				if outcome.ID != p.ID || p.Status != "pending" {
+				if outcome.ID != p.ID || (p.Status != "pending" && !(p.Status == "expired" && p.Reason == "local_expiry")) {
 					continue
 				}
 				switch outcome.Status {
 				case "accepted", "dismissed", "expired", "superseded":
 					p.Status, p.Via = outcome.Status, outcome.Via
+					p.Reason = ""
 				}
 			}
 		}
 		// Host expiry is authoritative; this is a fallback for missing feedback.
 		if p.Status == "pending" && state.UserTurns > p.ExpiresUserTurn {
-			p.Status = "expired"
+			p.Status, p.Reason = "expired", "local_expiry"
 		}
 	}
 	if !switched {
@@ -91,11 +92,14 @@ func rememberAdvice(key, policyHash string, pending *pendingAdvice) {
 			return
 		}
 		if state.PendingSuggestion != nil && state.PendingSuggestion.ID == pending.ID {
-			if state.PendingSuggestion.Status != "pending" || state.PendingSuggestion.ExpiresUserTurn >= pending.ExpiresUserTurn {
+			localExpiry := state.PendingSuggestion.Status == "expired" && state.PendingSuggestion.Reason == "local_expiry"
+			if (!localExpiry && state.PendingSuggestion.Status != "pending") || state.PendingSuggestion.ExpiresUserTurn >= pending.ExpiresUserTurn {
 				return
 			}
 			// The host refreshed the same live ID/code. Extend only pending
-			// expiry; never overwrite acceptance arriving concurrently.
+			// expiry, reopening only our local fallback expiry; never overwrite
+			// acceptance or an authoritative terminal host outcome.
+			state.PendingSuggestion.Status, state.PendingSuggestion.Reason = "pending", ""
 			state.PendingSuggestion.ExpiresUserTurn = pending.ExpiresUserTurn
 			state.PendingSuggestion.IssuedTurn = pending.IssuedTurn
 		} else {
