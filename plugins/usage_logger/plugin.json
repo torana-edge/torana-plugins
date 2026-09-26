@@ -2,16 +2,18 @@
   "schema_version": 1,
   "id": "torana/usage_logger",
   "name": "usage_logger",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "abi_version": "v1",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "pass",
   "repository": "https://github.com/torana-edge/torana-plugins",
   "description": "Write content-free request, latency, and token usage records to a rotating private JSONL file",
   "hooks": [
-    {"name": "run_after_response"}
+    {"name": "run_after_response"},
+    {"name": "run_on_http_request"}
   ],
   "permissions": [
+    {"name": "env.serve_http", "description": "Expose log identity without reading request records or local file paths"},
     {"name": "env.file_append", "description": "Append usage records to the declared private log"}
   ],
   "files": [

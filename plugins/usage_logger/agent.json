@@ -1,0 +1,15 @@
+{
+  "schema_version": 2,
+  "description": "Identify the usage log without exposing its contents or host paths.",
+  "namespace": {"title": "Usage logger", "summary": "Find the plugin-relative usage log and its content-free logging policy.", "categories": ["observability"]},
+  "operations": [{
+    "id": "status", "method": "GET", "path": "/status",
+    "description": "Read log identity and logging policy; does not read usage records.",
+    "risk": "read", "idempotent": true, "model_access": "read", "conversation_binding": "none",
+    "output_schema": {
+      "type": "object", "required": ["plugin", "log", "content_logged"],
+      "properties": {"plugin": {"const": "usage_logger"}, "log": {"const": "usage.jsonl"}, "content_logged": {"const": false}},
+      "additionalProperties": false
+    }
+  }]
+}
