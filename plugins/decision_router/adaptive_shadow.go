@@ -81,30 +81,32 @@ type shadowTriggers struct {
 }
 
 type shadowState struct {
-	PolicyHash         string  `json:"policy_hash"`
-	Provider           string  `json:"provider"`
-	Step               string  `json:"step"`
-	LastClientModel    string  `json:"last_client_model"`
-	OffLadder          bool    `json:"off_ladder"`
-	LastUserTurnKey    string  `json:"last_user_turn_key"`
-	UserTurns          int     `json:"user_turns"`
-	LastEvaluation     int     `json:"last_evaluation"`
-	RecentErrors       []bool  `json:"recent_errors"`
-	LastResultID       string  `json:"last_result_id"`
-	LastSuggestion     string  `json:"last_suggestion"`
-	SuggestedAtTurn    int     `json:"suggested_at_turn"`
-	ModelSwitches      int     `json:"model_switches"`
-	ContextTokens      int64   `json:"context_tokens"`
-	AvgOutputTokens    float64 `json:"avg_output_tokens"`
-	ResponseCount      int     `json:"response_count"`
-	MaxTokensFinishes  int     `json:"max_tokens_finishes"`
-	RequestsPerTurn    int     `json:"requests_per_turn"`
-	RetryStreak        int     `json:"retry_streak"`
-	LastTurnRequests   int     `json:"last_turn_requests"`
-	LastTurnRetries    int     `json:"last_turn_retries"`
-	LastTurnMaxTokens  int     `json:"last_turn_max_tokens"`
-	AvgRequestsPerTurn float64 `json:"avg_requests_per_turn"`
-	CompletedTurns     int     `json:"completed_turns"`
+	PolicyHash         string         `json:"policy_hash"`
+	Provider           string         `json:"provider"`
+	Step               string         `json:"step"`
+	LastClientModel    string         `json:"last_client_model"`
+	OffLadder          bool           `json:"off_ladder"`
+	LastUserTurnKey    string         `json:"last_user_turn_key"`
+	UserTurns          int            `json:"user_turns"`
+	LastEvaluation     int            `json:"last_evaluation"`
+	RecentErrors       []bool         `json:"recent_errors"`
+	LastResultID       string         `json:"last_result_id"`
+	LastSuggestion     string         `json:"last_suggestion"`
+	SuggestedAtTurn    int            `json:"suggested_at_turn"`
+	ModelSwitches      int            `json:"model_switches"`
+	ContextTokens      int64          `json:"context_tokens"`
+	AvgOutputTokens    float64        `json:"avg_output_tokens"`
+	ResponseCount      int            `json:"response_count"`
+	MaxTokensFinishes  int            `json:"max_tokens_finishes"`
+	RequestsPerTurn    int            `json:"requests_per_turn"`
+	RetryStreak        int            `json:"retry_streak"`
+	LastTurnRequests   int            `json:"last_turn_requests"`
+	LastTurnRetries    int            `json:"last_turn_retries"`
+	LastTurnMaxTokens  int            `json:"last_turn_max_tokens"`
+	AvgRequestsPerTurn float64        `json:"avg_requests_per_turn"`
+	CompletedTurns     int            `json:"completed_turns"`
+	PendingSuggestion  *pendingAdvice `json:"pending_suggestion,omitempty"`
+	History            []routeHistory `json:"history,omitempty"`
 }
 
 func loadShadowPolicy(raw string) (shadowPolicy, string, error) {
@@ -533,6 +535,7 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 			state.RecentErrors = state.RecentErrors[len(state.RecentErrors)-policy.Triggers.ToolErrorWindow:]
 		}
 		clientModelChanged := !fresh && state.LastClientModel != "" && state.LastClientModel != req.Model
+		previousStep := state.Step
 		state.LastClientModel = req.Model
 		if clientModelChanged {
 			if observed := shadowStepForModel(ladder, req.Model); observed != "" {
@@ -542,6 +545,7 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 				state.OffLadder = true
 			}
 		}
+		reconcileAdvice(req, ladder, &state, previousStep, clientModelChanged)
 		errorCount := 0
 		for _, failed := range state.RecentErrors {
 			if failed {
