@@ -465,6 +465,7 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 	var candidate string
 	var confidence float64
 	var classOK bool
+	var pricesResolved bool
 	for attempt := 0; attempt < 3; attempt++ {
 		stored, found, err := sdk.StateGetVersioned(key)
 		if err != nil {
@@ -571,7 +572,11 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 			if contextTokens == 0 {
 				contextTokens = int64(proto.Size(req) / 4)
 			}
-			decision = Evaluate(policy, resolveLadderPricing(provider, ladder), state, policySignals{
+			if !pricesResolved {
+				ladder = resolveLadderPricing(provider, ladder)
+				pricesResolved = true
+			}
+			decision = Evaluate(policy, ladder, state, policySignals{
 				RecentToolErrors: errorCount, RetryStreak: state.LastTurnRetries,
 				RequestsPerUserTurn: state.LastTurnRequests, AvgRequestsPerTurn: state.AvgRequestsPerTurn,
 				ContextTokens: contextTokens, AvgOutputTokens: state.AvgOutputTokens,

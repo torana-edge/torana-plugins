@@ -46,7 +46,8 @@ object in its settings:
 Torana's declared model capabilities are the preferred source of pricing:
 omit each step's `pricing` to use the rates configured for that provider/model.
 The example's explicit prices are illustrative USD per million tokens, **not
-live provider prices**. Explicit step prices override the declared rates and
+live provider prices**. Explicit step prices override individual declared rates;
+omitted fields use Torana's declared rates. Overrides
 emit a `deprecated_pricing_override` metric; migrate them into your Torana
 model configuration. Missing prices produce a `pricing_unavailable` shadow
 metric instead of pretending a switch is free. Change the provider and models
