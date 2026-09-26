@@ -1,5 +1,5 @@
-// decision_router measures adaptive ladder decisions in shadow mode. It never
-// changes the harness's route or effort until a later, consent-aware phase.
+// decision_router measures or advises on adaptive ladder decisions, and applies
+// guarded switches only in explicitly configured confirm/auto modes.
 package main
 
 import (
@@ -55,6 +55,10 @@ func emit(outcome, choice string) {
 		labels["choice"] = choice
 	}
 	sdk.EmitMetric(metricDecisionName, sdk.MetricCounter, 1, labels)
+}
+
+func emitReason(outcome, reason string) {
+	sdk.EmitMetric(metricDecisionName, sdk.MetricCounter, 1, map[string]string{"outcome": outcome, "reason": reason})
 }
 
 func fallback(reason string) sdk.RequestResult {

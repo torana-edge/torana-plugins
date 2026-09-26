@@ -16,6 +16,30 @@ and other failures. Repeated advice refreshes the same live suggestion rather
 than replacing its confirmation code. If a harness uses short model names,
 put its target name first in the step's `aliases`; otherwise Torana uses `model`.
 
+**Confirm mode** (`"mode":"confirm"`) offers the same suggestions with
+accept/dismiss actions. Accept through Torana to apply the switch on your next
+user turn. Your harness's model picker stays unchanged; you can always switch
+there instead to take control back.
+
+**Auto mode** (`"mode":"auto"`) is an explicit opt-in for unattended work:
+upward moves obey the switch cap, declared prices, and cache-rebuild cost guard.
+Downward moves still need acceptance. No mode moves to a different step during
+a tool continuation; an already applied route is kept until you change models
+in your harness. Approve `env.route_request` for these modes. Effort changes
+also require `manage_effort: true` and `env.route_request.effort`; otherwise
+Torana leaves the harness's effort alone.
+
+Edge requires approval of the manifest's complete permission set, including
+`env.route_request` and `env.route_request.effort`, even in shadow/advise mode.
+Those modes do not call routing capabilities: the selected mode, ladder, and
+`manage_effort` configuration control their use. Confirm/auto enable routing;
+effort changes additionally require `manage_effort: true`. Approving the grants
+alone does not turn routing on. An effort permission denial is a configuration
+mismatch (`effort_denied` metric), not a reason to bypass that denial.
+If effort is unsupported, a model switch falls back to model-only routing;
+effort-only changes are refused. Accepted switches that cannot pass current
+guards or be applied end in a terminal state rather than retrying indefinitely.
+
 It can use repeated tool failures as a local signal. Optionally, an
 operator-bound System One-compatible endpoint can classify the latest user turn
 against the ladder's step descriptions. Hosted

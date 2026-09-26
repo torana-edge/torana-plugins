@@ -31,6 +31,7 @@ func init() {
 				return sdk.ResponseResult{}, err
 			}
 			if response.Usage != nil {
+				// Usage updates do not imply that a requested route was applied.
 				// input_tokens is total input, including cache reads/writes where
 				// reported; adding those again would overestimate switch cost.
 				if response.Usage.InputTokens > 0 {
@@ -43,6 +44,7 @@ func init() {
 				state.MaxTokensFinishes++
 			}
 			version := stored.Version
+			reconcileAppliedRoute(response, &state)
 			applied, err := saveShadowState(key, state, &version)
 			if err != nil {
 				return sdk.ResponseResult{}, err

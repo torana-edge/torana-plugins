@@ -12,7 +12,7 @@ import (
 
 // Advice deliberately never routes. The user can switch in their harness;
 // subsequent requests reconcile that choice through the observed client model.
-func publishAdvice(key, policyHash string, ladder shadowLadder, state shadowState, decision policyDecision) {
+func publishAdvice(key, policyHash string, ladder shadowLadder, state shadowState, decision policyDecision, mode string) {
 	i := shadowStepIndex(ladder, decision.Target)
 	if i < 0 {
 		return
@@ -30,11 +30,16 @@ func publishAdvice(key, policyHash string, ladder shadowLadder, state shadowStat
 	if decision.Class == "effort_change" {
 		body += " This changes reasoning effort and may invalidate the prompt cache."
 	}
-	result, err := sdk.Suggest(&pbv1.SuggestArgs{
+	args := &pbv1.SuggestArgs{
 		Kind: decision.Class, DedupeKey: hex.EncodeToString(digest[:]),
 		Title: adviceText("Consider "+step.Model, 120), Body: adviceText(body, 600), CostUsd: &decision.RebuildUSD,
 		HarnessTargetModel: &harnessModel, ExpiresAfterUserTurns: 3,
-	})
+	}
+	if mode == "confirm" || mode == "auto" {
+		args.Body = adviceText(body+" Accept in Torana to apply on the next user turn; the harness model picker will not change.", 600)
+		args.Actions = []*pbv1.SuggestAction{{Id: "accept", Label: "Accept switch"}, {Id: "dismiss", Label: "Keep current model"}}
+	}
+	result, err := sdk.Suggest(args)
 	if err != nil {
 		emit("suggest_failed", pricingLookupReason(err))
 	} else {

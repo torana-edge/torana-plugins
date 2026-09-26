@@ -27,8 +27,8 @@ func TestAdviceIsCostedBoundedAndNeverRoutes(t *testing.T) {
 	ladder := shadowLadder{Steps: []shadowStep{{ID: "strong", Model: "strong-model", Aliases: []string{"strong"}, Description: strings.Repeat("long\n", 200)}}}
 	decision := policyDecision{Target: "strong", Class: "model_switch", RebuildUSD: .25, PerTurnDelta: -.02, PaybackTurns: 12.5}
 	h.Run(func() {
-		publishAdvice("session", "policy", ladder, shadowState{Step: "fast", UserTurns: 2}, decision)
-		publishAdvice("session", "policy", ladder, shadowState{Step: "fast", UserTurns: 5}, decision)
+		publishAdvice("session", "policy", ladder, shadowState{Step: "fast", UserTurns: 2}, decision, "advise")
+		publishAdvice("session", "policy", ladder, shadowState{Step: "fast", UserTurns: 5}, decision, "advise")
 	})
 	if len(calls) != 2 || calls[0].DedupeKey != calls[1].DedupeKey || calls[0].GetHarnessTargetModel() != "strong" || calls[0].GetCostUsd() != .25 || !strings.Contains(calls[0].Body, "12.5 turns") {
 		t.Fatalf("advice = %+v", calls)

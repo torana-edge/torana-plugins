@@ -14,6 +14,8 @@ type pendingAdvice struct {
 	ExpiresUserTurn int    `json:"expires_user_turn"`
 	Status          string `json:"status"`
 	Via             string `json:"via,omitempty"`
+	Reason          string `json:"reason,omitempty"`
+	AttemptedTurn   int    `json:"attempted_user_turn,omitempty"`
 }
 
 type routeHistory struct {
@@ -28,6 +30,9 @@ type routeHistory struct {
 func reconcileAdvice(req *pbv1.ChatRequest, ladder shadowLadder, state *shadowState, previousStep string, switched bool) {
 	p := state.PendingSuggestion
 	if p != nil {
+		if p.Status == "applying" && state.UserTurns > p.AttemptedTurn {
+			finishAcceptance(state, "refused", "unreconciled")
+		}
 		outcomes, err := sdk.Suggestions(req)
 		if err != nil {
 			emit("suggestion_feedback_invalid", "")
