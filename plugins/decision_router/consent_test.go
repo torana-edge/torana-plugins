@@ -19,7 +19,7 @@ func TestSuggestionFeedbackRequiresMatchingPersistedID(t *testing.T) {
 			if state.PendingSuggestion.Status != "pending" {
 				t.Fatal("unrelated outcome granted consent")
 			}
-			req.ToranaMetaJson = []byte(`{"_suggestions":[{"id":"sg_known","status":"` + status + `","via":"directive"}]}`)
+			req.ToranaMetaJson = []byte(`{"_suggestions":[{"id":"sg_known","status":"` + status + `","via":"agent_api"}]}`)
 			reconcileAdvice(req, ladder, &state, "fast", false)
 			if state.PendingSuggestion.Status != status || state.Step != "fast" {
 				t.Fatalf("state = %+v", state)
@@ -31,7 +31,7 @@ func TestSuggestionFeedbackRequiresMatchingPersistedID(t *testing.T) {
 func TestHarnessSwitchAndExpiry(t *testing.T) {
 	ladder := shadowLadder{Steps: []shadowStep{{ID: "fast", Model: "fast-model"}, {ID: "strong", Model: "strong-model"}}}
 	state := shadowState{Step: "strong", UserTurns: 3, PendingSuggestion: &pendingAdvice{ID: "sg_1", To: "strong", ExpiresUserTurn: 5, Status: "pending"}}
-	reconcileAdvice(&pbv1.ChatRequest{}, ladder, &state, "fast", true)
+	reconcileAdvice(&pbv1.ChatRequest{ToranaMetaJson: []byte(`{"_suggestions":[{"id":"sg_1","status":"accepted","via":"harness_switch"}]}`)}, ladder, &state, "fast", true)
 	if state.PendingSuggestion.Via != "harness_switch" || state.PendingSuggestion.Status != "accepted" || state.ModelSwitches != 1 || len(state.History) != 1 {
 		t.Fatalf("state = %+v", state)
 	}
@@ -43,6 +43,33 @@ func TestHarnessSwitchAndExpiry(t *testing.T) {
 	reconcileAdvice(&pbv1.ChatRequest{}, ladder, &state, "strong", false)
 	if state.PendingSuggestion.Status != "expired" {
 		t.Fatal("suggestion did not expire")
+	}
+}
+
+func TestMatchingModelWithoutHostAcceptanceStaysPending(t *testing.T) {
+	ladder := shadowLadder{Steps: []shadowStep{{ID: "fast", Model: "fast-model"}, {ID: "strong", Model: "strong-model"}}}
+	for _, meta := range []string{`{}`, `{"_suggestions":[{"id":"sg_1","status":"pending"}]}`} {
+		state := shadowState{Step: "strong", UserTurns: 2, PendingSuggestion: &pendingAdvice{ID: "sg_1", To: "strong", ExpiresUserTurn: 5, Status: "pending"}}
+		reconcileAdvice(&pbv1.ChatRequest{ToranaMetaJson: []byte(meta)}, ladder, &state, "fast", true)
+		if state.PendingSuggestion.Status != "pending" || state.PendingSuggestion.Via != "" || state.ModelSwitches != 0 || len(state.History) != 1 || state.History[0].Via != "harness_switch_unprompted" {
+			t.Fatalf("observed model forged acceptance: %+v", state)
+		}
+	}
+}
+
+func TestAcceptedAdapterSwitchPreservesHostProvenance(t *testing.T) {
+	ladder := shadowLadder{Steps: []shadowStep{{ID: "fast", Model: "fast-model"}, {ID: "strong", Model: "strong-model"}}}
+	for _, via := range []string{"adapter", "harness_switch", "agent_api", "mcp_elicitation"} {
+		state := shadowState{Step: "strong", UserTurns: 2, PendingSuggestion: &pendingAdvice{ID: "sg_1", To: "strong", ExpiresUserTurn: 5, Status: "pending"}}
+		req := &pbv1.ChatRequest{ToranaMetaJson: []byte(`{"_suggestions":[{"id":"sg_1","status":"accepted","via":"` + via + `"}]}`)}
+		reconcileAdvice(req, ladder, &state, "fast", true)
+		if state.PendingSuggestion.Status != "accepted" || state.PendingSuggestion.Via != via || state.ModelSwitches != 1 || state.History[0].Via != via {
+			t.Fatalf("host acceptance provenance lost: %+v", state)
+		}
+		reconcileAdvice(req, ladder, &state, "strong", false)
+		if state.ModelSwitches != 1 || len(state.History) != 1 {
+			t.Fatal("request replay counted another accepted switch")
+		}
 	}
 }
 

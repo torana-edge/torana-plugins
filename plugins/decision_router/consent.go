@@ -57,14 +57,18 @@ func reconcileAdvice(req *pbv1.ChatRequest, ladder shadowLadder, state *shadowSt
 		return
 	}
 	via := "harness_switch_unprompted"
-	if p != nil && (p.Status == "pending" || p.Status == "accepted") && state.Step == p.To {
-		p.Status, p.Via = "accepted", "harness_switch"
-		via = "harness_switch"
+	if p != nil && p.Status == "accepted" && state.Step == p.To {
+		// Only the host can accept advice. A matching request model can also
+		// be an automatic fallback or resume, so pending advice stays pending.
+		via = p.Via
+		if via == "" {
+			via = "harness_switch"
+		}
 	}
 	if state.Step == previousStep || state.OffLadder {
 		return
 	}
-	if via == "harness_switch" && shadowStepIndex(ladder, state.Step) > shadowStepIndex(ladder, previousStep) {
+	if via != "harness_switch_unprompted" && shadowStepIndex(ladder, state.Step) > shadowStepIndex(ladder, previousStep) {
 		state.ModelSwitches++
 	}
 	state.History = append(state.History, routeHistory{AtUserTurn: state.UserTurns, From: previousStep, To: state.Step, Via: via})
