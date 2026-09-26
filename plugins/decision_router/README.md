@@ -5,6 +5,12 @@
 models, changing effort, or modifying a request. It is a way to learn from real
 workflows before enabling routing decisions.
 
+Use **advise mode** (`"mode":"advise"`) with the same ladder to receive
+optional suggestions, including estimated cache-rebuild cost and payback for
+cheaper models. Switch models in your harness if you want to follow the advice.
+Torana does not change your route or effort in this mode. Approve the
+`env.suggest` permission when upgrading the plugin to enable these notices.
+
 It can use repeated tool failures as a local signal. Optionally, an
 operator-bound System One-compatible endpoint can classify the latest user turn
 against the ladder's step descriptions. Hosted

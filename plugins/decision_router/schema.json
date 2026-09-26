@@ -3,11 +3,11 @@
   "type": "object",
   "additionalProperties": false,
   "oneOf": [
-    {"required": ["mode", "ladders"], "properties": {"mode": {"const": "shadow"}}},
+    {"required": ["mode", "ladders"], "properties": {"mode": {"enum": ["shadow", "advise"]}}},
     {"required": ["mode"], "properties": {"mode": {"const": "off"}}, "maxProperties": 1}
   ],
   "properties": {
-    "mode": {"type": "string", "enum": ["shadow", "off"], "title": "Mode", "description": "Measure possible route suggestions without changing requests, or turn the plugin off."},
+    "mode": {"type": "string", "enum": ["shadow", "advise", "off"], "title": "Mode", "description": "Measure decisions in shadow, publish optional advice, or turn off. Neither active mode changes requests."},
     "ladders": {
       "type": "object", "minProperties": 1, "maxProperties": 32,
       "title": "Provider ladders", "description": "Ordered model steps for each Torana provider.",

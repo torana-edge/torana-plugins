@@ -120,8 +120,8 @@ func loadShadowPolicy(raw string) (shadowPolicy, string, error) {
 	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		return policy, "", errors.New("shadow policy: trailing JSON")
 	}
-	if policy.Mode != "shadow" || len(policy.Ladders) == 0 || len(policy.Ladders) > maximumRoutes {
-		return policy, "", errors.New("shadow policy needs mode=shadow and 1-32 provider ladders")
+	if (policy.Mode != "shadow" && policy.Mode != "advise") || len(policy.Ladders) == 0 || len(policy.Ladders) > maximumRoutes {
+		return policy, "", errors.New("router policy needs mode=shadow or advise and 1-32 provider ladders")
 	}
 	for provider, ladder := range policy.Ladders {
 		if !choiceIDPattern.MatchString(provider) || len(ladder.Steps) < 2 || len(ladder.Steps) > maximumRoutes {
@@ -610,6 +610,9 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 			})
 		}
 		if decision.Target != "" && decision.BlockedBy == "" {
+			if policy.Mode == "advise" {
+				publishAdvice(key, policyHash, ladder, state, decision)
+			}
 			sdk.EmitMetric(metricDecisionName, sdk.MetricCounter, 1, map[string]string{
 				"outcome": "would_suggest", "provider": provider, "from": state.Step, "to": decision.Target,
 				"repeat": fmt.Sprintf("%t", repeatSuggestion),
