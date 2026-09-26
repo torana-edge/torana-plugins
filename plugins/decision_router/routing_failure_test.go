@@ -53,6 +53,36 @@ func TestFailoverKeepsRouteWithoutAdvancingLadder(t *testing.T) {
 	if state.Step != "fast" || state.ActiveRoute != "strong" || state.ModelSwitches != 0 || state.PendingSuggestion.Status != "refused" {
 		t.Fatalf("failover state = %+v", state)
 	}
+	h.Run(func() {
+		requestRoute("original", ladder, state, state.ActiveRoute, "continue", false)
+		reconcileAppliedRoute(&pbv1.ChatResponse{ToranaMetaJson: []byte(`{"_route_applied":{"provider":"original","model":"strong-model","verdict_plugin":"decision_router","served_by":"original","served_model":"strong-model"}}`)}, &state)
+	})
+	if len(state.History) != 1 || state.History[0].Via != "directive" || state.PendingSuggestion.Status != "applied" {
+		t.Fatalf("recovered state = %+v", state)
+	}
+}
+
+func TestEffortPermissionDenialIsExplicitAndNeverBypassed(t *testing.T) {
+	h := sdktest.New(t)
+	attempts := 0
+	h.StubHostCall("env.route_request", func(string) (string, error) {
+		attempts++
+		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "denied"), nil
+	})
+	ladder := shadowLadder{Steps: []shadowStep{{ID: "fast", Model: "fast-model"}, {ID: "strong", Model: "strong-model", Effort: "high"}}}
+	h.Run(func() { requestRoute("original", ladder, shadowState{Step: "fast"}, "strong", "directive", true) })
+	if attempts != 1 {
+		t.Fatal("permission denial was bypassed with a fallback")
+	}
+	denied := 0
+	for _, metric := range h.Metrics() {
+		if metric.Labels["reason"] == "effort_denied" {
+			denied++
+		}
+	}
+	if denied != 1 {
+		t.Fatalf("effort_denied metrics = %d", denied)
+	}
 }
 
 func TestUnreconciledAcceptanceTerminatesOnNextUserTurn(t *testing.T) {

@@ -108,6 +108,7 @@ type shadowState struct {
 	PendingSuggestion  *pendingAdvice `json:"pending_suggestion,omitempty"`
 	History            []routeHistory `json:"history,omitempty"`
 	ActiveRoute        string         `json:"active_route,omitempty"`
+	ActiveRouteVia     string         `json:"active_route_via,omitempty"`
 }
 
 func loadShadowPolicy(raw string) (shadowPolicy, string, error) {
@@ -540,6 +541,7 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 		state.LastClientModel = req.Model
 		if clientModelChanged {
 			state.ActiveRoute = ""
+			state.ActiveRouteVia = ""
 			if observed := shadowStepForModel(ladder, req.Model); observed != "" {
 				state.Step = observed
 				state.OffLadder = false

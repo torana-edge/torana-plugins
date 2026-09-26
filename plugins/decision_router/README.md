@@ -29,11 +29,13 @@ in your harness. Approve `env.route_request` for these modes. Effort changes
 also require `manage_effort: true` and `env.route_request.effort`; otherwise
 Torana leaves the harness's effort alone.
 
-The manifest lists all capabilities, but you can approve only what you use:
-shadow needs observation/state grants, advise adds `env.suggest`, and
-confirm/auto add `env.route_request`. Approve `env.route_request.effort` only
-if you enable `manage_effort`. Routing requires both the matching grant and
-confirm/auto mode; approving a grant alone does not turn routing on.
+Edge requires approval of the manifest's complete permission set, including
+`env.route_request` and `env.route_request.effort`, even in shadow/advise mode.
+Those modes do not call routing capabilities: the selected mode, ladder, and
+`manage_effort` configuration control their use. Confirm/auto enable routing;
+effort changes additionally require `manage_effort: true`. Approving the grants
+alone does not turn routing on. An effort permission denial is a configuration
+mismatch (`effort_denied` metric), not a reason to bypass that denial.
 If effort is unsupported, a model switch falls back to model-only routing;
 effort-only changes are refused. Accepted switches that cannot pass current
 guards or be applied end in a terminal state rather than retrying indefinitely.

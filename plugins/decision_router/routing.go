@@ -35,6 +35,9 @@ func acceptedDecision(policy shadowPolicy, ladder shadowLadder, state shadowStat
 }
 
 func requestRoute(provider string, ladder shadowLadder, state shadowState, target, via string, manageEffort bool) {
+	if via == "continue" && state.ActiveRouteVia != "" {
+		via = state.ActiveRouteVia
+	}
 	i := shadowStepIndex(ladder, target)
 	if i < 0 {
 		emit("route_unknown_step", "")
@@ -65,6 +68,9 @@ func requestRoute(provider string, ladder shadowLadder, state shadowState, targe
 		effort := pbv1.Effort(pbv1.Effort_value["EFFORT_"+strings.ToUpper(step.Effort)])
 		err = sdk.RouteRequestWithEffort(provider, step.Model, effort)
 		var refusal *sdk.HostCallRefusalError
+		if errors.As(err, &refusal) && refusal.Code == pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED {
+			emitReason("route_refused", "effort_denied")
+		}
 		current := shadowStepIndex(ladder, state.Step)
 		if errors.As(err, &refusal) && refusal.Code == pbv1.ErrorCode_ERROR_CODE_UNSUPPORTED && current >= 0 && ladder.Steps[current].Model != step.Model {
 			emit("effort_model_only_fallback", "")
@@ -98,6 +104,7 @@ func reconcileAppliedRoute(response *pbv1.ChatResponse, state *shadowState) {
 		// Missing/foreign outcomes do not revoke an already established route.
 		if present && actual.VerdictPlugin == "decision_router" && actual.Refused != nil {
 			state.ActiveRoute = ""
+			state.ActiveRouteVia = ""
 		}
 		finishAcceptance(state, "refused", "not_applied")
 		emit("route_not_applied", "")
@@ -107,6 +114,7 @@ func reconcileAppliedRoute(response *pbv1.ChatResponse, state *shadowState) {
 		// Keep routing to the selected target across the turn. Failover is an
 		// upstream transport outcome, not permission to downgrade the ladder.
 		state.ActiveRoute = target
+		state.ActiveRouteVia = via
 		finishAcceptance(state, "refused", "failover")
 		emit("route_failover", "")
 		return
@@ -121,6 +129,7 @@ func reconcileAppliedRoute(response *pbv1.ChatResponse, state *shadowState) {
 		}
 	}
 	state.Step, state.ActiveRoute, state.OffLadder = target, target, false
+	state.ActiveRouteVia = via
 	if state.PendingSuggestion != nil && state.PendingSuggestion.To == target {
 		state.PendingSuggestion.Status = "applied"
 	}
