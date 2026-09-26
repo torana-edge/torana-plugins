@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "torana/usage_logger",
   "name": "usage_logger",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "abi_version": "v1",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "pass",
