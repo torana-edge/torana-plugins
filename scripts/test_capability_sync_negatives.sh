@@ -39,6 +39,10 @@ one_token() { # file pattern replacement
 
 expect pass "unmodified pin" "$validator" "$root/plugins"
 
+cp "$validator" "$tmp/v-effort.go"
+one_token "$tmp/v-effort.go" '"env.route_request.effort": true' '"env.forged_effort": true'
+expect fail "an extra permission token swapped" "$tmp/v-effort.go" "$root/plugins"
+
 cp "$validator" "$tmp/v-env.go"
 one_token "$tmp/v-env.go" '"env.now": true' '"env.forged_drift": true'
 expect fail "an env permission token swapped" "$tmp/v-env.go" "$root/plugins"
