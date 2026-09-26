@@ -10,6 +10,7 @@
   "description": "Measures adaptive model-ladder suggestions without changing any request or route.",
   "hooks": [{"name": "run_before_request"}, {"name": "run_after_response"}],
   "permissions": [
+    {"name": "env.suggest", "description": "Publish optional costed suggestions in advise mode without changing routes"},
     {"name": "env.model_capabilities", "description": "Read pricing declared for this provider's ladder models"},
     {"name": "env.plugin_config", "description": "Read the operator's shadow-mode model ladder and signal thresholds"},
     {"name": "env.http_request", "description": "Ask the approved System One endpoint for an optional closed-set shadow classification"},
