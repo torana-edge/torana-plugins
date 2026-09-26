@@ -63,6 +63,7 @@ else
 fi
 
 go run "$root/scripts/validate_manifests.go" "$root/plugins"
+go test "$root/scripts/validate_manifests.go" "$root/scripts/validate_manifests_test.go"
 "$root/scripts/check-workflow-shell-inputs.sh"
 "$root/scripts/check-setup-go-cache-paths.sh"
 "$root/scripts/test-workflow-shell-inputs.sh"
