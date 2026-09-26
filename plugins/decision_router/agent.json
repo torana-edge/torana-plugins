@@ -8,7 +8,7 @@
     "risk": "read", "idempotent": true, "model_access": "read", "conversation_binding": "none",
     "output_schema": {
       "type": "object", "required": ["plugin", "mode", "configured_ladders"],
-      "properties": {"plugin": {"const": "decision_router"}, "mode": {"enum": ["off", "shadow", "advise", "confirm", "auto"]}, "configured_ladders": {"type": "integer", "minimum": 0, "maximum": 32}},
+      "properties": {"plugin": {"const": "decision_router"}, "mode": {"enum": ["off", "shadow", "advise", "confirm", "auto"]}, "configured_ladders": {"type": "integer"}},
       "additionalProperties": false
     }
   }]

@@ -8,7 +8,7 @@
     "risk": "read", "idempotent": true, "model_access": "read", "conversation_binding": "none",
     "output_schema": {
       "type": "object", "required": ["plugin", "allow_restricted", "allowed_count", "denied_count", "replaced_count"],
-      "properties": {"plugin": {"const": "tool_governor"}, "allow_restricted": {"type": "boolean"}, "allowed_count": {"type": "integer", "minimum": 0}, "denied_count": {"type": "integer", "minimum": 0}, "replaced_count": {"type": "integer", "minimum": 0}},
+      "properties": {"plugin": {"const": "tool_governor"}, "allow_restricted": {"type": "boolean"}, "allowed_count": {"type": "integer"}, "denied_count": {"type": "integer"}, "replaced_count": {"type": "integer"}},
       "additionalProperties": false
     }
   }]
