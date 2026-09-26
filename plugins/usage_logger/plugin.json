@@ -9,9 +9,11 @@
   "repository": "https://github.com/torana-edge/torana-plugins",
   "description": "Write content-free request, latency, and token usage records to a rotating private JSONL file",
   "hooks": [
-    {"name": "run_after_response"}
+    {"name": "run_after_response"},
+    {"name": "run_on_http_request"}
   ],
   "permissions": [
+    {"name": "env.serve_http", "description": "Expose log identity without reading request records or local file paths"},
     {"name": "env.file_append", "description": "Append usage records to the declared private log"}
   ],
   "files": [

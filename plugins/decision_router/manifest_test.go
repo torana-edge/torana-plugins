@@ -37,7 +37,7 @@ func TestManifestContract(t *testing.T) {
 	if manifest.ABI != "v1" || manifest.FailureMode != "pass" {
 		t.Fatalf("abi/failure = %s/%s", manifest.ABI, manifest.FailureMode)
 	}
-	if len(manifest.Hooks) != 2 || manifest.Hooks[0].Name != "run_before_request" || manifest.Hooks[1].Name != "run_after_response" {
+	if len(manifest.Hooks) != 3 || manifest.Hooks[0].Name != "run_before_request" || manifest.Hooks[1].Name != "run_after_response" || manifest.Hooks[2].Name != "run_on_http_request" {
 		t.Fatalf("hooks = %+v", manifest.Hooks)
 	}
 	var got []string
@@ -50,7 +50,7 @@ func TestManifestContract(t *testing.T) {
 		got = append(got, permission.Name)
 	}
 	sort.Strings(got)
-	want := []string{"env.credential_get", "env.emit_metric", "env.http_request", "env.log", "env.meta_get", "env.meta_set", "env.model_capabilities", "env.plugin_config", "env.route_request", "env.route_request.effort", "env.state_get", "env.state_set", "env.suggest"}
+	want := []string{"env.credential_get", "env.emit_metric", "env.http_request", "env.log", "env.meta_get", "env.meta_set", "env.model_capabilities", "env.plugin_config", "env.route_request", "env.route_request.effort", "env.serve_http", "env.state_get", "env.state_set", "env.suggest"}
 	if len(got) != len(want) {
 		t.Fatalf("permissions = %v, want %v", got, want)
 	}
