@@ -16,6 +16,19 @@ and other failures. Repeated advice refreshes the same live suggestion rather
 than replacing its confirmation code. If a harness uses short model names,
 put its target name first in the step's `aliases`; otherwise Torana uses `model`.
 
+**Confirm mode** (`"mode":"confirm"`) offers the same suggestions with
+accept/dismiss actions. Accept through Torana to apply the switch on your next
+user turn. Your harness's model picker stays unchanged; you can always switch
+there instead to take control back.
+
+**Auto mode** (`"mode":"auto"`) is an explicit opt-in for unattended work:
+upward moves obey the switch cap, declared prices, and cache-rebuild cost guard.
+Downward moves still need acceptance. No mode moves to a different step during
+a tool continuation; an already applied route is kept until you change models
+in your harness. Approve `env.route_request` for these modes. Effort changes
+also require `manage_effort: true` and `env.route_request.effort`; otherwise
+Torana leaves the harness's effort alone.
+
 It can use repeated tool failures as a local signal. Optionally, an
 operator-bound System One-compatible endpoint can classify the latest user turn
 against the ladder's step descriptions. Hosted

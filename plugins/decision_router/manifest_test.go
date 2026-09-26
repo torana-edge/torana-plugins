@@ -50,7 +50,7 @@ func TestManifestContract(t *testing.T) {
 		got = append(got, permission.Name)
 	}
 	sort.Strings(got)
-	want := []string{"env.credential_get", "env.emit_metric", "env.http_request", "env.log", "env.meta_get", "env.meta_set", "env.model_capabilities", "env.plugin_config", "env.state_get", "env.state_set", "env.suggest"}
+	want := []string{"env.credential_get", "env.emit_metric", "env.http_request", "env.log", "env.meta_get", "env.meta_set", "env.model_capabilities", "env.plugin_config", "env.route_request", "env.route_request.effort", "env.state_get", "env.state_set", "env.suggest"}
 	if len(got) != len(want) {
 		t.Fatalf("permissions = %v, want %v", got, want)
 	}

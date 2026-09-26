@@ -107,6 +107,7 @@ type shadowState struct {
 	CompletedTurns     int            `json:"completed_turns"`
 	PendingSuggestion  *pendingAdvice `json:"pending_suggestion,omitempty"`
 	History            []routeHistory `json:"history,omitempty"`
+	ActiveRoute        string         `json:"active_route,omitempty"`
 }
 
 func loadShadowPolicy(raw string) (shadowPolicy, string, error) {
@@ -122,8 +123,8 @@ func loadShadowPolicy(raw string) (shadowPolicy, string, error) {
 	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		return policy, "", errors.New("shadow policy: trailing JSON")
 	}
-	if (policy.Mode != "shadow" && policy.Mode != "advise") || len(policy.Ladders) == 0 || len(policy.Ladders) > maximumRoutes {
-		return policy, "", errors.New("router policy needs mode=shadow or advise and 1-32 provider ladders")
+	if (policy.Mode != "shadow" && policy.Mode != "advise" && policy.Mode != "confirm" && policy.Mode != "auto") || len(policy.Ladders) == 0 || len(policy.Ladders) > maximumRoutes {
+		return policy, "", errors.New("router policy needs shadow, advise, confirm or auto mode and 1-32 provider ladders")
 	}
 	for provider, ladder := range policy.Ladders {
 		if !choiceIDPattern.MatchString(provider) || len(ladder.Steps) < 2 || len(ladder.Steps) > maximumRoutes {
@@ -538,6 +539,7 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 		previousStep := state.Step
 		state.LastClientModel = req.Model
 		if clientModelChanged {
+			state.ActiveRoute = ""
 			if observed := shadowStepForModel(ladder, req.Model); observed != "" {
 				state.Step = observed
 				state.OffLadder = false
@@ -558,6 +560,8 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 		shouldEvaluate := newTurn && !state.OffLadder && (fresh || state.UserTurns-state.LastEvaluation >= policy.Triggers.ReevaluateUserTurns ||
 			errorCount >= policy.Triggers.ToolErrorThreshold || previousTurnSignal)
 		var decision policyDecision
+		accepted := newTurn && !state.OffLadder && state.PendingSuggestion != nil && state.PendingSuggestion.Status == "accepted" && state.PendingSuggestion.Via != "harness_switch" && (policy.Mode == "confirm" || policy.Mode == "auto")
+		shouldEvaluate = shouldEvaluate || accepted
 		if shouldEvaluate {
 			state.LastEvaluation = state.UserTurns
 			if policy.Classifier.Enabled {
@@ -586,6 +590,9 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 				ContextTokens: contextTokens, AvgOutputTokens: state.AvgOutputTokens,
 				MaxTokensFinishes: state.LastTurnMaxTokens,
 			}, candidate)
+			if accepted {
+				decision = acceptedDecision(policy, ladder, state, contextTokens)
+			}
 		}
 		repeatSuggestion := decision.Target != "" && decision.Target == state.LastSuggestion
 		if decision.Target != "" && decision.BlockedBy == "" {
@@ -614,8 +621,17 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 			})
 		}
 		if decision.Target != "" && decision.BlockedBy == "" {
-			if policy.Mode == "advise" {
-				publishAdvice(key, policyHash, ladder, state, decision)
+			applyNow := accepted || (policy.Mode == "auto" && shadowStepIndex(ladder, decision.Target) > shadowStepIndex(ladder, state.Step))
+			if policy.Mode != "shadow" && !applyNow {
+				publishAdvice(key, policyHash, ladder, state, decision, policy.Mode)
+			}
+			if applyNow {
+				via := "auto"
+				if accepted {
+					via = state.PendingSuggestion.Via
+				}
+				requestRoute(provider, ladder, state, decision.Target, via, policy.ManageEffort)
+				return sdk.PassRequest(), nil
 			}
 			sdk.EmitMetric(metricDecisionName, sdk.MetricCounter, 1, map[string]string{
 				"outcome": "would_suggest", "provider": provider, "from": state.Step, "to": decision.Target,
@@ -633,6 +649,9 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 			})
 		} else if shouldEvaluate {
 			emit("shadow_hold", state.Step)
+		}
+		if state.ActiveRoute != "" && (policy.Mode == "confirm" || policy.Mode == "auto") {
+			requestRoute(provider, ladder, state, state.ActiveRoute, "continue", policy.ManageEffort)
 		}
 		return sdk.PassRequest(), nil
 	}
