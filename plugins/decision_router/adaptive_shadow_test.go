@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
@@ -20,6 +21,29 @@ const shadowConfigJSON = `{
   ]}},
   "triggers":{"tool_error_window":3,"tool_error_threshold":1,"reevaluate_every_user_turns":3}
 }`
+
+func TestShadowKeysAreSessionScopedWithoutMergingThreads(t *testing.T) {
+	main := request("private-session", "Main task")
+	side := request("private-session", "Side task")
+	prefix := shadowSessionPrefix("private-session")
+	first, second := shadowStateKey("private-session", main), shadowStateKey("private-session", side)
+	if first == second || !strings.HasPrefix(first, prefix) || !strings.HasPrefix(second, prefix) {
+		t.Fatal("lost session scope or thread isolation")
+	}
+	if strings.Contains(first, "private-session") || strings.Contains(first, "Main task") {
+		t.Fatal("state key disclosed identity or root text")
+	}
+	if strings.HasPrefix(shadowStateKey("other-session", main), prefix) {
+		t.Fatal("another session shares the state prefix")
+	}
+	if shadowStateKey("", main) != "" || shadowSessionPrefix("") != "" {
+		t.Fatal("unbound state must not have a usable prefix")
+	}
+	main.Messages = append(main.Messages, &pbv1.Message{Role: "user", Blocks: []*pbv1.RequestBlock{textBlock("Next turn")}})
+	if shadowStateKey("private-session", main) != first {
+		t.Fatal("appending a turn changed the thread key")
+	}
+}
 
 func TestShadowObservesNewFailuresWithoutRouting(t *testing.T) {
 	h := sdktest.New(t).SetConfig(shadowConfigJSON)
