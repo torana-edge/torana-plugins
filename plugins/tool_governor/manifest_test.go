@@ -41,7 +41,7 @@ func TestManifestPermissionSetExact(t *testing.T) {
 		got = append(got, permission.Name)
 	}
 	sort.Strings(got)
-	want := []string{"env.plugin_config", "env.serve_http", "ir.cache_control.write", "ir.tools.write"}
+	want := []string{"env.plugin_config", "env.serve_http", "env.state_get", "env.state_set", "ir.cache_control.write", "ir.tools.write"}
 	if len(got) != len(want) {
 		t.Fatalf("permissions = %v, want %v", got, want)
 	}

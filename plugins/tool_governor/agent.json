@@ -2,14 +2,43 @@
   "schema_version": 2,
   "description": "Inspect aggregate tool policy without exposing hidden tool names or definitions.",
   "namespace": {"title": "Tool governor", "summary": "Inspect whether an allowlist is active and count configured tool restrictions.", "categories": ["policy"]},
-  "operations": [{
-    "id": "status", "method": "GET", "path": "/status",
-    "description": "Read aggregate policy counts; does not disclose tool names, descriptions or schemas.",
-    "risk": "read", "idempotent": true, "model_access": "read", "conversation_binding": "none",
-    "output_schema": {
-      "type": "object", "required": ["plugin", "allow_restricted", "allowed_count", "denied_count", "replaced_count"],
-      "properties": {"plugin": {"const": "tool_governor"}, "allow_restricted": {"type": "boolean"}, "allowed_count": {"type": "integer"}, "denied_count": {"type": "integer"}, "replaced_count": {"type": "integer"}},
-      "additionalProperties": false
+  "operations": [
+    {
+      "id": "status", "method": "GET", "path": "/status",
+      "description": "Read aggregate policy counts; does not disclose tool names, descriptions or schemas.",
+      "risk": "read", "idempotent": true, "model_access": "read", "conversation_binding": "none",
+      "output_schema": {
+        "type": "object", "required": ["plugin", "allow_restricted", "allowed_count", "denied_count", "replaced_count"],
+        "properties": {"plugin": {"const": "tool_governor"}, "allow_restricted": {"type": "boolean"}, "allowed_count": {"type": "integer"}, "denied_count": {"type": "integer"}, "replaced_count": {"type": "integer"}},
+        "additionalProperties": false
+      }
+    },
+    {
+      "id": "session.allow_tool", "method": "POST", "path": "/session/allow-tool",
+      "description": "Allow one named tool in this verified session until the change is undone or plugin state is cleared. This changes the model-visible tool list and may rebuild its prompt cache.",
+      "risk": "write", "idempotent": true, "model_access": "confirm", "conversation_binding": "required",
+      "undo_operation": "session.allow_tool.undo",
+      "input_schema": {
+        "type": "object", "required": ["tool"], "additionalProperties": false,
+        "properties": {"tool": {"type": "string"}}
+      },
+      "output_schema": {
+        "type": "object", "required": ["status", "tool"], "additionalProperties": false,
+        "properties": {"status": {"const": "allowed"}, "tool": {"type": "string"}}
+      }
+    },
+    {
+      "id": "session.allow_tool.undo", "method": "POST", "path": "/session/allow-tool/undo",
+      "description": "Undo the matching session tool allowance when no later allowance has replaced it. This changes the model-visible tool list again and may rebuild its prompt cache.",
+      "risk": "write", "idempotent": true, "model_access": "never", "conversation_binding": "required",
+      "input_schema": {
+        "type": "object", "required": ["tool"], "additionalProperties": false,
+        "properties": {"tool": {"type": "string"}}
+      },
+      "output_schema": {
+        "type": "object", "required": ["status", "tool"], "additionalProperties": false,
+        "properties": {"status": {"const": "undone"}, "tool": {"type": "string"}}
+      }
     }
-  }]
+  ]
 }
