@@ -28,7 +28,7 @@ Installation builds the source locally and never approves or enables it.
 Open Torana's local control plane, select **pii_guard**, review the inspected
 digest and permissions, then choose **Approve and enable**. It requests
 only the permissions needed to read its allowlist, replace affected tool
-results, and remember those replacements across restarts.
+results, remember those replacements across restarts, and serve safe explanations.
 
 ## Try it safely
 
@@ -49,6 +49,23 @@ matched value. Torana persists the safe replacement—not the original
 content—so later turns, resumed conversations, and restarts remain protected.
 Only the newest tool-result batch is scanned; historical output is changed
 only when replaying a decision the plugin already made.
+
+## Ask why a result was protected
+
+With Torana's MCP connection configured, your harness can discover and call
+`pii_guard.redaction.explain_last`. It returns the categories and line numbers
+from the last newly protected tool result in its bound session, with at most
+20 findings and a `truncated` flag. Line numbers are relative to the tool-result
+text, not necessarily a file's original line numbers.
+
+The explanation contains no matched values, filenames, tool names, or original
+output. `found: false` means no explanation has been recorded for that session;
+it does not mean the conversation is free of sensitive data. Historical replay
+does not overwrite the latest explanation. Side threads sharing a session share
+this last-result summary; it is not a guessed current-thread result.
+
+Reinstalling this version creates a new bundle digest. Review and approve it
+again to enable the new HTTP capability and operation descriptor.
 
 ## Coverage and boundary
 
