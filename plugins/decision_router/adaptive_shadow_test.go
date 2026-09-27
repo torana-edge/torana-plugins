@@ -25,6 +25,7 @@ const shadowConfigJSON = `{
 func TestShadowKeysAreSessionScopedWithoutMergingThreads(t *testing.T) {
 	main := request("private-session", "Main task")
 	side := request("private-session", "Side task")
+	side.Messages[1].Blocks = []*pbv1.RequestBlock{textBlock("Side task")}
 	prefix := shadowSessionPrefix("private-session")
 	first, second := shadowStateKey("private-session", main), shadowStateKey("private-session", side)
 	if first == second || !strings.HasPrefix(first, prefix) || !strings.HasPrefix(second, prefix) {
