@@ -12,6 +12,9 @@ import (
 
 func init() {
 	sdk.OnHTTPRequest(func(_ context.Context, req *pb.HttpRequest) (sdk.HTTPResult, error) {
+		if req != nil && req.Method == "GET" && req.Path == "/agent/conversation" {
+			return conversationRead(req)
+		}
 		if req == nil || req.Method != "GET" || req.Path != "/agent/status" {
 			return sdk.PassHTTP(), nil
 		}

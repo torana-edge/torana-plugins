@@ -11,5 +11,20 @@
       "properties": {"plugin": {"const": "decision_router"}, "mode": {"enum": ["off", "shadow", "advise", "confirm", "auto"]}, "configured_ladders": {"type": "integer"}},
       "additionalProperties": false
     }
+  }, {
+    "id": "conversation.get", "method": "GET", "path": "/conversation",
+    "description": "Read up to 32 routing thread summaries for the verified session. No current thread is inferred. has_more indicates omitted threads; no prompts, model names or configuration are returned.",
+    "risk": "read", "idempotent": true, "model_access": "read", "conversation_binding": "required",
+    "output_schema": {
+      "type": "object", "required": ["scope", "threads", "has_more"], "additionalProperties": false,
+      "properties": {
+        "scope": {"const": "session"}, "has_more": {"type": "boolean"},
+        "threads": {"type": "array", "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["thread_id", "user_turns", "context_tokens", "model_switches", "off_ladder", "active_route"],
+          "properties": {"thread_id": {"type": "string"}, "user_turns": {"type": "integer"}, "context_tokens": {"type": "integer"}, "model_switches": {"type": "integer"}, "off_ladder": {"type": "boolean"}, "active_route": {"type": "boolean"}}
+        }}
+      }
+    }
   }]
 }

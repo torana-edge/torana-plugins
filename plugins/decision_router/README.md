@@ -1,5 +1,17 @@
 # See when a model switch might help
 
+## Inspect routing from your harness
+
+With your harness connected to Torana's MCP server, ask it to inspect
+`decision_router.status` or `decision_router.conversation.get`. The latter
+reports routing counters for up to 32 threads in the verified session, including
+side threads and subagents. It never guesses which thread is current and does
+not return prompts, credentials, provider configuration or model names.
+`has_more` tells you when the session has additional threads beyond this view.
+Approve the new bundle digest, including `env.state_keys`, when upgrading.
+
+## Choose a routing mode
+
 `decision_router` watches an ordered model ladder for each Torana provider. In
 **shadow mode** it records when a stronger model might help, without switching
 models, changing effort, or modifying a request. It is a way to learn from real
