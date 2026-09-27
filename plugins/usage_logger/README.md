@@ -113,7 +113,9 @@ are exposed. Side threads sharing a session contribute to the same totals.
 object; present zero counts are different from missing usage. These are local,
 best-effort totals, not a billing ledger: they start when this version is enabled,
 do not import earlier logs, and omit updates that fail. Durable state keeps
-recorded totals across Torana restarts. Approve the new bundle digest and state
+recorded totals across Torana restarts. For Torana's host-level view, use the
+core `torana.session.usage` read; it has a different source and can legitimately
+differ from this plugin's totals. Approve the new bundle digest and state
 permissions when upgrading.
 
 ## Data and failure behavior
