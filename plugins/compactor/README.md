@@ -74,6 +74,7 @@ Permissions must equal the manifest's requested set; budgets can be lower.
     "env.model_pricing",
     "env.host_call.torana_record_savings",
     "env.plugin_config",
+    "env.serve_http",
     "ir.tool_results.write"
   ],
   "failure_mode": "pass",
@@ -129,6 +130,12 @@ show the intended bundle loaded, not merely installed. The local UI offers the
 same inspect/configure/approve/enable flow. Rebuilds need a new digest approval.
 
 ## Try it and check the result
+
+With Torana's MCP connection configured, your harness can discover and call
+`compactor.status.get` to inspect the configured source-byte limit, expected
+applications and policy count. This read does not run compaction, call the model,
+check its availability, or expose tool-policy names or provider credentials.
+Approve the new bundle digest and HTTP permission when upgrading.
 
 Use a long successful historical search result that has already appeared unchanged to the model, and a realistic positive `expected_applications`. Observe model calls as `plugin-egress` in `torana feed`. The gate may correctly decline before or after a call; missing price/usage is not treated as free. Check stats and compare task outcomes, not just bytes removed.
 

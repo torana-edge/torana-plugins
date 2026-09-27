@@ -60,6 +60,9 @@ func init() {
 		if err := sdk.AppendFile(usagePath, line); err != nil {
 			return sdk.PassResponse(), err
 		}
+		if err := accumulateSession(ctx, response); err != nil {
+			return sdk.PassResponse(), err
+		}
 		return sdk.PassResponse(), nil
 	})
 }

@@ -23,6 +23,7 @@ func TestRecordContainsOnlyOperationalFacts(t *testing.T) {
 
 func TestAfterResponseAppendsOneContentFreeRecord(t *testing.T) {
 	h := sdktest.New(t)
+	h.SetConversationID("") // Unbound responses still produce the ordinary log.
 	result := h.AfterResponse(&pbv1.ChatResponse{
 		Provider:               "openai",
 		Model:                  "gpt-test",
