@@ -10,7 +10,16 @@ import (
 
 func init() {
 	sdk.OnHTTPRequest(func(_ context.Context, req *pb.HttpRequest) (sdk.HTTPResult, error) {
-		if req == nil || req.Method != "GET" || req.Path != "/agent/status" {
+		if req == nil {
+			return sdk.PassHTTP(), nil
+		}
+		if req.Method == "POST" && req.Path == "/agent/session/allow-tool" {
+			return changeSessionTool(req, false)
+		}
+		if req.Method == "POST" && req.Path == "/agent/session/allow-tool/undo" {
+			return changeSessionTool(req, true)
+		}
+		if req.Method != "GET" || req.Path != "/agent/status" {
 			return sdk.PassHTTP(), nil
 		}
 		raw, err := sdk.PluginConfig()

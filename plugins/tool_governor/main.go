@@ -57,7 +57,7 @@ type policy struct {
 }
 
 func init() {
-	sdk.OnBeforeRequest(func(_ context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pbv1.ChatRequest) (sdk.RequestResult, error) {
 		raw, err := sdk.PluginConfig()
 		if err != nil {
 			return sdk.RequestResult{}, fmt.Errorf("tool_governor: configuration fetch failed: %w", err)
@@ -69,7 +69,11 @@ func init() {
 		if err != nil {
 			return sdk.RequestResult{}, fmt.Errorf("tool_governor: invalid configuration: %w", err)
 		}
-		out, changed, err := applyPolicy(req, p)
+		sessionAllowed, err := allowedForExecution(ctx, p, raw)
+		if err != nil {
+			return sdk.RequestResult{}, err
+		}
+		out, changed, err := applyPolicy(req, p, sessionAllowed)
 		if err != nil {
 			return sdk.RequestResult{}, err
 		}
@@ -245,7 +249,7 @@ func expectEOF(dec *json.Decoder) error {
 	return nil
 }
 
-func applyPolicy(req *pbv1.ChatRequest, p policy) (*pbv1.ChatRequest, bool, error) {
+func applyPolicy(req *pbv1.ChatRequest, p policy, sessionAllowed map[string]struct{}) (*pbv1.ChatRequest, bool, error) {
 	if req == nil {
 		return nil, false, fmt.Errorf("tool_governor: nil request")
 	}
@@ -268,7 +272,8 @@ func applyPolicy(req *pbv1.ChatRequest, p policy) (*pbv1.ChatRequest, bool, erro
 	for i, tool := range req.Tools {
 		_, allowed := p.allow[tool.Name]
 		_, denied := p.deny[tool.Name]
-		if (p.allowPresent && !allowed) || denied {
+		_, allowedForSession := sessionAllowed[tool.Name]
+		if denied || (!allowedForSession && p.allowPresent && !allowed) {
 			changed = true
 			continue
 		}

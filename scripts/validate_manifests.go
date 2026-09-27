@@ -193,7 +193,7 @@ var pluginContracts = map[string]pluginContract{
 	"schema_translator": {hooks: []string{"run_before_request", "run_after_response", "run_on_stream_chunk"},
 		permissions: []string{"env.meta_get", "env.meta_set", "ir.messages.write.assistant", "ir.stream.write", "ir.tools.write"}},
 	"tool_governor": {hooks: []string{"run_before_request", "run_on_http_request"},
-		permissions: []string{"env.plugin_config", "env.serve_http", "ir.cache_control.write", "ir.tools.write"}},
+		permissions: []string{"env.plugin_config", "env.serve_http", "env.state_get", "env.state_set", "ir.cache_control.write", "ir.tools.write"}},
 	"usage_logger": {hooks: []string{"run_after_response", "run_on_http_request"}, permissions: []string{"env.file_append", "env.serve_http", "env.state_get", "env.state_set"}},
 }
 

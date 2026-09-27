@@ -105,7 +105,7 @@ func TestApplyPolicyFiltersAndReplacesStructurally(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, changed, err := applyPolicy(input, p)
+	got, changed, err := applyPolicy(input, p, nil)
 	if err != nil || !changed {
 		t.Fatalf("changed=%v err=%v", changed, err)
 	}
@@ -134,7 +134,7 @@ func TestApplyPolicyNoopAndRemoveAll(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, changed, err := applyPolicy(input, noop)
+	got, changed, err := applyPolicy(input, noop, nil)
 	if err != nil || changed || got != input || !proto.Equal(input, before) {
 		t.Fatalf("no-op changed=%v err=%v equal=%v same-pointer=%v", changed, err, proto.Equal(input, before), got == input)
 	}
@@ -143,7 +143,7 @@ func TestApplyPolicyNoopAndRemoveAll(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, changed, err = applyPolicy(input, empty)
+	got, changed, err = applyPolicy(input, empty, nil)
 	if err != nil || !changed || len(got.Tools) != 0 {
 		t.Fatalf("remove-all changed=%v err=%v tools=%v", changed, err, got.Tools)
 	}
@@ -159,7 +159,7 @@ func TestApplyPolicyDuplicateInputIsAtomic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, changed, err := applyPolicy(input, p)
+	got, changed, err := applyPolicy(input, p, nil)
 	if err == nil || changed || got != nil || !strings.Contains(err.Error(), "duplicate tool definition") {
 		t.Fatalf("got=%v changed=%v err=%v", got, changed, err)
 	}
@@ -190,8 +190,8 @@ func TestHookUsesOnlyConfigAndReturnsExactReplacement(t *testing.T) {
 		t.Fatal("hook mutated input")
 	}
 	calls := h.Calls()
-	if len(calls) != 1 || calls[0].Command != "env.plugin_config" {
-		t.Fatalf("host calls = %+v, want exactly env.plugin_config", calls)
+	if len(calls) != 2 || calls[0].Command != "env.plugin_config" || calls[1].Command != "env.state_get" {
+		t.Fatalf("host calls = %+v, want config then session allowance lookup", calls)
 	}
 }
 

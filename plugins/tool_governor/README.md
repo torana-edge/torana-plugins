@@ -42,7 +42,8 @@ Set the snapshot's `config` object to the following, preserving its `revision`:
 torana plugin config apply tool_governor --file plugin-settings.json --yes
 ```
 
-No resource bindings are required. Review the configuration-read and tool/cache-marker write permissions.
+No resource bindings are required. Review the configuration, session-state,
+agent-operation, and tool/cache-marker permissions.
 
 ## Approve and enable
 
@@ -56,6 +57,9 @@ Permissions must equal the manifest's requested set; budgets can be lower.
   "digest": "sha256:REPLACE_WITH_YOUR_INSPECTED_DIGEST",
   "permissions": [
     "env.plugin_config",
+    "env.serve_http",
+    "env.state_get",
+    "env.state_set",
     "ir.cache_control.write",
     "ir.tools.write"
   ],
@@ -77,9 +81,25 @@ same inspect/configure/approve/enable flow. Rebuilds need a new digest approval.
 
 Send a request containing `read_file`, `web_search` and `deploy` tool definitions to a test backend. Only the first two should reach it. `allow: []` removes all definitions; omitting `allow` leaves them eligible. `deny` must not overlap `allow`. `replace` changes a retained tool's description, parameters or strict flag; it does not add a missing tool.
 
+With Torana's MCP connected, the model can ask to allow one tool omitted by the
+operator's allowlist for the verified session. An explicit entry in `deny`
+cannot be overridden. Torana shows the host-generated change for your confirmation;
+the plugin cannot apply it from an unbound call. The allowance is local to that
+session and durable across restarts. Undo it from Torana's change history. If a
+later allowance has replaced the change, undo refuses instead of overwriting
+the newer state. Allowing or undoing a tool changes the model-visible tool list,
+so the next request can rebuild that conversation's prompt cache. This changes
+only what the model sees; your harness still owns tool execution and its own
+approval prompts. Disabling the plugin suspends the policy but keeps its local
+state, including session allowances.
+
+An operator configuration change invalidates existing session allowances. This
+keeps a newly reviewed global policy authoritative instead of silently carrying
+older exceptions into it.
+
 ## Data and failure behavior
 
-This controls advertised definitions, not execution. Your harness still executes tools and owns its approvals; a model can propose a call it was not shown. Config is read on every request. A valid unset/empty value or `{}` leaves tools unchanged; malformed/whitespace policy and host-call failures error rather than reuse an old policy. Default failure mode is block.
+This controls advertised definitions, not execution. Your harness still executes tools and owns its approvals; a model can propose a call it was not shown. Config is read on every request. Session allowances are read only when the base policy restricts a tool. A valid unset/empty value or `{}` leaves tools unchanged; malformed/whitespace policy, corrupt session state and host-call failures error rather than reuse an old policy. Default failure mode is block.
 
 ## Combine or disable
 

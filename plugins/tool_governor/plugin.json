@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "torana/tool_governor",
   "name": "tool_governor",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "abi_version": "v1",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "block",
@@ -16,6 +16,8 @@
   ],
   "permissions": [
     {"name": "env.serve_http", "description": "Expose aggregate policy counts without tool names or definitions"},
+    {"name": "env.state_get", "description": "Read verified-session tool allowances and their reversible change state"},
+    {"name": "env.state_set", "description": "Apply or undo a verified-session tool allowance atomically with compare-and-set"},
     {
       "name": "env.plugin_config",
       "description": "Read the tool allowlist, denylist, and approved definition replacements"
