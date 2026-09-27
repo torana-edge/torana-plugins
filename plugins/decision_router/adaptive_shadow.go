@@ -396,7 +396,7 @@ func shadowStateKey(conversationID string, req *pbv1.ChatRequest) string {
 	// A harness session can contain title generation, side requests and
 	// subagents. Use only stable text in their leading system messages and
 	// first user message. Cache markers and signatures move between turns.
-	if req == nil {
+	if req == nil || conversationID == "" {
 		return ""
 	}
 	type rootMessage struct {
@@ -428,8 +428,21 @@ func shadowStateKey(conversationID string, req *pbv1.ChatRequest) string {
 		return ""
 	}
 	encoded, _ := json.Marshal(root)
-	sum := sha256.Sum256(append(append([]byte(conversationID), 0), encoded...))
-	return "decision/v2/shadow/" + hex.EncodeToString(sum[:])
+	sum := sha256.Sum256(encoded)
+	return shadowSessionPrefix(conversationID) + hex.EncodeToString(sum[:])
+}
+
+// A verified MCP session can enumerate its own threads without knowing their
+// roots. Do not collapse the leaf to the session ID: title generation and
+// subagents can share a harness session while needing separate routing state.
+// Hash the session rather than embedding caller/harness identifiers in keys.
+// Pre-release change: old v2 keys are deliberately not read or migrated.
+func shadowSessionPrefix(conversationID string) string {
+	if conversationID == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte("torana/decision-router/session/v1\x00" + conversationID))
+	return "decision/v3/shadow/" + hex.EncodeToString(sum[:]) + "/"
 }
 
 func saveShadowState(key string, state shadowState, version *string) (bool, error) {
