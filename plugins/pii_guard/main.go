@@ -137,6 +137,9 @@ func init() {
 				if err := replaceAndRemember(ctx, message, result, blockMessage(toolName, findings)); err != nil {
 					return sdk.RequestResult{}, fmt.Errorf("pii_guard: replace detected content: %w", err)
 				}
+				if err := rememberExplanation(ctx, findings); err != nil {
+					return sdk.RequestResult{}, fmt.Errorf("pii_guard: remember explanation: %w", err)
+				}
 				mutated = true
 			}
 		}

@@ -1,0 +1,20 @@
+{
+  "schema_version": 2,
+  "description": "Explain a protected tool result without exposing sensitive values.",
+  "namespace": {"title": "PII guard", "summary": "See why the last tool result was replaced in the bound session.", "categories": ["privacy"]},
+  "operations": [{
+    "id": "redaction.explain_last", "method": "GET", "path": "/redaction/explain-last",
+    "description": "Read categories and line numbers from the last fresh replacement in this session; historical replay does not update it.",
+    "risk": "read", "idempotent": true, "model_access": "read", "conversation_binding": "required",
+    "output_schema": {
+      "type": "object", "required": ["found", "findings", "truncated"], "additionalProperties": false,
+      "properties": {
+        "found": {"type": "boolean"}, "truncated": {"type": "boolean"},
+        "findings": {"type": "array", "items": {
+          "type": "object", "required": ["category", "line"], "additionalProperties": false,
+          "properties": {"category": {"enum": ["us_ssn", "aws_access_key", "private_key", "api_key", "access_token"]}, "line": {"type": "integer"}}
+        }}
+      }
+    }
+  }]
+}

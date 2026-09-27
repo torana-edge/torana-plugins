@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "torana/pii_guard",
   "name": "pii_guard",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "abi_version": "v1",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "block",
@@ -14,9 +14,16 @@
   "hooks": [
     {
       "name": "run_before_request"
+    },
+    {
+      "name": "run_on_http_request"
     }
   ],
   "permissions": [
+    {
+      "name": "env.serve_http",
+      "description": "Return value-free explanations for the host-bound session"
+    },
     {
       "name": "ir.tool_results.write",
       "description": "Replace a sensitive tool result with a value-free diagnostic"
