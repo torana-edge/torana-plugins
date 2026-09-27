@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Print only skips that are not deliberate opt-in Edge profiling surfaces.
+# Print only skips that are not deliberate opt-in Edge profiling/live surfaces.
 #
 # The official-plugin behavior gate runs broad Edge packages because behavior
 # rows share helpers with host conformance tests. Edge's retained WASM memory
@@ -20,7 +20,8 @@ while IFS= read -r name; do
       TestGuestLinearMemoryProfile/go | \
       TestGuestLinearMemoryProfile/rust | \
       TestGuestLinearMemoryRepeatedProfile/go | \
-      TestGuestLinearMemoryRepeatedProfile/rust) ;;
+      TestGuestLinearMemoryRepeatedProfile/rust | \
+      TestLiveClaudeHookStopAndResume) ;;
     *)
       printf '%s\n' "$name"
       status=1

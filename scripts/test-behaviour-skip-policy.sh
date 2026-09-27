@@ -11,7 +11,8 @@ allowed=$(printf '%s\n' \
   TestGuestLinearMemoryProfile/go \
   TestGuestLinearMemoryProfile/rust \
   TestGuestLinearMemoryRepeatedProfile/go \
-  TestGuestLinearMemoryRepeatedProfile/rust)
+  TestGuestLinearMemoryRepeatedProfile/rust \
+  TestLiveClaudeHookStopAndResume)
 
 if unexpected=$(printf '%s\n' "$allowed" | "$filter"); then
   if [[ -n "$unexpected" ]]; then
