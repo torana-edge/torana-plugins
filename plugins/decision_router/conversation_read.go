@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -12,6 +13,11 @@ import (
 )
 
 const conversationReadLimit = 32
+
+func publicThreadID(prefix, leaf string) string {
+	sum := sha256.Sum256([]byte("torana/decision-router/thread-id/v1\x00" + prefix + leaf))
+	return hex.EncodeToString(sum[:16])
+}
 
 type threadSummary struct {
 	ID            string `json:"thread_id"`
@@ -53,7 +59,7 @@ func conversationRead(req *pb.HttpRequest) (sdk.HTTPResult, error) {
 		if decodeErr != nil || object == nil || json.Unmarshal([]byte(entry.Value.Value), &state) != nil || state.PolicyHash == "" || state.UserTurns < 0 || state.ContextTokens < 0 || state.ModelSwitches < 0 {
 			return sdk.PassHTTP(), fmt.Errorf("router: invalid thread state")
 		}
-		threads = append(threads, threadSummary{ID: leaf, UserTurns: state.UserTurns, ContextTokens: state.ContextTokens, ModelSwitches: state.ModelSwitches, OffLadder: state.OffLadder, ActiveRoute: state.ActiveRoute != ""})
+		threads = append(threads, threadSummary{ID: publicThreadID(prefix, leaf), UserTurns: state.UserTurns, ContextTokens: state.ContextTokens, ModelSwitches: state.ModelSwitches, OffLadder: state.OffLadder, ActiveRoute: state.ActiveRoute != ""})
 	}
 	body, err := json.Marshal(struct {
 		Scope   string          `json:"scope"`

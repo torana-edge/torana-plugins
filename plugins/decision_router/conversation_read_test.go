@@ -25,6 +25,17 @@ func conversationHTTPRequest(session string) *pb.HttpRequest {
 	return &pb.HttpRequest{Method: "GET", Path: "/agent/conversation", HeadersJson: headers}
 }
 
+func TestPublicThreadIDIsSessionScopedAndStable(t *testing.T) {
+	leaf := strings.Repeat("a", 64)
+	id := publicThreadID(shadowSessionPrefix("one"), leaf)
+	if len(id) != 32 || id == leaf || id != publicThreadID(shadowSessionPrefix("one"), leaf) {
+		t.Fatal("invalid or unstable public thread ID")
+	}
+	if id == publicThreadID(shadowSessionPrefix("two"), leaf) {
+		t.Fatal("thread ID links separate sessions")
+	}
+}
+
 func TestConversationReadIsSessionScopedAndContentFree(t *testing.T) {
 	h := sdktest.New(t)
 	state := shadowState{PolicyHash: "policy", UserTurns: 3, ContextTokens: 42, ModelSwitches: 1, Provider: "private-provider", Step: "private-step", LastClientModel: "private-model", ActiveRoute: "private-route"}
