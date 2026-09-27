@@ -1,0 +1,15 @@
+{
+  "schema_version": 2,
+  "description": "Inspect aggregate tool policy without exposing hidden tool names or definitions.",
+  "namespace": {"title": "Tool governor", "summary": "Inspect whether an allowlist is active and count configured tool restrictions.", "categories": ["policy"]},
+  "operations": [{
+    "id": "status", "method": "GET", "path": "/status",
+    "description": "Read aggregate policy counts; does not disclose tool names, descriptions or schemas.",
+    "risk": "read", "idempotent": true, "model_access": "read", "conversation_binding": "none",
+    "output_schema": {
+      "type": "object", "required": ["plugin", "allow_restricted", "allowed_count", "denied_count", "replaced_count"],
+      "properties": {"plugin": {"const": "tool_governor"}, "allow_restricted": {"type": "boolean"}, "allowed_count": {"type": "integer"}, "denied_count": {"type": "integer"}, "replaced_count": {"type": "integer"}},
+      "additionalProperties": false
+    }
+  }]
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": 2,
+  "description": "Inspect routing readiness without exposing model ladders, endpoints or credentials.",
+  "namespace": {"title": "Decision router", "summary": "Inspect the active routing mode and configured ladder count.", "categories": ["routing"]},
+  "operations": [{
+    "id": "status", "method": "GET", "path": "/status",
+    "description": "Read routing mode and configuration readiness; no model or conversation contents.",
+    "risk": "read", "idempotent": true, "model_access": "read", "conversation_binding": "none",
+    "output_schema": {
+      "type": "object", "required": ["plugin", "mode", "configured_ladders"],
+      "properties": {"plugin": {"const": "decision_router"}, "mode": {"enum": ["off", "shadow", "advise", "confirm", "auto"]}, "configured_ladders": {"type": "integer"}},
+      "additionalProperties": false
+    }
+  }]
+}

@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 type manifest struct {
@@ -91,16 +93,23 @@ var agentSchemaKeywords = map[string]bool{
 type agentDescriptor struct {
 	SchemaVersion int              `json:"schema_version"`
 	Operations    []agentOperation `json:"operations"`
+	Namespace     *struct {
+		Title      string   `json:"title"`
+		Summary    string   `json:"summary"`
+		Categories []string `json:"categories"`
+	} `json:"namespace"`
 }
 
 type agentOperation struct {
-	ID           string          `json:"id"`
-	Method       string          `json:"method"`
-	Path         string          `json:"path"`
-	Description  string          `json:"description"`
-	Risk         string          `json:"risk"`
-	InputSchema  json.RawMessage `json:"input_schema"`
-	OutputSchema json.RawMessage `json:"output_schema"`
+	ID                  string          `json:"id"`
+	Method              string          `json:"method"`
+	Path                string          `json:"path"`
+	Description         string          `json:"description"`
+	Risk                string          `json:"risk"`
+	InputSchema         json.RawMessage `json:"input_schema"`
+	OutputSchema        json.RawMessage `json:"output_schema"`
+	ModelAccess         string          `json:"model_access"`
+	ConversationBinding string          `json:"conversation_binding"`
 }
 
 // knownHooks and knownPermissions mirror supportedHooks and supportedPermissions
@@ -166,8 +175,8 @@ var pluginContracts = map[string]pluginContract{
 	"compactor": {hooks: []string{"run_before_request"},
 		permissions:   []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.host_call.torana_evaluate_compaction", "env.host_call.torana_record_savings", "env.model_complete", "env.model_pricing", "env.plugin_config", "env.shared_cache_get", "ir.tool_results.write"},
 		conflictsWith: []string{"torana/keyword_compactor"}},
-	"decision_router": {hooks: []string{"run_before_request", "run_after_response"},
-		permissions: []string{"env.credential_get", "env.emit_metric", "env.http_request", "env.log", "env.meta_get", "env.meta_set", "env.model_capabilities", "env.plugin_config", "env.route_request", "env.route_request.effort", "env.state_get", "env.state_set", "env.suggest"}},
+	"decision_router": {hooks: []string{"run_before_request", "run_after_response", "run_on_http_request"},
+		permissions: []string{"env.credential_get", "env.emit_metric", "env.http_request", "env.log", "env.meta_get", "env.meta_set", "env.model_capabilities", "env.plugin_config", "env.route_request", "env.route_request.effort", "env.serve_http", "env.state_get", "env.state_set", "env.suggest"}},
 	"intent": {hooks: []string{"run_before_request", "run_after_response", "run_on_stream_chunk"},
 		permissions: []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.log", "env.meta_get", "env.meta_set", "env.plugin_config", "env.shared_cache_set", "ir.cache_control.write", "ir.messages.write.assistant", "ir.messages.write.developer", "ir.messages.write.other", "ir.messages.write.system", "ir.messages.write.tool", "ir.messages.write.user", "ir.stream.write", "ir.tool_results.write", "ir.tools.write"}},
 	"keyword_compactor": {hooks: []string{"run_before_request"},
@@ -183,9 +192,9 @@ var pluginContracts = map[string]pluginContract{
 		conflictsWith: []string{"torana/pii"}},
 	"schema_translator": {hooks: []string{"run_before_request", "run_after_response", "run_on_stream_chunk"},
 		permissions: []string{"env.meta_get", "env.meta_set", "ir.messages.write.assistant", "ir.stream.write", "ir.tools.write"}},
-	"tool_governor": {hooks: []string{"run_before_request"},
-		permissions: []string{"env.plugin_config", "ir.cache_control.write", "ir.tools.write"}},
-	"usage_logger": {hooks: []string{"run_after_response"}, permissions: []string{"env.file_append"}},
+	"tool_governor": {hooks: []string{"run_before_request", "run_on_http_request"},
+		permissions: []string{"env.plugin_config", "env.serve_http", "ir.cache_control.write", "ir.tools.write"}},
+	"usage_logger": {hooks: []string{"run_after_response", "run_on_http_request"}, permissions: []string{"env.file_append", "env.serve_http"}},
 }
 
 func hookNames(hooks []struct {
@@ -475,8 +484,43 @@ func validateModelResources(pluginName string, m manifest) {
 func validateAgentDescriptor(pluginName, path string, m manifest) {
 	var descriptor agentDescriptor
 	readJSON(path, &descriptor)
-	if descriptor.SchemaVersion != 1 || len(descriptor.Operations) == 0 || len(descriptor.Operations) > 64 {
+	if descriptor.SchemaVersion == 2 {
+		var raw struct {
+			Namespace  map[string]json.RawMessage   `json:"namespace"`
+			Operations []map[string]json.RawMessage `json:"operations"`
+		}
+		readJSON(path, &raw)
+		if _, exists := raw.Namespace["alias"]; exists {
+			panic(fmt.Sprintf("%s: namespace aliases were removed", pluginName))
+		}
+		for _, op := range raw.Operations {
+			for _, removed := range []string{"directive", "user_direct"} {
+				if _, exists := op[removed]; exists {
+					panic(fmt.Sprintf("%s: %s was removed", pluginName, removed))
+				}
+			}
+		}
+	}
+	if (descriptor.SchemaVersion != 1 && descriptor.SchemaVersion != 2) || len(descriptor.Operations) == 0 || len(descriptor.Operations) > 64 {
 		panic(fmt.Sprintf("%s: invalid agent descriptor header", pluginName))
+	}
+	if descriptor.SchemaVersion == 2 {
+		bounded := func(value string, limit int) bool {
+			return strings.TrimSpace(value) != "" && utf8.ValidString(value) && utf8.RuneCountInString(value) <= limit && strings.IndexFunc(value, unicode.IsControl) < 0
+		}
+		ns := descriptor.Namespace
+		if ns == nil || !bounded(ns.Title, 60) || !bounded(ns.Summary, 300) || len(ns.Categories) > 16 {
+			panic(fmt.Sprintf("%s: invalid v2 namespace metadata", pluginName))
+		}
+		seen := map[string]bool{}
+		for _, category := range ns.Categories {
+			if !agentOperationID.MatchString(category) || seen[category] {
+				panic(fmt.Sprintf("%s: invalid namespace category", pluginName))
+			}
+			seen[category] = true
+		}
+	} else if descriptor.Namespace != nil {
+		panic(fmt.Sprintf("%s: namespace requires agent descriptor v2", pluginName))
 	}
 	hasHook, hasPermission := false, false
 	for _, hook := range m.Hooks {
@@ -490,6 +534,18 @@ func validateAgentDescriptor(pluginName, path string, m manifest) {
 	}
 	seen := map[string]bool{}
 	for _, operation := range descriptor.Operations {
+		if descriptor.SchemaVersion == 1 && (operation.ModelAccess != "" || operation.ConversationBinding != "") {
+			panic(fmt.Sprintf("%s: model access and binding require v2", pluginName))
+		}
+		access := operation.ModelAccess
+		if access != "" && access != "read" && access != "confirm" && access != "never" || operation.Risk == "write" && access == "read" || operation.Risk == "destructive" && access != "" && access != "never" {
+			panic(fmt.Sprintf("%s: invalid model access", pluginName))
+		}
+		switch operation.ConversationBinding {
+		case "", "none", "preferred", "required":
+		default:
+			panic(fmt.Sprintf("%s: invalid conversation binding", pluginName))
+		}
 		operation.Method = strings.ToUpper(strings.TrimSpace(operation.Method))
 		if !agentOperationID.MatchString(operation.ID) || seen["id:"+operation.ID] {
 			panic(fmt.Sprintf("%s: invalid or duplicate agent operation id %q", pluginName, operation.ID))

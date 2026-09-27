@@ -28,7 +28,7 @@ func TestManifestPermissionSetExact(t *testing.T) {
 	if manifest.ABI != "v1" || manifest.FailureMode != "block" {
 		t.Fatalf("abi/failure_mode = %q/%q", manifest.ABI, manifest.FailureMode)
 	}
-	if len(manifest.Hooks) != 1 || manifest.Hooks[0].Name != "run_before_request" {
+	if len(manifest.Hooks) != 2 || manifest.Hooks[0].Name != "run_on_http_request" || manifest.Hooks[1].Name != "run_before_request" {
 		t.Fatalf("hooks = %+v", manifest.Hooks)
 	}
 	got := make([]string, 0, len(manifest.Permissions))
@@ -41,7 +41,7 @@ func TestManifestPermissionSetExact(t *testing.T) {
 		got = append(got, permission.Name)
 	}
 	sort.Strings(got)
-	want := []string{"env.plugin_config", "ir.cache_control.write", "ir.tools.write"}
+	want := []string{"env.plugin_config", "env.serve_http", "ir.cache_control.write", "ir.tools.write"}
 	if len(got) != len(want) {
 		t.Fatalf("permissions = %v, want %v", got, want)
 	}
