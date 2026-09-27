@@ -74,6 +74,7 @@ Permissions must equal the manifest's requested set; budgets can be lower.
     "env.cache_set",
     "env.model_complete",
     "env.plugin_config",
+    "env.serve_http",
     "env.state_get",
     "env.state_set",
     "ir.cache_control.write",
@@ -112,6 +113,16 @@ same inspect/configure/approve/enable flow. Rebuilds need a new digest approval.
 Use synthetic tool output such as `contact: someone@example.com` with a matching tool-call ID. Expect that result to become a value-free tool error before the primary provider receives it. The model can then skip the affected lines or request a narrower read. Also test a clean result and an unavailable scanner. Only complete clean scans are cached; unsupported content or truncation is governed by `on_error`, not cached as clean.
 
 ## Data and failure behavior
+
+With Torana's MCP connection configured, your harness can call
+`pii.redaction.explain_last`. It returns only normalized finding categories and
+relative line numbers for the last newly protected tool result in the bound
+session. A line of `0` means the contextual scanner identified a category but
+did not provide a plausible source line. It never returns matched values,
+filenames, tool names, scanner output, or original tool content. Historical
+replay and transient scanner failures do not replace the last explanation.
+`found: false` means no explanation was recorded; it is not a clean verdict.
+Approve the new digest and HTTP permission when upgrading.
 
 The scanner receives eligible tool-output text. If bound remotely, that text leaves your machine before the primary request is allowed. This is a tool-result guard, not a scanner for all user prompts, a comprehensive DLP system or a guarantee of detection. `on_error: allow` permits undecidable scans; the approval's failure mode separately controls hook failures. Defaults are block. Torana durably stores only hashes and safe replacement messages, never the original sensitive output, so the same decisions replay across later turns and restarts. Only the newest tool-result batch is scanned; historical output is changed only when replaying an earlier decision.
 

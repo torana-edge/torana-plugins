@@ -228,6 +228,9 @@ func init() {
 					if err := replaceAndRemember(ctx, msg, view, blockMessage(toolName, f), outcomeSensitive); err != nil {
 						return sdk.RequestResult{}, fmt.Errorf("pii: replace detected: %w", err)
 					}
+					if err := rememberExplanation(ctx, f); err != nil {
+						return sdk.RequestResult{}, fmt.Errorf("pii: remember explanation: %w", err)
+					}
 					mutated = true
 					continue
 				}
@@ -296,6 +299,9 @@ func init() {
 				if len(findings) > 0 {
 					if err := replaceAndRemember(ctx, msg, view, blockMessage(toolName, findings), outcomeSensitive); err != nil {
 						return sdk.RequestResult{}, fmt.Errorf("pii: replace detected: %w", err)
+					}
+					if err := rememberExplanation(ctx, findings); err != nil {
+						return sdk.RequestResult{}, fmt.Errorf("pii: remember explanation: %w", err)
 					}
 					mutated = true
 					continue

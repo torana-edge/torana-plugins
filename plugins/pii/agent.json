@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "description": "Explain a model-backed PII replacement without exposing tool output.",
+  "namespace": {"title": "PII scanner", "summary": "See why the last tool result was protected in the bound session.", "categories": ["privacy"]},
+  "operations": [{
+    "id": "redaction.explain_last", "method": "GET", "path": "/redaction/explain-last",
+    "description": "Read normalized categories and relative line numbers from the last fresh sensitive-result replacement in this session.",
+    "risk": "read", "idempotent": true, "model_access": "read", "conversation_binding": "required",
+    "output_schema": {
+      "type": "object", "required": ["found", "findings", "truncated"], "additionalProperties": false,
+      "properties": {
+        "found": {"type": "boolean"}, "truncated": {"type": "boolean"},
+        "findings": {"type": "array", "items": {
+          "type": "object", "required": ["category", "line"], "additionalProperties": false,
+          "properties": {
+            "category": {"enum": ["email", "phone", "address", "government_id", "ssn", "us_ssn", "credit_card", "bank_number", "api_key", "password", "private_key", "access_token", "aws_access_key", "unspecified"]},
+            "line": {"type": "integer"}
+          }
+        }}
+      }
+    }
+  }]
+}

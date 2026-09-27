@@ -47,6 +47,7 @@ func TestManifestPermissionSetExact(t *testing.T) {
 		"env.cache_set",
 		"env.model_complete",
 		"env.plugin_config",
+		"env.serve_http",
 		"env.state_get",
 		"env.state_set",
 		"ir.cache_control.write",
