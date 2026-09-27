@@ -15,7 +15,7 @@
     },
     {
       "id": "session.allow_tool", "method": "POST", "path": "/session/allow-tool",
-      "description": "Allow one named tool in this verified session until the change is undone or plugin state is cleared. This changes the model-visible tool list and may rebuild its prompt cache.",
+      "description": "Allow one tool omitted by the allowlist in this verified session until the change is undone or plugin state is cleared. An explicit operator deny remains authoritative. This changes the model-visible tool list and may rebuild its prompt cache.",
       "risk": "write", "idempotent": true, "model_access": "confirm", "conversation_binding": "required",
       "undo_operation": "session.allow_tool.undo",
       "input_schema": {

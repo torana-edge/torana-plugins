@@ -39,7 +39,7 @@ func filteredNames(t *testing.T, h *sdktest.Harness, req *pb.ChatRequest) []stri
 }
 
 func TestConfirmedSessionAllowanceAppliesOnlyToBoundSessionAndUndoes(t *testing.T) {
-	h := sdktest.New(t).SetConfig(`{"deny":["shell"]}`).SetConversationID("session-a")
+	h := sdktest.New(t).SetConfig(`{"allow":["read"]}`).SetConversationID("session-a")
 	input := requestWithTools(tool("read", "", `{}`, false, ``), tool("shell", "", `{}`, false, ``))
 	if got := filteredNames(t, h, input); len(got) != 1 || got[0] != "read" {
 		t.Fatalf("before allowance = %v", got)
@@ -70,10 +70,17 @@ func TestConfirmedSessionAllowanceAppliesOnlyToBoundSessionAndUndoes(t *testing.
 	if retry.Err != nil || retry.Response == nil || retry.Response.Status != 200 {
 		t.Fatalf("undo retry = %+v", retry)
 	}
+	forwardRetry := h.HTTPRequest(boundSessionRequest("/agent/session/allow-tool", "session-a", "call-1", "shell"))
+	if forwardRetry.Err != nil || forwardRetry.Response == nil || forwardRetry.Response.Status != 409 {
+		t.Fatalf("forward retry after undo = %+v", forwardRetry)
+	}
+	if got := filteredNames(t, h, input); len(got) != 1 || got[0] != "read" {
+		t.Fatalf("forward retry reapplied an undone change: %v", got)
+	}
 }
 
 func TestOlderAllowanceCannotUndoOverNewerState(t *testing.T) {
-	h := sdktest.New(t).SetConfig(`{"deny":["shell","deploy"]}`).SetConversationID("session-a")
+	h := sdktest.New(t).SetConfig(`{"allow":["read"]}`).SetConversationID("session-a")
 	for _, change := range []struct{ call, tool string }{{"call-1", "shell"}, {"call-2", "deploy"}} {
 		got := h.HTTPRequest(boundSessionRequest("/agent/session/allow-tool", "session-a", change.call, change.tool))
 		if got.Err != nil || got.Response == nil || got.Response.Status != 200 {
@@ -98,7 +105,7 @@ func TestOlderAllowanceCannotUndoOverNewerState(t *testing.T) {
 }
 
 func TestPolicyChangeInvalidatesOlderSessionAllowance(t *testing.T) {
-	h := sdktest.New(t).SetConfig(`{"deny":["shell"]}`).SetConversationID("session-a")
+	h := sdktest.New(t).SetConfig(`{"allow":["read"]}`).SetConversationID("session-a")
 	input := requestWithTools(tool("shell", "", `{}`, false, ``))
 	apply := h.HTTPRequest(boundSessionRequest("/agent/session/allow-tool", "session-a", "call-1", "shell"))
 	if apply.Err != nil || apply.Response == nil || apply.Response.Status != 200 {
@@ -113,6 +120,33 @@ func TestPolicyChangeInvalidatesOlderSessionAllowance(t *testing.T) {
 	h.SetConfig(`{"allow":[]}`)
 	if got := filteredNames(t, h, input); len(got) != 0 {
 		t.Fatalf("stale allowance survived policy change: %v", got)
+	}
+}
+
+func TestSessionAllowanceCannotOverrideOperatorDeny(t *testing.T) {
+	h := sdktest.New(t).SetConfig(`{"deny":["shell"]}`).SetConversationID("session-a")
+	apply := h.HTTPRequest(boundSessionRequest("/agent/session/allow-tool", "session-a", "call-1", "shell"))
+	if apply.Err != nil || apply.Response == nil || apply.Response.Status != 409 || string(apply.Response.Body) != `{"error":"denied_by_policy"}` {
+		t.Fatalf("deny override = %+v", apply)
+	}
+	input := requestWithTools(tool("shell", "", `{}`, false, ``))
+	if got := filteredNames(t, h, input); len(got) != 0 {
+		t.Fatalf("denied tool became visible: %v", got)
+	}
+}
+
+func TestSessionAllowanceOnlyAppliesToAllowlistOmissions(t *testing.T) {
+	for name, config := range map[string]string{
+		"no allowlist":    `{}`,
+		"already allowed": `{"allow":["shell"]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := sdktest.New(t).SetConfig(config).SetConversationID("session-a")
+			apply := h.HTTPRequest(boundSessionRequest("/agent/session/allow-tool", "session-a", "call-1", "shell"))
+			if apply.Err != nil || apply.Response == nil || apply.Response.Status != 409 || string(apply.Response.Body) != `{"error":"already_allowed_by_policy"}` {
+				t.Fatalf("unnecessary allowance = %+v", apply)
+			}
+		})
 	}
 }
 

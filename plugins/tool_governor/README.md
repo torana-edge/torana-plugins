@@ -81,8 +81,9 @@ same inspect/configure/approve/enable flow. Rebuilds need a new digest approval.
 
 Send a request containing `read_file`, `web_search` and `deploy` tool definitions to a test backend. Only the first two should reach it. `allow: []` removes all definitions; omitting `allow` leaves them eligible. `deny` must not overlap `allow`. `replace` changes a retained tool's description, parameters or strict flag; it does not add a missing tool.
 
-With Torana's MCP connected, the model can ask to allow one named tool for the
-verified session. Torana shows the host-generated change for your confirmation;
+With Torana's MCP connected, the model can ask to allow one tool omitted by the
+operator's allowlist for the verified session. An explicit entry in `deny`
+cannot be overridden. Torana shows the host-generated change for your confirmation;
 the plugin cannot apply it from an unbound call. The allowance is local to that
 session and durable across restarts. Undo it from Torana's change history. If a
 later allowance has replaced the change, undo refuses instead of overwriting

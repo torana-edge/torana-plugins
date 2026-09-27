@@ -273,7 +273,7 @@ func applyPolicy(req *pbv1.ChatRequest, p policy, sessionAllowed map[string]stru
 		_, allowed := p.allow[tool.Name]
 		_, denied := p.deny[tool.Name]
 		_, allowedForSession := sessionAllowed[tool.Name]
-		if !allowedForSession && ((p.allowPresent && !allowed) || denied) {
+		if denied || (!allowedForSession && p.allowPresent && !allowed) {
 			changed = true
 			continue
 		}

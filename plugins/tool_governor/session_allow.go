@@ -154,8 +154,16 @@ func changeSessionTool(req *pb.HttpRequest, undo bool) (sdk.HTTPResult, error) {
 		if err != nil {
 			return sdk.PassHTTP(), err
 		}
-		if _, err := configuredPolicy(rawPolicy); err != nil {
+		configured, err := configuredPolicy(rawPolicy)
+		if err != nil {
 			return sdk.PassHTTP(), err
+		}
+		if _, denied := configured.deny[tool]; denied {
+			return jsonHTTP(409, map[string]any{"error": "denied_by_policy"}), nil
+		}
+		_, alreadyAllowed := configured.allow[tool]
+		if !configured.allowPresent || alreadyAllowed {
+			return jsonHTTP(409, map[string]any{"error": "already_allowed_by_policy"}), nil
 		}
 		currentPolicy = policyFingerprint(rawPolicy)
 	}
@@ -193,6 +201,12 @@ func changeSessionTool(req *pb.HttpRequest, undo bool) (sdk.HTTPResult, error) {
 			state.LastChange = ""
 			state.LastUndo = change
 		} else {
+			if state.LastUndo == change {
+				if state.LastTool != tool {
+					return jsonHTTP(409, map[string]any{"error": "call_conflict"}), nil
+				}
+				return jsonHTTP(409, map[string]any{"error": "change_already_undone"}), nil
+			}
 			if state.LastChange == change {
 				if state.LastTool != tool {
 					return jsonHTTP(409, map[string]any{"error": "call_conflict"}), nil
