@@ -3,6 +3,20 @@
   "description": "Identify the usage log without exposing its contents or host paths.",
   "namespace": {"title": "Usage logger", "summary": "Find the plugin-relative usage log and its content-free logging policy.", "categories": ["observability"]},
   "operations": [{
+    "id": "session.usage", "method": "GET", "path": "/session/usage",
+    "description": "Read recorded response and token totals for the host-bound session; missing provider usage is marked incomplete.",
+    "risk": "read", "idempotent": true, "model_access": "read", "conversation_binding": "required",
+    "output_schema": {
+      "type": "object", "additionalProperties": false,
+      "required": ["found", "completed_responses", "responses_with_usage", "usage_complete", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"],
+      "properties": {
+        "found": {"type": "boolean"}, "usage_complete": {"type": "boolean"},
+        "completed_responses": {"type": "integer"}, "responses_with_usage": {"type": "integer"},
+        "input_tokens": {"type": "integer"}, "output_tokens": {"type": "integer"},
+        "cache_read_tokens": {"type": "integer"}, "cache_write_tokens": {"type": "integer"}
+      }
+    }
+  }, {
     "id": "status", "method": "GET", "path": "/status",
     "description": "Read log identity and logging policy; does not read usage records.",
     "risk": "read", "idempotent": true, "model_access": "read", "conversation_binding": "none",

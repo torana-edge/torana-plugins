@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "torana/usage_logger",
   "name": "usage_logger",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "abi_version": "v1",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "pass",
@@ -13,6 +13,8 @@
     {"name": "run_on_http_request"}
   ],
   "permissions": [
+    {"name": "env.state_get", "description": "Read private, session-scoped token totals"},
+    {"name": "env.state_set", "description": "Atomically accumulate session totals across completed responses"},
     {"name": "env.serve_http", "description": "Expose log identity without reading request records or local file paths"},
     {"name": "env.file_append", "description": "Append usage records to the declared private log"}
   ],

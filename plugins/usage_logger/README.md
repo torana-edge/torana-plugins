@@ -49,7 +49,7 @@ Approve the required private file `usage.jsonl`. The example permits 16 MiB per 
 ## Approve and enable
 
 Save this as `approval.json`. Replace the digest with the exact one you reviewed.
-The usage logger needs only the private file grant shown here; it has no model
+The usage logger needs the file, HTTP and state grants shown here; it has no model
 service or provider-key setup of its own.
 Permissions must equal the manifest's requested set; budgets can be lower.
 
@@ -57,7 +57,10 @@ Permissions must equal the manifest's requested set; budgets can be lower.
 {
   "digest": "sha256:REPLACE_WITH_YOUR_INSPECTED_DIGEST",
   "permissions": [
-    "env.file_append"
+    "env.file_append",
+    "env.serve_http",
+    "env.state_get",
+    "env.state_set"
   ],
   "failure_mode": "pass",
   "files": {
@@ -96,6 +99,22 @@ Expect a JSON record with `status`, `duration_ms` and `usage_reported`.
 Missing usage is not zero usage. `input_tokens` is the total prompt input;
 reported `cache_read_tokens` and `cache_write_tokens` are subsets of that
 total, not extra tokens to add.
+
+## Ask for this session's usage
+
+With Torana's MCP connection configured, your harness can discover and call
+`usage_logger.session.usage`. It returns recorded response counts and provider-
+reported token totals for the host-bound session, including cache-read and cache-
+write counts. No log contents, filenames, model/provider names, or other sessions
+are exposed. Side threads sharing a session contribute to the same totals.
+
+`found: false` means this plugin has not recorded totals for the session.
+`usage_complete` is true only when every **recorded** response included a usage
+object; present zero counts are different from missing usage. These are local,
+best-effort totals, not a billing ledger: they start when this version is enabled,
+do not import earlier logs, and omit updates that fail. Durable state keeps
+recorded totals across Torana restarts. Approve the new bundle digest and state
+permissions when upgrading.
 
 ## Data and failure behavior
 

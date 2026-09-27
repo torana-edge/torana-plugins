@@ -172,8 +172,8 @@ var pluginContracts = map[string]pluginContract{
 		permissions: []string{"env.cache_policy", "env.host_call.torana_plugin_counter", "env.log", "env.now", "env.plugin_config", "env.state_get", "env.state_keys", "env.state_set", "ir.cache_control.write"}},
 	"cache_warmer": {hooks: []string{"run_before_request", "run_on_tick"},
 		permissions: []string{"env.background_tick", "env.cache_policy", "env.host_call.torana_send_request", "env.now", "env.plugin_config", "env.state_get", "env.state_keys", "env.state_set"}},
-	"compactor": {hooks: []string{"run_before_request"},
-		permissions:   []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.host_call.torana_evaluate_compaction", "env.host_call.torana_record_savings", "env.model_complete", "env.model_pricing", "env.plugin_config", "env.shared_cache_get", "ir.tool_results.write"},
+	"compactor": {hooks: []string{"run_before_request", "run_on_http_request"},
+		permissions:   []string{"env.cache_get", "env.cache_set", "env.emit_metric", "env.host_call.torana_evaluate_compaction", "env.host_call.torana_record_savings", "env.model_complete", "env.model_pricing", "env.plugin_config", "env.serve_http", "env.shared_cache_get", "ir.tool_results.write"},
 		conflictsWith: []string{"torana/keyword_compactor"}},
 	"decision_router": {hooks: []string{"run_before_request", "run_after_response", "run_on_http_request"},
 		permissions: []string{"env.credential_get", "env.emit_metric", "env.http_request", "env.log", "env.meta_get", "env.meta_set", "env.model_capabilities", "env.plugin_config", "env.route_request", "env.route_request.effort", "env.serve_http", "env.state_get", "env.state_keys", "env.state_set", "env.suggest"}},
@@ -194,7 +194,7 @@ var pluginContracts = map[string]pluginContract{
 		permissions: []string{"env.meta_get", "env.meta_set", "ir.messages.write.assistant", "ir.stream.write", "ir.tools.write"}},
 	"tool_governor": {hooks: []string{"run_before_request", "run_on_http_request"},
 		permissions: []string{"env.plugin_config", "env.serve_http", "ir.cache_control.write", "ir.tools.write"}},
-	"usage_logger": {hooks: []string{"run_after_response", "run_on_http_request"}, permissions: []string{"env.file_append", "env.serve_http"}},
+	"usage_logger": {hooks: []string{"run_after_response", "run_on_http_request"}, permissions: []string{"env.file_append", "env.serve_http", "env.state_get", "env.state_set"}},
 }
 
 func hookNames(hooks []struct {

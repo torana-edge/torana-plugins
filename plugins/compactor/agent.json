@@ -1,0 +1,18 @@
+{
+  "schema_version": 2,
+  "description": "Inspect compaction settings without running or spending on a model call.",
+  "namespace": {"title": "Compactor", "summary": "Inspect compaction limits and the expected reuse budget.", "categories": ["optimization"]},
+  "operations": [{
+    "id": "status.get", "method": "GET", "path": "/status",
+    "description": "Read configured source-byte limit, expected applications and policy count; does not test model availability or expose tool policies.",
+    "risk": "read", "idempotent": true, "model_access": "read", "conversation_binding": "none",
+    "output_schema": {
+      "type": "object", "additionalProperties": false,
+      "required": ["plugin", "expected_applications", "max_summarizer_input_bytes", "policy_count"],
+      "properties": {
+        "plugin": {"const": "compactor"}, "expected_applications": {"type": "integer"},
+        "max_summarizer_input_bytes": {"type": "integer"}, "policy_count": {"type": "integer"}
+      }
+    }
+  }]
+}
