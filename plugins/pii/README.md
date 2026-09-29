@@ -52,8 +52,11 @@ Set the snapshot's `config` object to the following, preserving its `revision`:
 torana plugin config apply pii --file plugin-settings.json --yes
 ```
 
-The `scanner` model service is required even when a deterministic pattern may
-detect a finding first. The example assumes a local OpenAI-compatible server.
+The `pii` plugin is model-backed. Its deterministic checks only short-circuit
+obvious, high-confidence findings without spending a model call. Every eligible
+new tool result that remains undecided goes to the required `scanner` model
+service. Historical results are replayed from safe decisions instead of being
+sent to the scanner again. The example assumes a local OpenAI-compatible server.
 Add provider `local-scanner` with URL `http://127.0.0.1:11434`, format `openai`,
 auth mode `none`, then bind the model you actually loaded. Adjust limits within
 the manifest ceilings. A remote binding sends eligible tool text to that
@@ -88,7 +91,7 @@ Permissions must equal the manifest's requested set; budgets can be lower.
       "provider": "local-scanner",
       "model": "your-loaded-model",
       "path": "/v1/chat/completions",
-      "timeout_ms": 30000,
+      "timeout_ms": 90000,
       "max_tokens": 512,
       "max_input_bytes": 65536,
       "max_calls_per_minute": 4,
