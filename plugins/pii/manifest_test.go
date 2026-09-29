@@ -67,7 +67,7 @@ func TestManifestPermissionSetExact(t *testing.T) {
 		t.Fatalf("model services = %+v, want exactly scanner", m.ModelServices)
 	}
 	scanner := m.ModelServices[0]
-	if scanner.Name != "scanner" || !scanner.Required || scanner.TimeoutMS != 30000 ||
+	if scanner.Name != "scanner" || !scanner.Required || scanner.TimeoutMS != 90000 ||
 		scanner.MaxTokens != 512 || scanner.MaxInputBytes != 1048576 ||
 		scanner.MaxCallsPerMinute != 60 || scanner.MaxTokensPerHour != 100000 {
 		t.Fatalf("scanner model-service contract = %+v", scanner)

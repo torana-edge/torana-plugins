@@ -26,10 +26,10 @@ optional context experiments.
 | [`cache_warmer`](plugins/cache_warmer/README.md) | Keep one conversation's cache warm for a bounded gap |
 
 Already running Ollama or another OpenAI-compatible local model? Start with
-`pii` and bind its scanner to that endpoint. It checks obvious patterns first,
-then uses your local model for contextual cases. If you do not have a local
-model ready, start with the deterministic `pii_guard` instead. Install only one;
-their manifests declare them as conflicting.
+`pii` and bind its scanner to that endpoint. If you do not have a local model
+ready, start with the deterministic `pii_guard`. For broader protection, run
+both and place `pii_guard` first: obvious matches are withheld without a model
+call, then `pii` scans the remaining tool output, including failed results.
 
 Every guide includes settings, exact permissions, required resource bindings,
 and a way to check the result. Install your choice from the Torana checkout

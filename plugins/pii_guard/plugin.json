@@ -2,15 +2,12 @@
   "schema_version": 1,
   "id": "torana/pii_guard",
   "name": "pii_guard",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "abi_version": "v1",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "block",
   "repository": "https://github.com/torana-edge/torana-plugins",
   "description": "Replaces high-confidence PII and secret patterns in new tool results with recoverable tool errors, without calling a model or network service",
-  "conflicts_with": [
-    "torana/pii"
-  ],
   "hooks": [
     {
       "name": "run_before_request"
