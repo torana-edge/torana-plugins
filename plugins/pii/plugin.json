@@ -2,15 +2,12 @@
   "schema_version": 1,
   "id": "torana/pii",
   "name": "pii",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "abi_version": "v1",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "block",
   "repository": "https://github.com/torana-edge/torana-plugins",
-  "description": "Scans new tool results through an operator-bound model plus a regex pre-filter and replaces sensitive output with a recoverable tool error",
-  "conflicts_with": [
-    "torana/pii_guard"
-  ],
+  "description": "Scans new tool results through an operator-bound model and replaces sensitive output with a recoverable tool error",
   "hooks": [
     {
       "name": "run_before_request"
@@ -68,7 +65,7 @@
   "model_services": [
     {
       "name": "scanner",
-      "description": "Required model that checks eligible new tool output when the built-in deterministic checks do not already decide",
+      "description": "Model that contextually checks eligible new tool output",
       "required": true,
       "timeout_ms": 90000,
       "max_tokens": 512,

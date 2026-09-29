@@ -3,7 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
-	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -22,7 +22,38 @@ import (
 func newHarness(t *testing.T) *sdktest.Harness {
 	t.Helper()
 	resetConfigForTest()
-	return sdktest.New(t)
+	return sdktest.New(t).StubModelComplete(defaultScannerStub)
+}
+
+var testScannerPatterns = []struct {
+	category string
+	re       *regexp.Regexp
+}{
+	{"us_ssn", regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)},
+	{"aws_access_key", regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`)},
+	{"private_key", regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`)},
+	{"api_key", regexp.MustCompile(`\b(?:sk-(?:proj-|svcacct-|ant-)?[A-Za-z0-9_-]{20,}|[sr]k_(?:live|test)_[A-Za-z0-9_]{16,})\b`)},
+	{"access_token", regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{20,255})\b`)},
+}
+
+func defaultScannerStub(args *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
+	var payload string
+	if len(args.Messages) > 0 {
+		payload = sdk.Text(args.Messages[len(args.Messages)-1])
+	}
+	if marker := "Output to scan:\n"; strings.Contains(payload, marker) {
+		payload = strings.SplitN(payload, marker, 2)[1]
+	}
+	findings := make([]map[string]any, 0)
+	for lineIndex, line := range strings.Split(payload, "\n") {
+		for _, pattern := range testScannerPatterns {
+			if pattern.re.MatchString(line) {
+				findings = append(findings, map[string]any{"type": pattern.category, "line": lineIndex + 1})
+			}
+		}
+	}
+	verdict, _ := json.Marshal(map[string]any{"pii": len(findings) > 0, "findings": findings})
+	return modelResult(string(verdict)), nil, nil
 }
 
 // toolMsg builds a tool-role message whose tool-result block carries the
@@ -167,10 +198,9 @@ func TestExtractScannableTable(t *testing.T) {
 	}
 }
 
-// TestKnownPIIBlocksDespiteUnsupportedPart — finding 1: a deterministic PII
-// fact in retained text blocks as pii_detected even when an unsupported part
-// makes the extraction incomplete, under BOTH on_error modes.
-func TestKnownPIIBlocksDespiteUnsupportedPart(t *testing.T) {
+// TestIncompleteContentUsesOnErrorPolicy — the model-only scanner never calls
+// a model with a partial representation of a structured result.
+func TestIncompleteContentUsesOnErrorPolicy(t *testing.T) {
 	content := "key sk_test_torana_demo_not_a_real_key_123"
 	for name, onError := range map[string]string{"block": "block", "allow": "allow"} {
 		t.Run(name, func(t *testing.T) {
@@ -180,27 +210,15 @@ func TestKnownPIIBlocksDespiteUnsupportedPart(t *testing.T) {
 			if !requestCompleted(res) {
 				t.Fatalf("err=%v", res.Err)
 			}
-			assertBlocked(t, h, "pii_detected", "sk_test_torana_demo_not_a_real_key_123")
+			_, blocked := protectedMessage(t, h)
+			if blocked != (onError == "block") {
+				t.Fatalf("blocked=%v for on_error=%s", blocked, onError)
+			}
+			if n := countCommand(h, "env.model_complete"); n != 0 {
+				t.Fatalf("incomplete result made %d model calls", n)
+			}
 		})
 	}
-
-	// Text arm with PII BEFORE an unsupported arm.
-	h := newHarness(t)
-	h.SetConfig(`{"on_error":"allow"}`)
-	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("ssn 123-45-6789"), unknownArm())))
-	if !requestCompleted(res) {
-		t.Fatalf("err=%v", res.Err)
-	}
-	assertBlocked(t, h, "pii_detected", "123-45-6789")
-
-	// Unsupported arm BEFORE a text arm with PII.
-	h2 := newHarness(t)
-	h2.SetConfig(`{"on_error":"allow"}`)
-	res2 := h2.BeforeRequest(reqWith(toolMsg("c1", "read", unknownArm(), textArm("key AKIA1234567890ABCDEF"))))
-	if !requestCompleted(res2) {
-		t.Fatalf("err=%v", res2.Err)
-	}
-	assertBlocked(t, h2, "pii_detected", "AKIA1234567890ABCDEF")
 }
 
 func TestFreeformToolOutputIsScanned(t *testing.T) {
@@ -214,9 +232,9 @@ func TestFreeformToolOutputIsScanned(t *testing.T) {
 	assertBlocked(t, h, "pii_detected", "sk_test_torana_demo_not_a_real_key_123")
 }
 
-// TestUnknownUnscannableContentFollowsOnError — incomplete extraction with NO
-// deterministic finding: on_error block vetoes with pii_scan_failed, allow
-// forwards, and nothing is cached or model-scanned.
+// TestUnknownUnscannableContentFollowsOnError — incomplete extraction follows
+// on_error: block vetoes with pii_scan_failed, allow forwards, and nothing is
+// cached or sent to the model.
 func TestUnknownUnscannableContentFollowsOnError(t *testing.T) {
 	for name, onError := range map[string]string{"block": "block", "allow": "allow"} {
 		t.Run(name, func(t *testing.T) {
@@ -335,72 +353,18 @@ func TestEmailUsesContextualScanner(t *testing.T) {
 	}
 }
 
-func TestRegexRequiredLiteralPrefilterMatchesReference(t *testing.T) {
-	cases := []string{
-		"plain output without trigger bytes",
-		"contains @ but not an email",
-		"hyphenated-but-not-an-ssn",
-		"AKIA-short",
-		"-----BEGIN but not a private key",
-		"sk-short",
-		"sk_test_short",
-		"rk_live_short",
-		"ghp_short",
-		"contact someone@example.com now",
-		"ssn: 123-45-6789",
-		"key AKIA1234567890ABCDEF",
-		"-----BEGIN RSA PRIVATE KEY-----",
-		"someone@example.com and 123-45-6789\nAKIA1234567890ABCDEF\n-----BEGIN PRIVATE KEY-----",
-		"first@example.com second@example.com",
-		"wordAKIA1234567890ABCDEFword",
+func TestToolErrorsAreNotSentToScanner(t *testing.T) {
+	h := newHarness(t)
+	isError := true
+	msg := toolMsg("c1", "read", textArm("recoverable tool diagnostic"))
+	msg.Blocks[0].GetToolResult().IsError = &isError
+	res := h.BeforeRequest(reqWith(msg))
+	if res.Err != nil || !res.PassedThrough {
+		t.Fatalf("tool error result = %+v", res)
 	}
-	for _, input := range cases {
-		if got, want := regexScan(input), regexScanWithoutPrefilter(input); !reflect.DeepEqual(got, want) {
-			t.Fatalf("input %q: filtered=%+v reference=%+v", input, got, want)
-		}
+	if n := countCommand(h, "env.model_complete"); n != 0 {
+		t.Fatalf("tool error made %d scanner calls", n)
 	}
-}
-
-func FuzzRegexRequiredLiteralPrefilterMatchesReference(f *testing.F) {
-	for _, seed := range []string{
-		"plain",
-		"someone@example.com",
-		"123-45-6789",
-		"AKIA1234567890ABCDEF",
-		"-----BEGIN EC PRIVATE KEY-----",
-		"@-AKIA-----BEGIN \n",
-	} {
-		f.Add(seed)
-	}
-	f.Fuzz(func(t *testing.T, input string) {
-		if got, want := regexScan(input), regexScanWithoutPrefilter(input); !reflect.DeepEqual(got, want) {
-			t.Fatalf("filtered=%+v reference=%+v", got, want)
-		}
-	})
-}
-
-func regexScanWithoutPrefilter(content string) []finding {
-	var out []finding
-	seen := map[string]bool{}
-	lineNo := 0
-	for line := range strings.SplitSeq(content, "\n") {
-		lineNo++
-		for _, p := range piiPatterns {
-			if !p.re.MatchString(line) {
-				continue
-			}
-			key := p.name + ":" + strconv.Itoa(lineNo)
-			if seen[key] {
-				continue
-			}
-			if len(out) >= maxReportedFindings {
-				return append(out, finding{Type: "overflow", Line: 0})
-			}
-			seen[key] = true
-			out = append(out, finding{Type: p.name, Line: lineNo})
-		}
-	}
-	return out
 }
 
 // TestDuplicateToolCallIDsAmbiguous — finding 2: duplicated/reused IDs are
@@ -858,17 +822,16 @@ func TestScannerModelServiceContract(t *testing.T) {
 		t.Fatalf("model controls = %+v", got)
 	}
 
-	// The deterministic scanner remains first and blocks without invoking the
-	// bound model service when it already has a conclusive finding.
+	// Every complete eligible result is decided by the bound model service.
 	h2 := newHarness(t)
-	h2.StubModelComplete(modelStub(`{"pii":false,"findings":[]}`))
+	h2.StubModelComplete(modelStub(`{"pii":true,"findings":[{"type":"api_key","line":1}]}`))
 	res2 := h2.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("key sk_test_torana_demo_not_a_real_key_123"))))
 	if !requestCompleted(res2) {
 		t.Fatalf("err=%v", res2.Err)
 	}
 	assertBlocked(t, h2, "pii_detected", "sk_test_torana_demo_not_a_real_key_123")
-	if n := countCommand(h2, "env.model_complete"); n != 0 {
-		t.Fatalf("regex finding made %d model calls, want zero", n)
+	if n := countCommand(h2, "env.model_complete"); n != 1 {
+		t.Fatalf("model-backed PII finding made %d model calls, want one", n)
 	}
 }
 
@@ -1206,57 +1169,3 @@ func TestFindingCapBoundaries(t *testing.T) {
 
 // TestEmptyLineNumberingAfterSplitSeq — leading, middle, and trailing empty
 // lines keep their positions with the allocation-free iterator.
-func TestEmptyLineNumberingAfterSplitSeq(t *testing.T) {
-	content := "\n\nkey sk_test_torana_demo_not_a_real_key_123\n\n"
-	findings := regexScan(content)
-	if len(findings) != 1 {
-		t.Fatalf("findings=%d, want 1", len(findings))
-	}
-	if findings[0].Line != 3 {
-		t.Fatalf("line=%d, want 3 (two leading empty lines)", findings[0].Line)
-	}
-	h := newHarness(t)
-	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm(content))))
-	if !requestCompleted(res) {
-		t.Fatalf("err=%v", res.Err)
-	}
-	message, _ := protectedMessage(t, h)
-	if !strings.Contains(message, "line 3") {
-		t.Fatalf("hook-level line numbering wrong: %q", message)
-	}
-}
-
-// BenchmarkRegexScanLargeSuffix — evidence that the bounded scan does not
-// allocate per suffix line: the findings sit in the first cap+1 lines, and a
-// large noise suffix follows. Allocation must not scale with the suffix.
-func BenchmarkRegexScanLargeSuffix(b *testing.B) {
-	var sb strings.Builder
-	for i := 0; i < 21; i++ {
-		sb.WriteString("key sk_test_torana_demo_not_a_real_key_123\n")
-	}
-	for i := 0; i < 100_000; i++ {
-		sb.WriteString("noise line without matches\n")
-	}
-	content := sb.String()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		out := regexScan(content)
-		if len(out) != 21 {
-			b.Fatalf("len=%d, want 21 (cap+1 sentinel)", len(out))
-		}
-	}
-}
-
-// BenchmarkRegexScanAgentToolResult mirrors the clean 16 KiB historical tool
-// result used by Edge's retained plugin-chain and per-instance memory probes.
-func BenchmarkRegexScanAgentToolResult(b *testing.B) {
-	content := strings.Repeat("p", 16<<10)
-	b.SetBytes(int64(len(content)))
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if out := regexScan(content); len(out) != 0 {
-			b.Fatalf("unexpected findings: %+v", out)
-		}
-	}
-}

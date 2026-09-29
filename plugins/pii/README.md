@@ -1,7 +1,7 @@
 # Check tool output before forwarding it
 
-Scan selected tool results with deterministic patterns and an operator-bound
-contextual model. Replace a finding with a recoverable, value-free tool error
+Scan selected tool results with an operator-bound contextual model. Replace a
+finding with a recoverable, value-free tool error
 so the primary model can continue safely. If you want a
 zero-model guard for recognizable values, use [`pii_guard`](../pii_guard/README.md).
 
@@ -52,9 +52,8 @@ Set the snapshot's `config` object to the following, preserving its `revision`:
 torana plugin config apply pii --file plugin-settings.json --yes
 ```
 
-The `pii` plugin is model-backed. Its deterministic checks only short-circuit
-obvious, high-confidence findings without spending a model call. Every eligible
-new tool result that remains undecided goes to the required `scanner` model
+The `pii` plugin is model-backed. Every eligible successful new tool result
+goes to the required `scanner` model
 service. Historical results are replayed from safe decisions instead of being
 sent to the scanner again. The example assumes a local OpenAI-compatible server.
 Add provider `local-scanner` with URL `http://127.0.0.1:11434`, format `openai`,
@@ -89,8 +88,6 @@ Permissions must equal the manifest's requested set; budgets can be lower.
   "model_services": {
     "scanner": {
       "provider": "local-scanner",
-      "model": "your-loaded-model",
-      "path": "/v1/chat/completions",
       "timeout_ms": 90000,
       "max_tokens": 512,
       "max_input_bytes": 65536,
@@ -113,7 +110,7 @@ same inspect/configure/approve/enable flow. Rebuilds need a new digest approval.
 
 ## Try it and check the result
 
-Use synthetic tool output such as `contact: someone@example.com` with a matching tool-call ID. Expect that result to become a value-free tool error before the primary provider receives it. The model can then skip the affected lines or request a narrower read. Also test a clean result and an unavailable scanner. Only complete clean scans are cached; unsupported content or truncation is governed by `on_error`, not cached as clean.
+Use synthetic tool output such as `contact: someone@example.com` with a matching tool-call ID. Expect that result to become a value-free tool error before the primary provider receives it. The model can then skip the affected lines or request a narrower read. Also test a clean result and an unavailable scanner. Only complete clean scans are cached; identical content already cleared by the same scan policy is not sent to the scanner again. Unsupported content or truncation is governed by `on_error`, not cached as clean.
 
 ## Data and failure behavior
 
@@ -133,9 +130,9 @@ The scanner receives eligible tool-output text. If bound remotely, that text lea
 
 Place before plugins that reduce tool output so it sees the original content.
 Torana rejects a pipeline that places a tool-result writer after a compaction
-gate. Do not enable this plugin with `pii_guard`: this plugin already performs
-the deterministic check before its contextual scan, and the manifests declare
-the pair as conflicting.
+gate. You may place `pii_guard` immediately before `pii`: recognizable values
+become recoverable tool errors without a model call, and `pii` skips tool errors
+while contextually scanning the remaining successful results.
 
 ```bash
 torana plugin disable pii --yes

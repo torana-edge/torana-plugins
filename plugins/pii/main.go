@@ -1,8 +1,8 @@
 // pii scans tool results (grep/bash/etc. output) before they are forwarded to
-// the cloud upstream. A deterministic regex pre-filter catches high-precision
-// categories; anything else is sent to an operator-bound model for contextual
-// detection. If PII is found the affected tool result becomes an actionable,
-// value-free tool error so the upstream model can adjust in the same turn.
+// the cloud upstream. Every eligible new result is sent to an operator-bound
+// model for contextual detection. If PII is found, the affected tool result
+// becomes an actionable, value-free tool error so the upstream model can adjust
+// in the same turn.
 //
 // # Ordered-body semantics
 //
@@ -98,22 +98,6 @@ func resetConfigForTest() {
 	cfg = piiConfig{}
 }
 
-// High-precision patterns — deterministic, no model call, exact line numbers,
-// and they still catch obvious PII when the scanner service is unavailable.
-var piiPatterns = []struct {
-	name            string
-	requiredLiteral string
-	re              *regexp.Regexp
-}{
-	{"us_ssn", "-", regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)},
-	{"aws_access_key", "AKIA", regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`)},
-	{"private_key", "-----BEGIN ", regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`)},
-	{"api_key", "sk-", regexp.MustCompile(`\bsk-(?:proj-|svcacct-|ant-)?[A-Za-z0-9_-]{20,}\b`)},
-	{"api_key", "sk_", regexp.MustCompile(`\bsk_(?:live|test)_[A-Za-z0-9_]{16,}\b`)},
-	{"api_key", "rk_", regexp.MustCompile(`\brk_(?:live|test)_[A-Za-z0-9_]{16,}\b`)},
-	{"access_token", "gh", regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{20,255})\b`)},
-}
-
 type finding struct {
 	Type string
 	Line int
@@ -123,14 +107,13 @@ type finding struct {
 type extraction struct {
 	// text is every INSPECTABLE string: the scalar Content plus all valid
 	// text parts in wire order, newline-separated so line numbers are stable.
-	// A deterministic regex run over this text can PROVE PII even when the
-	// extraction is incomplete.
+	// This exact composition is sent to the configured scanner model when the
+	// extraction is complete.
 	text string
 	// complete is false when some provider-visible content could not be
 	// inspected (malformed JSON, a non-array top-level value, JSON null,
-	// malformed or non-text parts). Incomplete extractions are NEVER
-	// model-scanned and NEVER cached: on_error governs them after the
-	// deterministic scan of the retained text.
+	// malformed or non-text parts). Incomplete extractions are never sent to the
+	// scanner and never cached; on_error governs them.
 	complete bool
 }
 
@@ -217,23 +200,13 @@ func init() {
 				if !toolAllowed(toolName) {
 					continue
 				}
-				ex := extractScannable(view)
-
-				// The deterministic scan runs first: a PII fact Torana can prove
-				// is replaced even when
-				// the extraction is incomplete or the bound scanner service is
-				// misconfigured — on_error governs the UNAVAILABLE contextual
-				// scan, never a deterministic finding already made.
-				if f := regexScan(ex.text); len(f) > 0 {
-					if err := replaceAndRemember(ctx, msg, view, blockMessage(toolName, f), outcomeSensitive); err != nil {
-						return sdk.RequestResult{}, fmt.Errorf("pii: replace detected: %w", err)
-					}
-					if err := rememberExplanation(ctx, f); err != nil {
-						return sdk.RequestResult{}, fmt.Errorf("pii: remember explanation: %w", err)
-					}
-					mutated = true
+				// Failed tool results — including recoverable errors produced by an
+				// earlier pii_guard — contain diagnostics, not successful tool
+				// output. Do not spend a model call classifying an error message.
+				if view.IsError != nil && *view.IsError {
 					continue
 				}
+				ex := extractScannable(view)
 				if !ex.complete {
 					// Incomplete extraction: never model-scanned, never cached;
 					// on_error governs the uninspectable remainder.
@@ -389,51 +362,8 @@ func toolAllowed(name string) bool {
 	return name == ""
 }
 
-// scan runs the bound-model path. The deterministic pre-filter already ran
-// over the retained text in the hook, so a deterministic finding can never
-// be demoted by on_error.
 func scan(content, toolName string) ([]finding, error) {
 	return modelScan(content, toolName)
-}
-
-// regexScan collects findings over an ALLOCATION-FREE line iterator
-// (strings.SplitSeq): a large tool output whose findings sit in the first few
-// lines must not pay O(total lines) allocation before the early return. The
-// result is bounded to maxReportedFindings+1 — the extra item is the overflow
-// SENTINEL: blockMessage derives overflow from len(findings) alone, so the
-// contradictory len>cap && overflow=false state is unrepresentable. Exact
-// line numbering and empty-line behavior match strings.Split (SplitSeq yields
-// an empty string for every empty line).
-func regexScan(content string) []finding {
-	var out []finding
-	seen := map[string]bool{}
-	i := 0
-	for line := range strings.SplitSeq(content, "\n") {
-		lineNo := i + 1
-		i++
-		for _, p := range piiPatterns {
-			// Each regex contains this literal in every accepting path. Avoid
-			// initializing and retaining the regexp execution machinery when a
-			// line cannot possibly match; the regex remains the authority.
-			if !strings.Contains(line, p.requiredLiteral) {
-				continue
-			}
-			if p.re.MatchString(line) {
-				key := fmt.Sprintf("%s:%d", p.name, lineNo)
-				if !seen[key] {
-					if len(out) >= maxReportedFindings {
-						// Cap+1 sentinel: enough to prove the cap was
-						// exceeded; stop so the result and the dedupe map
-						// never grow with the whole request.
-						return append(out, finding{Type: "overflow", Line: 0})
-					}
-					seen[key] = true
-					out = append(out, finding{Type: p.name, Line: lineNo})
-				}
-			}
-		}
-	}
-	return out
 }
 
 const piiSystemPrompt = `You are a PII detector. Examine the tool output and decide whether it contains personally identifiable information or secrets: emails, phone numbers, physical addresses, government IDs (e.g. SSNs), credit-card or bank numbers, API keys, passwords, private keys, or access tokens.

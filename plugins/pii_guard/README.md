@@ -7,7 +7,9 @@ clean-result cache to configure.
 
 Use this as your first plugin when you do not already have a local model
 endpoint. If you do, the model-backed [`pii`](../pii/README.md) guard adds
-contextual checks while keeping the same deterministic fast path.
+contextual checks. You can also run both: put `pii_guard` first so obvious
+matches become tool errors without a model call, then let `pii` scan the
+remaining successful tool results.
 
 [All plugins](../../README.md#choose-a-plugin) · [Source](main.go) ·
 [Manifest](plugin.json) · [Settings schema](schema.json)
@@ -78,9 +80,8 @@ plugin scans tool-result text, not arbitrary files, user prompts, tool
 arguments, headers, images, or every possible secret.
 
 For names, addresses, prose, unfamiliar credentials, and other contextual
-cases, use the model-backed [`pii`](../pii/README.md) plugin instead. The two
-plugins conflict because `pii` already includes this deterministic fast path
-before its contextual scan; choose one.
+cases, add the model-backed [`pii`](../pii/README.md) plugin after this one, or
+use it on its own.
 
 ## Optional tool selection
 
