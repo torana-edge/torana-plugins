@@ -200,12 +200,6 @@ func init() {
 				if !toolAllowed(toolName) {
 					continue
 				}
-				// Failed tool results — including recoverable errors produced by an
-				// earlier pii_guard — contain diagnostics, not successful tool
-				// output. Do not spend a model call classifying an error message.
-				if view.IsError != nil && *view.IsError {
-					continue
-				}
 				ex := extractScannable(view)
 				if !ex.complete {
 					// Incomplete extraction: never model-scanned, never cached;

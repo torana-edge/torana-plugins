@@ -130,9 +130,11 @@ The scanner receives eligible tool-output text. If bound remotely, that text lea
 
 Place before plugins that reduce tool output so it sees the original content.
 Torana rejects a pipeline that places a tool-result writer after a compaction
-gate. You may place `pii_guard` immediately before `pii`: recognizable values
-become recoverable tool errors without a model call, and `pii` skips tool errors
-while contextually scanning the remaining successful results.
+gate. For broader protection, place `pii_guard` immediately before `pii`:
+recognizable values become value-free tool errors before the model scan, while
+`pii` still scans other tool output—including failures that can contain secrets.
+With `on_error: allow`, an unavailable scanner forwards undecided content, so
+use the default `block` policy when preventing disclosure matters.
 
 ```bash
 torana plugin disable pii --yes

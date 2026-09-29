@@ -7,9 +7,9 @@ clean-result cache to configure.
 
 Use this as your first plugin when you do not already have a local model
 endpoint. If you do, the model-backed [`pii`](../pii/README.md) guard adds
-contextual checks. You can also run both: put `pii_guard` first so obvious
-matches become tool errors without a model call, then let `pii` scan the
-remaining successful tool results.
+contextual checks. For broader protection, run both: put `pii_guard` first so
+obvious matches become value-free tool errors, then let `pii` scan the remaining
+tool output, including failed commands and tool errors that may contain secrets.
 
 [All plugins](../../README.md#choose-a-plugin) · [Source](main.go) ·
 [Manifest](plugin.json) · [Settings schema](schema.json)

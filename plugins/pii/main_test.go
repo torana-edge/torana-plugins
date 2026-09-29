@@ -353,18 +353,19 @@ func TestEmailUsesContextualScanner(t *testing.T) {
 	}
 }
 
-func TestToolErrorsAreNotSentToScanner(t *testing.T) {
+func TestToolErrorsAreStillSentToScanner(t *testing.T) {
 	h := newHarness(t)
 	isError := true
-	msg := toolMsg("c1", "read", textArm("recoverable tool diagnostic"))
+	msg := toolMsg("c1", "read", textArm("failed command printed sk_test_torana_demo_not_a_real_key_123"))
 	msg.Blocks[0].GetToolResult().IsError = &isError
 	res := h.BeforeRequest(reqWith(msg))
-	if res.Err != nil || !res.PassedThrough {
+	if !requestCompleted(res) {
 		t.Fatalf("tool error result = %+v", res)
 	}
-	if n := countCommand(h, "env.model_complete"); n != 0 {
-		t.Fatalf("tool error made %d scanner calls", n)
+	if n := countCommand(h, "env.model_complete"); n != 1 {
+		t.Fatalf("tool error made %d scanner calls, want one", n)
 	}
+	assertBlocked(t, h, "pii_detected", "sk_test_torana_demo_not_a_real_key_123")
 }
 
 // TestDuplicateToolCallIDsAmbiguous — finding 2: duplicated/reused IDs are
