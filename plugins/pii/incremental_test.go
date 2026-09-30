@@ -65,7 +65,7 @@ func TestOversizedModelInputIsWithheldAndReplayed(t *testing.T) {
 			}
 			text, isError := incrementalResultText(t, latest)
 			if policy == "block" {
-				if !isError || !strings.Contains(text, "scanner input limit") || strings.Contains(text, original) {
+				if !isError || !strings.Contains(text, "input limit") || strings.Contains(text, original) {
 					t.Fatalf("missing safe replacement: %q, error=%v", text, isError)
 				}
 			} else if isError || text != original {

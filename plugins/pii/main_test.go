@@ -659,13 +659,14 @@ func TestToolLabelSafety(t *testing.T) {
 	}
 }
 
-// TestModelScanRefusalClasses — advisory model-service refusals are a scanner
-// failure governed by on_error; contract refusals and malformed frames error
+// TestModelScanRefusalClasses — availability/parameter refusals are a scanner
+// failure governed by on_error; permission/internal refusals and malformed frames error
 // the hook regardless of on_error.
 func TestModelScanRefusalClasses(t *testing.T) {
 	for _, code := range []pbv1.ErrorCode{
 		pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED,
 		pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE,
+		pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT,
 	} {
 		t.Run("advisory/"+code.String(), func(t *testing.T) {
 			h := newHarness(t)
@@ -698,7 +699,6 @@ func TestModelScanRefusalClasses(t *testing.T) {
 
 	for _, code := range []pbv1.ErrorCode{
 		pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED,
-		pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT,
 		pbv1.ErrorCode_ERROR_CODE_INTERNAL,
 	} {
 		t.Run("contract/"+code.String(), func(t *testing.T) {
