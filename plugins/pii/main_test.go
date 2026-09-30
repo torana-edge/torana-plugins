@@ -779,6 +779,15 @@ func TestMaxScanBytesTruncation(t *testing.T) {
 				t.Fatalf("model user message missing scan marker: %q", sdk.Text(request.Messages[1]))
 			}
 			scanned := sdk.Text(request.Messages[1])[idx+len(marker):]
+			lines := strings.Split(scanned, "\n")
+			for i, line := range lines {
+				prefix := strconv.Itoa(i+1) + ": "
+				if !strings.HasPrefix(line, prefix) {
+					t.Fatalf("missing scan line number: %q", line)
+				}
+				lines[i] = strings.TrimPrefix(line, prefix)
+			}
+			scanned = strings.Join(lines, "\n")
 			if len(scanned) > 100 {
 				t.Fatalf("scanned bytes=%d exceed the 100-byte budget", len(scanned))
 			}
@@ -822,6 +831,32 @@ func TestScannerModelServiceContract(t *testing.T) {
 	if got.MaxTokens == nil || *got.MaxTokens != 512 || got.Temperature == nil || *got.Temperature != 0 {
 		t.Fatalf("model controls = %+v", got)
 	}
+	if got.OutputFormat == nil || got.OutputFormat.Mode != pbv1.OutputFormat_MODE_JSON_SCHEMA || !got.OutputFormat.GetStrict() {
+		t.Fatalf("scanner must request constrained JSON: %+v", got.OutputFormat)
+	}
+	if err := got.Validate(); err != nil {
+		t.Fatalf("invalid structured scanner request: %v", err)
+	}
+	var schema struct {
+		Properties struct {
+			Findings struct {
+				Items struct {
+					Properties struct {
+						Line struct {
+							Minimum int `json:"minimum"`
+							Maximum int `json:"maximum"`
+						} `json:"line"`
+					} `json:"properties"`
+				} `json:"items"`
+			} `json:"findings"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(got.OutputFormat.SchemaJson, &schema); err != nil {
+		t.Fatal(err)
+	}
+	if schema.Properties.Findings.Items.Properties.Line.Minimum != 1 || schema.Properties.Findings.Items.Properties.Line.Maximum != 1 {
+		t.Fatal("scanner line numbers must be constrained to the actual input")
+	}
 
 	// Every complete eligible result is decided by the bound model service.
 	h2 := newHarness(t)
@@ -833,6 +868,28 @@ func TestScannerModelServiceContract(t *testing.T) {
 	assertBlocked(t, h2, "pii_detected", "sk_test_torana_demo_not_a_real_key_123")
 	if n := countCommand(h2, "env.model_complete"); n != 1 {
 		t.Fatalf("model-backed PII finding made %d model calls, want one", n)
+	}
+}
+
+func TestNumberedScanContentPreservesOriginalLines(t *testing.T) {
+	if got := numberedScanContent("alpha\n\n日本語\n"); got != "1: alpha\n2: \n3: 日本語\n4: " {
+		t.Fatalf("numbered content = %q", got)
+	}
+}
+
+func TestTruncatedScannerVerdictIsNotCachedAsClean(t *testing.T) {
+	h := newHarness(t)
+	h.StubModelComplete(func(*pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
+		result := modelResult(`{"pii":false,"findings":[]}`)
+		result.FinishReason = "length"
+		return result, nil, nil
+	})
+	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("clean text"))))
+	if !requestCompleted(res) {
+		t.Fatalf("scanner truncation must remain recoverable: %v", res.Err)
+	}
+	if _, blocked := protectedMessage(t, h); !blocked || countCommand(h, "env.cache_set") != 0 {
+		t.Fatal("a truncated scanner verdict must be withheld, not cached as clean")
 	}
 }
 

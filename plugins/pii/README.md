@@ -55,7 +55,10 @@ torana plugin config apply pii --file plugin-settings.json --yes
 The `pii` plugin is model-backed. Every eligible successful new tool result
 goes to the required `scanner` model
 service. Historical results are replayed from safe decisions instead of being
-sent to the scanner again. The example assumes a local OpenAI-compatible server.
+sent to the scanner again. The scanner must support JSON Schema structured
+output; current llama.cpp servers support this. Torana supplies numbered lines
+and requires a value-free JSON verdict. Reported lines refer to the tool output,
+not necessarily the original file's line numbers. The example assumes a local OpenAI-compatible server.
 Add provider `local-scanner` with URL `http://127.0.0.1:11434`, format `openai`,
 auth mode `none`, then bind the model you actually loaded. Adjust limits within
 the manifest ceilings. A remote binding sends eligible tool text to that
@@ -90,7 +93,7 @@ Permissions must equal the manifest's requested set; budgets can be lower.
       "provider": "local-scanner",
       "timeout_ms": 90000,
       "max_tokens": 512,
-      "max_input_bytes": 65536,
+      "max_input_bytes": 1048576,
       "max_calls_per_minute": 4,
       "max_tokens_per_hour": 20000
     }
@@ -110,7 +113,9 @@ same inspect/configure/approve/enable flow. Rebuilds need a new digest approval.
 
 ## Try it and check the result
 
-Use synthetic tool output such as `contact: someone@example.com` with a matching tool-call ID. Expect that result to become a value-free tool error before the primary provider receives it. The model can then skip the affected lines or request a narrower read. Also test a clean result and an unavailable scanner. Only complete clean scans are cached; identical content already cleared by the same scan policy is not sent to the scanner again. Unsupported content or truncation is governed by `on_error`, not cached as clean.
+Try a synthetic credential assignment such as `PAYMENT_API_KEY=sk_test_torana_demo_not_a_real_key_123` in a test configuration file. Ask your harness to read it. A sensitive result becomes a value-free tool error before the primary provider receives it, so the model can skip the affected lines or request a narrower read.
+
+Also test clean source code, public contact details, and clearly labeled documentation placeholders: these should remain readable. Detection quality depends on the scanner model, so check both positive and negative examples before relying on it. An unavailable scanner or incomplete scan follows `on_error`, never a cached clean verdict. Only complete clean scans are cached; identical content already cleared by the same scan policy is not sent to the scanner again.
 
 ## Data and failure behavior
 
