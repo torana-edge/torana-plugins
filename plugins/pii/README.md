@@ -55,8 +55,11 @@ torana plugin config apply pii --file plugin-settings.json --yes
 The `pii` plugin is model-backed. Every eligible successful new tool result
 goes to the required `scanner` model
 service. Historical results are replayed from safe decisions instead of being
-sent to the scanner again. The example assumes a local OpenAI-compatible server.
-Add provider `local-scanner` with URL `http://127.0.0.1:11434`, format `openai`,
+sent to the scanner again. The scanner must support JSON Schema structured
+output; current llama.cpp servers support this. Torana supplies numbered lines
+and requires a value-free JSON verdict. Reported lines refer to the tool output,
+not necessarily the original file's line numbers. The example assumes a local OpenAI-compatible server.
+Add provider `local-scanner` with a llama.cpp URL such as `http://127.0.0.1:8081/v1`, format `openai`,
 auth mode `none`, then bind the model you actually loaded. Adjust limits within
 the manifest ceilings. A remote binding sends eligible tool text to that
 provider; call this setup local only when the bound endpoint and model are local.
@@ -90,7 +93,7 @@ Permissions must equal the manifest's requested set; budgets can be lower.
       "provider": "local-scanner",
       "timeout_ms": 90000,
       "max_tokens": 512,
-      "max_input_bytes": 65536,
+      "max_input_bytes": 1048576,
       "max_calls_per_minute": 4,
       "max_tokens_per_hour": 20000
     }
@@ -110,7 +113,11 @@ same inspect/configure/approve/enable flow. Rebuilds need a new digest approval.
 
 ## Try it and check the result
 
-Use synthetic tool output such as `contact: someone@example.com` with a matching tool-call ID. Expect that result to become a value-free tool error before the primary provider receives it. The model can then skip the affected lines or request a narrower read. Also test a clean result and an unavailable scanner. Only complete clean scans are cached; identical content already cleared by the same scan policy is not sent to the scanner again. Unsupported content or truncation is governed by `on_error`, not cached as clean.
+Try a synthetic credential assignment such as `PAYMENT_API_KEY=sk_test_torana_demo_not_a_real_key_123` in a test configuration file. Ask your harness to read it. A sensitive result becomes a value-free tool error before the primary provider receives it, so the model can skip the affected lines or request a narrower read.
+
+Also test clean source code, public support addresses, and syntactically redacted placeholders such as `<REDACTED>` or `YOUR_API_KEY`: these should remain readable. Labelling a realistic credential “example” or “not real” is not an exemption. Detection quality depends on the scanner model, so check positive and negative examples before relying on it. An unavailable scanner, oversized request or incomplete scan follows `on_error`, never a cached clean verdict. With the default `block`, the withheld result is remembered for historical replay. The approved input limit counts the complete request, including numbered lines and output schema, not just raw tool text. Only complete clean scans are cached; identical content already cleared by the same scan policy is not sent to the scanner again.
+
+The policy does not withhold contact details that appear public, such as documentation or support addresses. This reduces noise in ordinary development, but the model can misjudge public versus private context; evaluate it on your own customer-data examples. For recognizable secret formats, run the independent [`pii_guard`](../pii_guard/README.md) before `pii`; neither plugin shares state with the other.
 
 ## Data and failure behavior
 

@@ -50,6 +50,46 @@ func TestModelScansOnlyTrailingToolResultBatch(t *testing.T) {
 	}
 }
 
+func TestOversizedModelInputIsWithheldAndReplayed(t *testing.T) {
+	for _, policy := range []string{"block", "allow"} {
+		t.Run(policy, func(t *testing.T) {
+			h := newHarness(t)
+			h.SetConfig(`{"on_error":"` + policy + `"}`)
+			h.StubModelComplete(func(*pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
+				return nil, &pbv1.HostError{Code: pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, Message: "model request exceeds the approved input limit"}, nil
+			})
+			original := strings.Repeat("x\n", 100)
+			latest := toolMsg("oversized", "read", textArm(original))
+			if res := h.BeforeRequest(reqWith(latest)); !requestCompleted(res) {
+				t.Fatalf("limit refusal failed the hook: %+v", res)
+			}
+			text, isError := incrementalResultText(t, latest)
+			if policy == "block" {
+				if !isError || !strings.Contains(text, "input limit") || strings.Contains(text, original) {
+					t.Fatalf("missing safe replacement: %q, error=%v", text, isError)
+				}
+			} else if isError || text != original {
+				t.Fatalf("explicit allow did not forward: %q, error=%v", text, isError)
+			}
+			if countCommand(h, "env.cache_set") != 0 {
+				t.Fatal("oversized input was cached clean")
+			}
+			previousCalls := countCommand(h, "env.model_complete")
+			history := toolMsg("oversized", "read", textArm(original))
+			if res := h.BeforeRequest(reqWith(history, incrementalTextMessage("continue"))); !requestCompleted(res) {
+				t.Fatalf("historical replay failed: %+v", res)
+			}
+			replayed, replayError := incrementalResultText(t, history)
+			if replayed != text || replayError != isError {
+				t.Fatalf("historical result drifted: %q, error=%v", replayed, replayError)
+			}
+			if countCommand(h, "env.model_complete") != previousCalls {
+				t.Fatal("historical result was rescanned")
+			}
+		})
+	}
+}
+
 func TestStableReplayToolCallIDKeepsGeminiSemanticIdentity(t *testing.T) {
 	if got := stableReplayToolCallID("torana_gemini_abcdef_2"); got != "torana_gemini_abcdef" {
 		t.Fatalf("stable id = %q", got)
