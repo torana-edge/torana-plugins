@@ -59,7 +59,7 @@ sent to the scanner again. The scanner must support JSON Schema structured
 output; current llama.cpp servers support this. Torana supplies numbered lines
 and requires a value-free JSON verdict. Reported lines refer to the tool output,
 not necessarily the original file's line numbers. The example assumes a local OpenAI-compatible server.
-Add provider `local-scanner` with URL `http://127.0.0.1:11434`, format `openai`,
+Add provider `local-scanner` with a llama.cpp URL such as `http://127.0.0.1:8081/v1`, format `openai`,
 auth mode `none`, then bind the model you actually loaded. Adjust limits within
 the manifest ceilings. A remote binding sends eligible tool text to that
 provider; call this setup local only when the bound endpoint and model are local.
@@ -115,7 +115,9 @@ same inspect/configure/approve/enable flow. Rebuilds need a new digest approval.
 
 Try a synthetic credential assignment such as `PAYMENT_API_KEY=sk_test_torana_demo_not_a_real_key_123` in a test configuration file. Ask your harness to read it. A sensitive result becomes a value-free tool error before the primary provider receives it, so the model can skip the affected lines or request a narrower read.
 
-Also test clean source code, public contact details, and clearly labeled documentation placeholders: these should remain readable. Detection quality depends on the scanner model, so check both positive and negative examples before relying on it. An unavailable scanner or incomplete scan follows `on_error`, never a cached clean verdict. Only complete clean scans are cached; identical content already cleared by the same scan policy is not sent to the scanner again.
+Also test clean source code, public support addresses, and syntactically redacted placeholders such as `<REDACTED>` or `YOUR_API_KEY`: these should remain readable. Labelling a realistic credential “example” or “not real” is not an exemption. Detection quality depends on the scanner model, so check positive and negative examples before relying on it. An unavailable scanner, oversized request or incomplete scan follows `on_error`, never a cached clean verdict. With the default `block`, the withheld result is remembered for historical replay. The approved input limit counts the complete request, including numbered lines and output schema, not just raw tool text. Only complete clean scans are cached; identical content already cleared by the same scan policy is not sent to the scanner again.
+
+The policy does not withhold contact details that appear public, such as documentation or support addresses. This reduces noise in ordinary development, but the model can misjudge public versus private context; evaluate it on your own customer-data examples. For recognizable secret formats, run the independent [`pii_guard`](../pii_guard/README.md) before `pii`; neither plugin shares state with the other.
 
 ## Data and failure behavior
 
