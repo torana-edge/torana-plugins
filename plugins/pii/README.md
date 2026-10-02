@@ -133,14 +133,15 @@ its tool error. With Torana MCP connected, the agent can request review:
 
 This calls `torana_invoke`; it does not approve anything. Run `torana open`
 and choose **Approvals**, inspect the original content locally, then **Allow
-upstream** or **Keep withheld**. Only you can make that decision. CLI equivalents:
+upstream** or **Keep withheld**. Make this decision yourself, not through your
+agent. CLI equivalents (interactive terminal required):
 
 ```bash
 torana approvals list
 torana approvals show <reference>
-torana approvals approve <reference> --yes
-torana approvals decline <reference> --yes
-torana approvals revoke <reference> --yes
+torana approvals approve <reference>
+torana approvals decline <reference>
+torana approvals revoke <reference>
 ```
 
 Allowing permits one exact original result to reach the configured upstream.
@@ -156,8 +157,18 @@ stable. This does not override `pii_guard` or any other plugin's decision.
 Exact-result review needs a stable tool-call ID. Where the API omits one,
 scanning and withholding still work, but the error does not offer an allowance
 that could accidentally carry over to another call after compaction.
-An agent with unrestricted shell access can run operator CLI commands too;
-keep your harness's shell approval controls enabled.
+Decision commands ask you to type the last eight characters of the reference;
+they reject `--yes` and piped input. The browser requires an explicit review
+checkbox and a short-lived session proof. These safeguards do not isolate an
+agent with unrestricted access to your local shell or control-plane API. Deny
+operator approval commands and control-plane mutations in your harness's
+permissions or sandbox. The agent should request review through MCP, not run
+`torana approvals` decisions itself. Separate operator authorization is tracked
+in [Edge #467](https://github.com/torana-edge/torana-edge/issues/467); this
+human-exception feature must not be released before that blocker is resolved.
+Each conversation can request review of five new results per hour; replaying a
+pending request does not use another slot. Decisions retain a bounded,
+value-free audit history across restarts.
 
 ## Try it and check the result
 
