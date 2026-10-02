@@ -635,6 +635,9 @@ func translateSchema(schema map[string]any, path []pathStep, site schemaSite) []
 		case "object":
 			mutations = append(mutations, translateSchema(propSchema, currentPath, siteProperty)...)
 		case "array":
+			if !supportedArrayTraversal(propSchema) {
+				continue
+			}
 			if items, ok := propSchema["items"].(map[string]any); ok {
 				if itemType, _ := items["type"].(string); itemType == "object" {
 					// The each-step REPLACES the just-created scalar step: the
@@ -662,6 +665,17 @@ func supportedObjectTraversal(schema map[string]any) bool {
 		switch key {
 		case "type", "properties", "additionalProperties", "required", "minProperties", "maxProperties",
 			"description", "title", "default", "examples", "deprecated", "readOnly", "writeOnly", "$comment", "$schema", "$id":
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func supportedArrayTraversal(schema map[string]any) bool {
+	for key := range schema {
+		switch key {
+		case "type", "items", "minItems", "maxItems", "description", "title", "default", "examples", "deprecated", "readOnly", "writeOnly", "$comment", "$schema", "$id":
 		default:
 			return false
 		}

@@ -37,6 +37,9 @@ func TestApplicatorSubtreesStayExact(t *testing.T) {
 		"parent conditional": `{"type":"object","additionalProperties":false,"if":{"required":["env"]},"then":{"properties":{"env":{"required":["prod"]}}},"properties":{"env":{"type":"object","additionalProperties":true}}}`,
 		"union map":          `{"type":"object","additionalProperties":false,"properties":{"env":{"type":["object","null"],"additionalProperties":true}}}`,
 		"non-object AP":      `{"type":"object","additionalProperties":false,"properties":{"env":{"type":"string","additionalProperties":true}}}`,
+		"array enum":         `{"type":"object","additionalProperties":false,"properties":{"rows":{"type":"array","enum":[[{"env":{"prod":"on"}}]],"items":{"type":"object","properties":{"env":{"type":"object","additionalProperties":true}}}}}}`,
+		"array contains":     `{"type":"object","additionalProperties":false,"properties":{"rows":{"type":"array","contains":{"required":["env"]},"items":{"type":"object","properties":{"env":{"type":"object","additionalProperties":true}}}}}}`,
+		"array unique":       `{"type":"object","additionalProperties":false,"properties":{"rows":{"type":"array","uniqueItems":true,"items":{"type":"object","properties":{"env":{"type":"object","additionalProperties":true}}}}}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			reg, tools, changed := translateTools([]*pb.ToolDef{{Name: "run", ParametersJson: []byte(raw)}})

@@ -5,6 +5,9 @@ import "testing"
 // Every producer/consumer module pins the same protocol, without depending
 // on another plugin binary being installed or trusting call IDs globally.
 func TestSharedIntentContract(t *testing.T) {
+	if sharedIntentKey("conversation", "call", "read", "") != sharedIntentKey("conversation", "call", "read", "{}") {
+		t.Fatal("omitted parameterless arguments changed shared identity")
+	}
 	base := sharedIntentKey("conversation", "call", "read", `{"path":"server.go","n":9007199254740993}`)
 	if base == "" {
 		t.Fatal("valid occurrence lacks a key")

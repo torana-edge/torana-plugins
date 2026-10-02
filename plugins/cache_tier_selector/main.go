@@ -235,12 +235,14 @@ func init() {
 			}
 			found = false
 		}
+		var act activity
 		if found {
 			// A sticky prefix still counts as conversation activity. Otherwise
 			// continuous cache hits look like one long idle gap when a later
 			// prefix needs a new decision and auto mode buys the longer tier.
 			if cfg.Mode == "auto" && clockErr == nil {
-				if _, err := recordActivity(meta.ConversationID, now); err != nil && !isAdvisory(err) {
+				act, err = recordActivity(meta.ConversationID, now)
+				if err != nil && !isAdvisory(err) {
 					return sdk.RequestResult{}, err
 				}
 			}
@@ -295,12 +297,8 @@ func init() {
 			return sdk.RequestResult{}, clockErr
 		}
 		cleanupExpiredState(now, cfg)
-		var act activity
 		if !found {
 			act, err = recordActivity(meta.ConversationID, now)
-		} else if cfg.Mode == "auto" {
-			// The expired-decision path recorded this turn above.
-			_, err = sdk.StateGetJSON("activity/"+meta.ConversationID, &act)
 		}
 		if err != nil {
 			// A failed advisory activity write must not create an

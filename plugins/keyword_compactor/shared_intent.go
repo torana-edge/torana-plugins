@@ -13,6 +13,11 @@ func sharedIntentKey(conversation, id, name, arguments string) string {
 	if conversation == "" || id == "" || name == "" {
 		return ""
 	}
+	// Harnesses can omit arguments for a parameterless function. History
+	// restoration treats that as an empty object; publish/consume identically.
+	if arguments == "" {
+		arguments = "{}"
+	}
 	args, err := strictjson.DecodeObject([]byte(arguments))
 	if err != nil || args == nil {
 		return ""
