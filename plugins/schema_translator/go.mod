@@ -2,6 +2,6 @@ module github.com/torana-edge/torana-plugins/plugins/schema_translator
 
 go 1.25.0
 
-require github.com/torana-edge/torana-plugin-sdk v0.7.1
+require github.com/torana-edge/torana-plugin-sdk v0.7.2-0.20261002192050-3a222c680d84
 
 require google.golang.org/protobuf v1.36.11

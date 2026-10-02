@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "torana/pii",
   "name": "pii",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "abi_version": "v1",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "block",
@@ -17,6 +17,10 @@
     }
   ],
   "permissions": [
+    {
+      "name": "env.host_call.torana_tool_result_release",
+      "description": "Register exact withheld results and honor host-owned user decisions without storing their content"
+    },
     {
       "name": "env.serve_http",
       "description": "Return value-free explanations for the host-bound session"

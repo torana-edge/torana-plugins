@@ -89,7 +89,7 @@ func replayKey(digest string) string { return "replay/occurrence/" + digest }
 // replayPrior reapplies a durable replacement. A temporary scanner failure is
 // retried while the occurrence remains in the newest tool-result batch, but is
 // replayed once it becomes history so old unscanned bytes cannot leak later.
-func replayPrior(ctx context.Context, msg *pbv1.Message, view sdk.ToolResultView, latest bool) (bool, error) {
+func replayPrior(ctx context.Context, messageIndex int, msg *pbv1.Message, view sdk.ToolResultView, latest bool) (bool, error) {
 	digest, err := occurrenceDigest(ctx, msg, view)
 	if err != nil {
 		return false, err
@@ -106,6 +106,15 @@ func replayPrior(ctx context.Context, msg *pbv1.Message, view sdk.ToolResultView
 	if err := validateReplayRecord(record); err != nil {
 		return false, fmt.Errorf("invalid replay record at %q: %w", key, err)
 	}
+	approval, err := sdk.ToolResultRelease(messageIndex, view.Block, false)
+	if err != nil {
+		return false, err
+	}
+	if approval.Approved {
+		// Handled, but deliberately unchanged: skip replay AND scanning, for
+		// latest results as well as history. Approval is never a clean verdict.
+		return true, nil
+	}
 	if latest && record.Outcome == outcomeTransient {
 		return false, nil
 	}
@@ -113,10 +122,22 @@ func replayPrior(ctx context.Context, msg *pbv1.Message, view sdk.ToolResultView
 	return true, err
 }
 
-func replaceAndRemember(ctx context.Context, msg *pbv1.Message, view sdk.ToolResultView, replacement string, outcome replayOutcome) error {
+func replaceAndRemember(ctx context.Context, messageIndex int, msg *pbv1.Message, view sdk.ToolResultView, replacement string, outcome replayOutcome) error {
 	digest, err := occurrenceDigest(ctx, msg, view)
 	if err != nil {
 		return err
+	}
+	approval, err := sdk.ToolResultRelease(messageIndex, view.Block, true)
+	if err != nil {
+		return err
+	}
+	if approval.Approved {
+		return nil
+	}
+	if approval.Reference != "" {
+		replacement += " If this seems mistaken, request user review with Torana MCP: torana_invoke, namespace torana, operation redactions.request_release, input {\"reference\":\"" + approval.Reference + "\"}. Only the user can allow this exact result in Torana's Approvals page or CLI. Do not bypass the scan by re-reading smaller pieces."
+	} else {
+		replacement += " This result has no stable tool-call ID for exact-result human review."
 	}
 	record := replayRecord{Version: 2, Outcome: outcome, Replacement: replacement}
 	winner, err := writeReplayDecision(replayKey(digest), record)

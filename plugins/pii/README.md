@@ -36,6 +36,12 @@ and review that revision before proceeding.
 
 ## Configure
 
+For the UI path, run `torana open`, go to **Settings**, add your local model
+as a provider and **Save settings**. Use OpenAI format and No authentication
+for an unauthenticated OpenAI-compatible server; set its default model ID if
+required. Then open **Pipeline → pii → Resource bindings → scanner** and select
+that saved provider. Having a server running does not register it with Torana.
+
 ```bash
 torana plugin config get pii > plugin-settings.json
 ```
@@ -81,6 +87,7 @@ Permissions must equal the manifest's requested set; budgets can be lower.
   "permissions": [
     "env.cache_get",
     "env.cache_set",
+    "env.host_call.torana_tool_result_release",
     "env.model_complete",
     "env.plugin_config",
     "env.serve_http",
@@ -114,6 +121,43 @@ torana plugin status
 A missing required binding or stale digest prevents activation. Status should
 show the intended bundle loaded, not merely installed. The local UI offers the
 same inspect/configure/approve/enable flow. Rebuilds need a new digest approval.
+
+## Allow a result you have checked
+
+When `pii` flags harmless output, it includes an opaque result reference in
+its tool error. With Torana MCP connected, the agent can request review:
+
+```json
+{"namespace":"torana","operation":"redactions.request_release","input":{"reference":"tr_REPLACE_WITH_THE_RESULT_REFERENCE"}}
+```
+
+This calls `torana_invoke`; it does not approve anything. Run `torana open`
+and choose **Approvals**, inspect the original content locally, then **Allow
+upstream** or **Keep withheld**. Only you can make that decision. CLI equivalents:
+
+```bash
+torana approvals list
+torana approvals show <reference>
+torana approvals approve <reference> --yes
+torana approvals decline <reference> --yes
+torana approvals revoke <reference> --yes
+```
+
+Allowing permits one exact original result to reach the configured upstream.
+Torana scopes it to the conversation, tool-call ID, content fingerprint and
+PII bundle digest. Changed content or another call needs fresh review. The
+decision persists across Torana restarts, but original content is never stored:
+your harness must resend that matching result. If it cannot, there is no copy
+for Torana to restore. Approval skips both the prior replacement and another
+scan; it is not cached as a clean classification. Revocation restores withholding
+on future requests, but cannot recall content already sent. Approving or revoking
+historical output can change the provider's cached prefix once; later replay is
+stable. This does not override `pii_guard` or any other plugin's decision.
+Exact-result review needs a stable tool-call ID. Where the API omits one,
+scanning and withholding still work, but the error does not offer an allowance
+that could accidentally carry over to another call after compaction.
+An agent with unrestricted shell access can run operator CLI commands too;
+keep your harness's shell approval controls enabled.
 
 ## Try it and check the result
 

@@ -23,7 +23,10 @@ import (
 func newHarness(t *testing.T) *sdktest.Harness {
 	t.Helper()
 	resetConfigForTest()
-	return sdktest.New(t).StubModelComplete(defaultScannerStub)
+	return sdktest.New(t).StubModelComplete(defaultScannerStub).
+		StubHostCall("torana_tool_result_release", func(string) (string, error) {
+			return sdktest.HostResultValue([]byte(`{"reference":"tr_` + strings.Repeat("a", 64) + `","approved":false}`)), nil
+		})
 }
 
 var testScannerPatterns = []struct {

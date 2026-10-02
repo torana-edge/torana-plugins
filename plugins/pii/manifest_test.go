@@ -45,6 +45,7 @@ func TestManifestPermissionSetExact(t *testing.T) {
 	want := []string{
 		"env.cache_get",
 		"env.cache_set",
+		"env.host_call.torana_tool_result_release",
 		"env.model_complete",
 		"env.plugin_config",
 		"env.serve_http",
