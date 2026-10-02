@@ -87,6 +87,53 @@ func stableReplayToolCallID(id string) string {
 
 func replayKey(digest string) string { return "replay/occurrence/" + digest }
 
+// Upgrade our own persisted security decisions without changing their keys.
+// Dropping old keys would let already-withheld historical output through.
+func readReplayDecision(key string) (replayRecord, *pbv1.StateValue, bool, error) {
+	for attempt := 0; attempt < 4; attempt++ {
+		value, found, err := sdk.StateGetVersioned(key)
+		if err != nil || !found {
+			return replayRecord{}, value, found, err
+		}
+		var record replayRecord
+		if err := json.Unmarshal([]byte(value.Value), &record); err != nil {
+			return replayRecord{}, nil, false, fmt.Errorf("decode replay record at %q: %w", key, err)
+		}
+		upgrade := record.Version == 2
+		if upgrade {
+			switch record.Outcome {
+			case outcomeTransient:
+				record.Reason = sdk.ToolResultReleaseReason{Kind: "scan_failure"}
+			case outcomeSensitive:
+				record.Reason = sdk.ToolResultReleaseReason{Kind: "findings", Findings: []sdk.ToolResultReleaseFinding{{Type: "unspecified", Line: 0}}}
+			}
+			record.Version = 3
+			// v2 sometimes stored the rendered approval suffix. Regenerate it
+			// from the current host decision, never replay a stale reference.
+			record.Replacement, _, _ = strings.Cut(record.Replacement, " If this seems mistaken, request user review with Torana MCP:")
+			record.Replacement = strings.TrimSuffix(record.Replacement, " This result has no stable tool-call ID for exact-result human review.")
+		}
+		if err := validateReplayRecord(record); err != nil {
+			return replayRecord{}, nil, false, fmt.Errorf("invalid replay record at %q: %w", key, err)
+		}
+		if !upgrade {
+			return record, value, true, nil
+		}
+		raw, err := json.Marshal(record)
+		if err != nil {
+			return replayRecord{}, nil, false, err
+		}
+		result, err := sdk.StateCompareAndSet(key, string(raw), &value.Version)
+		if err != nil {
+			return replayRecord{}, nil, false, err
+		}
+		if result.GetApplied() {
+			return record, &pbv1.StateValue{Value: string(raw), Version: result.GetVersion()}, true, nil
+		}
+	}
+	return replayRecord{}, nil, false, fmt.Errorf("replay decision at %q changed repeatedly", key)
+}
+
 // replayPrior reapplies a durable replacement. A temporary scanner failure is
 // retried while the occurrence remains in the newest tool-result batch, but is
 // replayed once it becomes history so old unscanned bytes cannot leak later.
@@ -96,16 +143,12 @@ func replayPrior(ctx context.Context, messageIndex int, msg *pbv1.Message, view 
 		return false, err
 	}
 	key := replayKey(digest)
-	var record replayRecord
-	found, err := sdk.StateGetJSON(key, &record)
+	record, _, found, err := readReplayDecision(key)
 	if err != nil {
 		return false, err
 	}
 	if !found {
 		return false, nil
-	}
-	if err := validateReplayRecord(record); err != nil {
-		return false, fmt.Errorf("invalid replay record at %q: %w", key, err)
 	}
 	approval, err := sdk.ToolResultRelease(messageIndex, view.Block, nil)
 	if err != nil {
@@ -176,16 +219,9 @@ func resolveCleanReplay(ctx context.Context, messageIndex int, msg *pbv1.Message
 	}
 	key := replayKey(digest)
 	for attempt := 0; attempt < 4; attempt++ {
-		value, found, err := sdk.StateGetVersioned(key)
+		record, value, found, err := readReplayDecision(key)
 		if err != nil || !found {
 			return false, err
-		}
-		var record replayRecord
-		if err := json.Unmarshal([]byte(value.Value), &record); err != nil {
-			return false, fmt.Errorf("decode replay record at %q: %w", key, err)
-		}
-		if err := validateReplayRecord(record); err != nil {
-			return false, fmt.Errorf("invalid replay record at %q: %w", key, err)
 		}
 		if record.Outcome == outcomeSensitive {
 			approval, err := sdk.ToolResultRelease(messageIndex, view.Block, &record.Reason)
@@ -214,19 +250,12 @@ func writeReplayDecision(key string, proposed replayRecord) (replayRecord, error
 		return replayRecord{}, err
 	}
 	for attempt := 0; attempt < 4; attempt++ {
-		value, found, err := sdk.StateGetVersioned(key)
+		current, value, found, err := readReplayDecision(key)
 		if err != nil {
 			return replayRecord{}, err
 		}
 		var expected *string
 		if found {
-			var current replayRecord
-			if err := json.Unmarshal([]byte(value.Value), &current); err != nil {
-				return replayRecord{}, fmt.Errorf("decode replay record at %q: %w", key, err)
-			}
-			if err := validateReplayRecord(current); err != nil {
-				return replayRecord{}, fmt.Errorf("invalid replay record at %q: %w", key, err)
-			}
 			currentJSON, _ := json.Marshal(current)
 			proposedJSON, _ := json.Marshal(proposed)
 			if current.Outcome == outcomeSensitive || string(currentJSON) == string(proposedJSON) {

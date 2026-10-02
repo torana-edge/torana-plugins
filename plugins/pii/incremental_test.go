@@ -183,7 +183,7 @@ func TestCleanScanAppliesConcurrentSensitiveWinner(t *testing.T) {
 	h.StubModelComplete(func(*pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
 		var key string
 		for _, call := range h.Calls() {
-			if call.Command != "env.state_get" {
+			if call.Command != "env.state_get_versioned" {
 				continue
 			}
 			var args pbv1.StateGetArgs
@@ -217,7 +217,7 @@ func TestCleanScanAppliesConcurrentSensitiveWinner(t *testing.T) {
 
 func TestReplayReadFailureFailsClosed(t *testing.T) {
 	h := newHarness(t)
-	h.StubHostCall("env.state_get", func(string) (string, error) {
+	h.StubHostCall("env.state_get_versioned", func(string) (string, error) {
 		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "state database unavailable"), nil
 	})
 	result := h.BeforeRequest(reqWith(toolMsg("call", "read", textArm("ordinary output"))))
