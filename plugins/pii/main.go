@@ -19,8 +19,9 @@
 //   - A finding replaces only the affected result with an explicit tool error.
 //     The replacement is persisted without retaining the sensitive value and
 //     replayed byte-for-byte on later turns and after restarts.
-//   - max_scan_bytes is a BYTE budget; oversized results fail before calling
-//     the model. No prefix is treated as a scan of the full result. Zero is unbounded.
+//   - max_scan_bytes is a BYTE budget. Oversized results skip inference with
+//     block; allow scans a rune-safe prefix and still honours findings.
+//     No prefix is treated as a clean scan of the full result. Zero is unbounded.
 //   - The model destination is the required "scanner" resource declared by
 //     the manifest. Provider, URL, model, credentials, and budgets never enter
 //     plugin configuration or guest memory.
@@ -37,6 +38,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
@@ -256,6 +258,9 @@ func init() {
 						continue
 					}
 					replacement := fmt.Sprintf("Tool output withheld because pii could not complete the scan for %s. Reason: %s. This is a scan failure, not a confirmed finding. Check scanner settings, input limits or availability before retrying, or skip this result; the original output was not sent upstream.", toolLabel(toolName), sf.msg)
+					if cfg.MaxScanBytes > 0 && len(ex.text) > cfg.MaxScanBytes {
+						replacement = fmt.Sprintf("Tool output withheld because %s is larger than the configured max_scan_bytes limit. No model scan was performed. Request a smaller range within the limit or skip this result; the original output was not sent upstream.", toolLabel(toolName))
+					}
 					if err := replaceAndRemember(ctx, msg, view, replacement, outcomeTransient); err != nil {
 						return sdk.RequestResult{}, fmt.Errorf("pii: replace scan failure: %w", err)
 					}
@@ -376,12 +381,23 @@ func numberedScanContent(content string) string {
 }
 
 func modelScan(content, toolName string) ([]finding, error) {
-	if cfg.MaxScanBytes > 0 && len(content) > cfg.MaxScanBytes {
+	truncated := cfg.MaxScanBytes > 0 && len(content) > cfg.MaxScanBytes
+	if truncated && failClosed() {
 		// A prefix cannot establish a clean verdict for the complete result.
 		// Avoid spending model inference on an intentionally incomplete scan.
 		return nil, &scannerFailure{"tool output exceeds max_scan_bytes; no model scan was performed"}
 	}
 	scanContent := content
+	if truncated {
+		end := cfg.MaxScanBytes
+		for end > 0 && !utf8.RuneStart(content[end]) {
+			end--
+		}
+		if end == 0 {
+			return nil, &scannerFailure{"max_scan_bytes is too small for the first text character"}
+		}
+		scanContent = content[:end]
+	}
 	maxTokens := uint32(512)
 	temperature := 0.0
 	strict := true
@@ -451,6 +467,9 @@ func modelScan(content, toolName string) ([]finding, error) {
 		return nil, &scannerFailure{"pii scan: contradictory verdict (pii false with findings)"}
 	}
 	if !pii {
+		if truncated {
+			return nil, &scannerFailure{"pii scan incomplete: tool output exceeds max_scan_bytes"}
+		}
 		return nil, nil
 	}
 	// Bound the reporting: a hostile but valid model reply can return

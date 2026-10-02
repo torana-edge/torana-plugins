@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
@@ -752,27 +753,45 @@ func TestExtractJSONCases(t *testing.T) {
 	}
 }
 
-// Oversized results never spend inference on a partial scan or cache a clean verdict.
-func TestMaxScanBytesRejectsBeforeModelCall(t *testing.T) {
-	for _, onError := range []string{"block", "allow"} {
-		t.Run(onError, func(t *testing.T) {
+// Block skips oversized scans; allow retains positive detection in a bounded prefix.
+func TestMaxScanBytesOversizedPolicies(t *testing.T) {
+	for _, tc := range []struct {
+		name, policy, verdict string
+		calls                 int
+		blocked               bool
+	}{
+		{"block", "block", `{"pii":true,"findings":[{"type":"api_key","line":1}]}`, 0, true},
+		{"allow_finding", "allow", `{"pii":true,"findings":[{"type":"api_key","line":1}]}`, 1, true},
+		{"allow_clean_prefix", "allow", `{"pii":false,"findings":[]}`, 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
-			h.SetConfig(`{"max_scan_bytes":100,"on_error":"` + onError + `"}`)
-			h.StubModelComplete(modelStub(`{"pii":true,"findings":[{"type":"api_key","line":1}]}`))
-			content := strings.Repeat("日本語", 500)
+			h.SetConfig(`{"max_scan_bytes":100,"on_error":"` + tc.policy + `"}`)
+			h.StubModelComplete(func(args *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
+				text := strings.SplitN(sdk.Text(args.Messages[1]), "Output to scan:\n", 2)[1]
+				prefix := strings.TrimPrefix(text, "1: ")
+				if len(prefix) > 100 || !utf8.ValidString(prefix) || !strings.HasPrefix(prefix, "API_KEY=synthetic_secret ") {
+					t.Fatalf("invalid bounded scan: %q", prefix)
+				}
+				return modelResult(tc.verdict), nil, nil
+			})
+			content := "API_KEY=synthetic_secret " + strings.Repeat("日本語", 500)
 			res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm(content))))
 			if !requestCompleted(res) {
 				t.Fatalf("err=%v", res.Err)
 			}
-			if calls := countCommand(h, "env.model_complete"); calls != 0 {
-				t.Fatalf("oversized result made %d model calls, want zero", calls)
+			if calls := countCommand(h, "env.model_complete"); calls != tc.calls {
+				t.Fatalf("oversized result made %d model calls, want %d", calls, tc.calls)
 			}
 			if n := countCommand(h, "env.cache_set"); n != 0 {
 				t.Fatalf("incomplete scan wrote %d clean cache entries", n)
 			}
-			_, blocked := protectedMessage(t, h)
-			if want := onError == "block"; blocked != want {
-				t.Fatalf("blocked=%v, want %v for on_error=%s", blocked, want, onError)
+			message, blocked := protectedMessage(t, h)
+			if blocked != tc.blocked {
+				t.Fatalf("blocked=%v, want %v", blocked, tc.blocked)
+			}
+			if tc.policy == "block" && !strings.Contains(message, "Request a smaller range within the limit") {
+				t.Fatalf("missing size-specific recovery: %q", message)
 			}
 		})
 	}

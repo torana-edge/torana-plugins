@@ -27,7 +27,7 @@
       "type": "integer",
       "minimum": 0,
       "default": 0,
-      "description": "Maximum tool-output bytes eligible for a model scan; zero is unbounded. Oversized results are not sent to the scanner and follow on_error; they are never cached as clean.",
+      "description": "Maximum tool-output bytes scanned; zero is unbounded. Oversized results skip inference with block. With allow, a bounded prefix is scanned: findings still withhold the result, but a clean prefix allows the unscanned remainder. Partial scans are never cached as clean.",
       "x-torana-advanced": true
     }
   }
