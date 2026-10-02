@@ -52,9 +52,8 @@ func isAdvisory(err error) bool {
 const (
 	intentCacheKey  = "intent"
 	compactionCache = "compacted"
-	// Namespaced by plugin. env.cache_* is a SHARED store — unlike
-	// env.state_*, which the host keys by module name — so two plugins using
-	// the same namespace string read and write each other's entries.
+	// Transformation caches are plugin-private; only the explicit shared
+	// intent handoff is readable by another approved plugin.
 	policyCompactionCache = "compactor/policy_compacted"
 	minSummarizerChars    = 2000
 	derivedIntentPrefix   = "torana-derived-intent-v1:"

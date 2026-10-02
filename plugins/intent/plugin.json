@@ -32,7 +32,7 @@
     },
     {
       "name": "env.shared_cache_set",
-      "description": "Publish intent:<tool_call_id> values for approved compactor consumers"
+      "description": "Publish conversation- and invocation-scoped captured intent for approved compactor consumers"
     },
     {
       "name": "env.emit_metric",

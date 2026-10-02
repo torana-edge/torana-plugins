@@ -34,7 +34,7 @@
     },
     {
       "name": "env.shared_cache_get",
-      "description": "Read optional intent:<tool_call_id> values published by the intent plugin"
+      "description": "Read optional conversation- and invocation-scoped captured intent published by the intent plugin"
     },
     {
       "name": "env.emit_metric",

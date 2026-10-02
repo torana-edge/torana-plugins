@@ -58,14 +58,11 @@ const (
 	contextLines          = 2        // lines of context around keyword matches
 	maxKeepLines          = 200      // HARD cap on kept lines (selection is bounded)
 	maxResultBytes        = 8000     // total output budget, truncation notice included
-	intentCacheKey        = "intent" // cache key for intent (set by the intent plugin)
+	intentCacheKey        = "intent" // diagnostic label; sharedIntentKey owns the handoff key
 	derivedIntentPrefix   = "torana-derived-intent-v1:"
 	maxDerivedIntentBytes = 500
-	// Namespaced by plugin. env.cache_* is a SHARED store — unlike
-	// env.state_*, which the host keys by module name — so two plugins using
-	// the same namespace string read and write each other's entries. These
-	// namespaces are disjoint from compactor's ("compactor/policy_compacted",
-	// "compacted"), so the two alternative compactors never cross-apply.
+	// Transformation caches are plugin-private. The separate shared intent
+	// handoff never makes replacements reusable across compactor modules.
 	policyCompactionCache  = "keyword_compactor/policy_compacted"
 	keywordCompactionCache = "keyword_compacted"
 )
