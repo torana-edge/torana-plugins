@@ -2,13 +2,14 @@
   "schema_version": 1,
   "id": "torana/cache_warmer",
   "name": "cache_warmer",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "abi_version": "v1",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "pass",
   "repository": "https://github.com/torana-edge/torana-plugins",
   "description": "Keeps a chosen conversation's prompt cache alive across an idle gap. Opt-in per conversation and bounded by a deadline and a break-even refresh budget, because refreshing forever costs more than the cache miss it avoids.",
   "hooks": [
+    {"name": "run_on_http_request"},
     {
       "name": "run_before_request"
     },
@@ -17,6 +18,7 @@
     }
   ],
   "permissions": [
+    {"name": "env.serve_http", "description": "Expose warming opt-in counts and timing settings without refresh requests"},
     {
       "name": "env.background_tick",
       "description": "Refresh caches while no request is in flight \u2014 the only time a cache can lapse"

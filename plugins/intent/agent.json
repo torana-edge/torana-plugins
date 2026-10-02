@@ -1,0 +1,5 @@
+{
+ "schema_version": 2,
+ "namespace": {"title":"Tool intent","summary":"Inspect the intent convention and history-fill mode without reading captured intent.","categories":["context"]},
+ "operations": [{"id":"status","method":"GET","path":"/status","description":"Read the injected intent-field name and history-fill mode; no cached intent text is returned.","risk":"read","idempotent":true,"model_access":"read","conversation_binding":"none","output_schema":{"type":"object","required":["plugin","fill","intent_field"],"additionalProperties":false,"properties":{"plugin":{"const":"intent"},"fill":{"enum":["heuristic","off"]},"intent_field":{"const":"i"}}}}]
+}

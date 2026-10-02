@@ -8,6 +8,8 @@ Apply explicit deterministic or keyword policies to selected tool results. Usefu
 
 ## Install and inspect
 
+With [Torana MCP connected](https://torana.sh/docs/mcp/), ask for compaction limits. `keyword_compactor.status` returns minimum eligible content bytes, maximum result bytes, retained-line cap and policy count. It does not compact anything or return policy patterns, rerun commands or cached output. Rebuild and approve the new digest including `env.serve_http` to expose the operation.
+
 Start [Torana](https://github.com/torana-edge/torana-edge/blob/main/docs/QUICKSTART.md)
 first. Commands use `torana` on PATH; use `./torana` from a source checkout.
 Run installation from the host checkout or supply its configured plugin
@@ -69,6 +71,7 @@ Permissions must equal the manifest's requested set; budgets can be lower.
 {
   "digest": "sha256:REPLACE_WITH_YOUR_INSPECTED_DIGEST",
   "permissions": [
+    "env.serve_http",
     "env.cache_get",
     "env.cache_set",
     "env.shared_cache_get",

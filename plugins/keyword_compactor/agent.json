@@ -1,0 +1,5 @@
+{
+ "schema_version": 2,
+ "namespace": {"title":"Keyword compactor","summary":"Inspect deterministic compaction limits without reading tool output or policy patterns.","categories":["optimization"]},
+ "operations": [{"id":"status","method":"GET","path":"/status","description":"Read eligibility/output byte limits, retained-line cap and policy count. No compaction runs, cached content or policy patterns are returned.","risk":"read","idempotent":true,"model_access":"read","conversation_binding":"none","output_schema":{"type":"object","required":["plugin","policy_count","min_content_bytes","max_result_bytes","max_keep_lines"],"additionalProperties":false,"properties":{"plugin":{"const":"keyword_compactor"},"policy_count":{"type":"integer"},"min_content_bytes":{"type":"integer"},"max_result_bytes":{"type":"integer"},"max_keep_lines":{"type":"integer"}}}}]
+}

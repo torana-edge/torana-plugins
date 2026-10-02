@@ -8,6 +8,8 @@ Opt a conversation into periodic refresh requests, with a deadline and break-eve
 
 ## Install and inspect
 
+With [Torana MCP connected](https://torana.sh/docs/mcp/), ask how warming is configured. `cache_warmer.status` returns distinct configured opt-in count, deadline duration and interval override—not active warming count or proof of a cache hit. It exposes no conversation IDs, replay content, providers or models, and makes no refresh requests or state changes. Rebuild and approve the new digest including `env.serve_http` to expose the operation.
+
 Start [Torana](https://github.com/torana-edge/torana-edge/blob/main/docs/QUICKSTART.md)
 first. Commands use `torana` on PATH; use `./torana` from a source checkout.
 Run installation from the host checkout or supply its configured plugin
@@ -56,6 +58,7 @@ Permissions must equal the manifest's requested set; budgets can be lower.
 {
   "digest": "sha256:REPLACE_WITH_YOUR_INSPECTED_DIGEST",
   "permissions": [
+    "env.serve_http",
     "env.background_tick",
     "env.cache_policy",
     "env.host_call.torana_send_request",

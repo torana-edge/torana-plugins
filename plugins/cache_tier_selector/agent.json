@@ -1,0 +1,5 @@
+{
+ "schema_version": 2,
+ "namespace": {"title":"Cache tier selector","summary":"Inspect cache-tier mode and idle-gap settings without altering live cache markers.","categories":["caching"]},
+ "operations": [{"id":"status","method":"GET","path":"/status","description":"Read configured mode, idle-gap threshold and activity retention. A zero threshold derives from the bound policy; this does not reveal an active tier, test pricing readiness or change a cache marker.","risk":"read","idempotent":true,"model_access":"read","conversation_binding":"none","output_schema":{"type":"object","required":["plugin","mode","min_gap_seconds_for_long_tier","activity_retention_days"],"additionalProperties":false,"properties":{"plugin":{"const":"cache_tier_selector"},"mode":{"enum":["auto","short","long","off"]},"min_gap_seconds_for_long_tier":{"type":"integer"},"activity_retention_days":{"type":"integer"}}}}]
+}
