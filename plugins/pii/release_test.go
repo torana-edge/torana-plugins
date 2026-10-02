@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
+	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"github.com/torana-edge/torana-plugin-sdk/sdktest"
 	"google.golang.org/protobuf/proto"
@@ -53,6 +55,48 @@ func TestHumanApprovalOverridesReplayWithoutRescanOrCleanCache(t *testing.T) {
 	}
 	if !proto.Equal(revoked, blocked) || countCommand(h, "env.model_complete") != calls {
 		t.Fatal("revocation did not restore stable replay")
+	}
+}
+
+func TestSavedReasonRegistersCurrentBundleReferenceWithoutRescanning(t *testing.T) {
+	h := newHarness(t)
+	h.StubModelComplete(modelStub(`{"pii":true,"findings":[{"type":"api_key","line":2}]}`))
+	original := toolMsg("stable-call", "Read", textArm("safe first line\nsynthetic output"))
+	if result := h.BeforeRequest(reqWith(proto.Clone(original).(*pb.Message))); result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	scans := countCommand(h, "env.model_complete")
+	registered := false
+	h.StubHostCall("torana_tool_result_release", func(args string) (string, error) {
+		var input struct {
+			Register bool                         `json:"register"`
+			Reason   *sdk.ToolResultReleaseReason `json:"reason"`
+		}
+		if err := json.Unmarshal([]byte(args), &input); err != nil {
+			t.Fatal(err)
+		}
+		if !input.Register {
+			return sdktest.HostResultValue([]byte(`{"reference":"","approved":false}`)), nil
+		}
+		if input.Reason == nil || input.Reason.Kind != "findings" || input.Reason.Findings[0].Type != "api_key" || input.Reason.Findings[0].Line != 2 {
+			t.Fatalf("lost saved reason: %+v", input)
+		}
+		registered = true
+		return sdktest.HostResultValue([]byte(`{"reference":"tr_` + strings.Repeat("b", 64) + `","approved":false}`)), nil
+	})
+	request := reqWith(proto.Clone(original).(*pb.Message), incrementalTextMessage("continue"))
+	if result := h.BeforeRequest(request); result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	text, _ := incrementalResultText(t, request.Messages[0])
+	if !registered || !strings.Contains(text, "tr_"+strings.Repeat("b", 64)) || strings.Contains(text, "tr_"+strings.Repeat("a", 64)) || countCommand(h, "env.model_complete") != scans {
+		t.Fatalf("stale reference or rescan: %s", text)
+	}
+}
+
+func TestUnsupportedReplaySchemaDoesNotPassOriginalOutput(t *testing.T) {
+	if err := validateReplayRecord(replayRecord{Version: 2, Outcome: outcomeSensitive, Replacement: "old diagnostic"}); err == nil {
+		t.Fatal("accepted unsupported pre-release ledger")
 	}
 }
 

@@ -136,6 +136,13 @@ and choose **Approvals**, inspect the original content locally, then **Allow
 upstream** or **Keep withheld**. Make this decision yourself, not through your
 agent. CLI equivalents (interactive terminal required):
 
+The review shows the host-observed tool name, file path for recognized read tools,
+and when the result was first withheld. It also shows the scanner's initial
+categories and returned-output line numbers, or **scan failure** (not a confirmed
+finding). These are model reports, not proof or verified file positions. Torana
+keeps this initial context fixed, stores no original output or arbitrary tool
+arguments, and still needs you to inspect the original locally.
+
 ```bash
 torana approvals list
 torana approvals show <reference>

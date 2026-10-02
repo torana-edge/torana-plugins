@@ -228,7 +228,7 @@ func init() {
 					found = false
 				}
 				if found && cached != "" {
-					protected, err := resolveCleanReplay(ctx, msg, view)
+					protected, err := resolveCleanReplay(ctx, messageIndex, msg, view)
 					if err != nil {
 						return sdk.RequestResult{}, fmt.Errorf("pii: clear recovered scan failure: %w", err)
 					}
@@ -248,7 +248,7 @@ func init() {
 					}
 					// Scanner failure. Fail-closed by default.
 					if cfg.OnError == "allow" {
-						protected, resolveErr := resolveCleanReplay(ctx, msg, view)
+						protected, resolveErr := resolveCleanReplay(ctx, messageIndex, msg, view)
 						if resolveErr != nil {
 							return sdk.RequestResult{}, fmt.Errorf("pii: clear allowed scan failure: %w", resolveErr)
 						}
@@ -268,7 +268,7 @@ func init() {
 					continue
 				}
 				if len(findings) > 0 {
-					if err := replaceAndRemember(ctx, messageIndex, msg, view, blockMessage(toolName, findings), outcomeSensitive); err != nil {
+					if err := replaceAndRemember(ctx, messageIndex, msg, view, blockMessage(toolName, findings), outcomeSensitive, findings...); err != nil {
 						return sdk.RequestResult{}, fmt.Errorf("pii: replace detected: %w", err)
 					}
 					if err := rememberExplanation(ctx, findings); err != nil {
@@ -277,7 +277,7 @@ func init() {
 					mutated = true
 					continue
 				}
-				protected, err := resolveCleanReplay(ctx, msg, view)
+				protected, err := resolveCleanReplay(ctx, messageIndex, msg, view)
 				if err != nil {
 					return sdk.RequestResult{}, fmt.Errorf("pii: clear recovered scan failure: %w", err)
 				}
