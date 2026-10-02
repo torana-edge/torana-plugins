@@ -293,11 +293,13 @@ func captureAndStrip(name, id, arguments string) (string, bool, error) {
 		// CacheSet is best-effort: a refusal affects FUTURE compaction, not
 		// the validity of this response, so it is logged and the current
 		// tool call still completes. The host records the refusal itself.
-		if err := sdk.SharedCacheSet(intentCacheKey+":"+id, intent); err != nil {
-			sdk.Log(fmt.Sprintf("intent: cache_set %s:%s refused: %v", intentCacheKey, id, err), sdk.LogLevelInfo)
-		}
 		conversation, _, err := sdk.MetaGet("intent:conversation")
 		if err == nil {
+			if sharedKey := sharedIntentKey(conversation, id, name, arguments); sharedKey != "" {
+				if err := sdk.SharedCacheSet(sharedKey, intent); err != nil {
+					sdk.Log("intent: shared occurrence publication failed", sdk.LogLevelInfo)
+				}
+			}
 			if key := occurrenceKey(conversation, id, name, args); key != "" {
 				if err := sdk.CacheSet(key, intent); err != nil {
 					sdk.Log(fmt.Sprintf("intent: cache_set occurrence refused: %v", err), sdk.LogLevelInfo)
@@ -449,7 +451,7 @@ func rehydrateHistoryIntents(req *pbv1.ChatRequest) (bool, error) {
 			}
 			if intent != "" {
 				// Publish the verified occurrence's captured intent for compactors.
-				if err := sdk.SharedCacheSet(intentCacheKey+":"+tc.Id, intent); err != nil {
+				if err := sdk.SharedCacheSet(sharedIntentKey(conversation, tc.Id, tc.Name, string(tc.Arguments)), intent); err != nil {
 					return false, fmt.Errorf("intent: cache_set %s:%s refused: %v", intentCacheKey, tc.Id, err)
 				}
 				restored++

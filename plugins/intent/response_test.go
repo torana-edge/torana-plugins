@@ -96,7 +96,7 @@ func TestResponseStripsInjectedIntent(t *testing.T) {
 	}
 	// The captured intent reaches the compactors through the shared cache,
 	// under the same key the stream path publishes.
-	if got, ok := h.SharedCache(intentCacheKey + ":call_1"); !ok || got != "where the currency mapping lives" {
+	if got, ok := h.SharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`)); !ok || got != "where the currency mapping lives" {
 		t.Fatalf("shared cache entry = %q (present=%v)", got, ok)
 	}
 }
@@ -115,8 +115,8 @@ func TestResponseStreamParity(t *testing.T) {
 	if streamArgs != responseArgs {
 		t.Fatalf("stream strip %s, response strip %s", streamArgs, responseArgs)
 	}
-	streamIntent, _ := streamed.SharedCache(intentCacheKey + ":call_1")
-	responseIntent, _ := direct.SharedCache(intentCacheKey + ":call_1")
+	streamIntent, _ := streamed.SharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`))
+	responseIntent, _ := direct.SharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`))
 	if streamIntent != responseIntent {
 		t.Fatalf("stream captured %q, response captured %q", streamIntent, responseIntent)
 	}
@@ -138,7 +138,7 @@ func TestResponseKeepsNativeIntentField(t *testing.T) {
 	if !res.PassedThrough {
 		t.Fatalf("a native \"i\" must pass byte-identical, got %v", res.Replacement)
 	}
-	if got, ok := h.SharedCache(intentCacheKey + ":call_1"); !ok || got != "native reason" {
+	if got, ok := h.SharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`)); !ok || got != "native reason" {
 		t.Fatalf("native intent was not forwarded to compactors (ok=%v value=%q)", ok, got)
 	}
 }
@@ -179,7 +179,7 @@ func TestResponseObservationalDispatchIsUntouched(t *testing.T) {
 	if res.Err != nil || !res.PassedThrough {
 		t.Fatalf("an observational dispatch must pass through, err=%v", res.Err)
 	}
-	if _, ok := h.SharedCache(intentCacheKey + ":call_1"); ok {
+	if _, ok := h.SharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`)); ok {
 		t.Fatal("an observational dispatch captured an intent a second time")
 	}
 }

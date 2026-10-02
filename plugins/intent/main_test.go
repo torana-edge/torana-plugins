@@ -31,7 +31,7 @@ func newHarness(t *testing.T) *sdktest.Harness {
 func inject(t *testing.T, params string) map[string]any {
 	t.Helper()
 	h := newHarness(t)
-	req := &pbv1.ChatRequest{Tools: []*pbv1.ToolDef{{
+	req := &pbv1.ChatRequest{ToranaMetaJson: []byte(`{"_conversation_id":"conv-1"}`), Tools: []*pbv1.ToolDef{{
 		Name:           "test_tool",
 		ParametersJson: []byte(params),
 	}}}
@@ -423,7 +423,7 @@ func TestRehydrationRestoresAndBridges(t *testing.T) {
 	if got := args[intentField]; got != "find the bug in server.go" {
 		t.Fatalf("restored intent=%v, want the captured value", got)
 	}
-	bridged, ok := h.SharedCache("intent:call_1")
+	bridged, ok := h.SharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`))
 	if !ok || bridged != "find the bug in server.go" {
 		t.Fatalf("intent was not bridged to intent:call_1 (ok=%v value=%q)", ok, bridged)
 	}
@@ -455,7 +455,7 @@ func TestRehydrationFillNeverCached(t *testing.T) {
 	if res.Err != nil || res.Request == nil {
 		t.Fatalf("expected replacement, err=%v", res.Err)
 	}
-	if _, ok := h.SharedCache("intent:call_1"); ok {
+	if _, ok := h.SharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`)); ok {
 		t.Fatal("a heuristic fill was cached — the intent cache must stay real-captured-only")
 	}
 	filled := false
@@ -525,7 +525,7 @@ func TestRehydrationPresentEmptyIsUnusable(t *testing.T) {
 	if want := "what server.go shows"; got != want {
 		t.Fatalf("present-empty cache entry must take the exact heuristic fill, got %q want %q", got, want)
 	}
-	if _, ok := h.SharedCache("intent:call_1"); ok {
+	if _, ok := h.SharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`)); ok {
 		t.Fatal("present-empty value must not be bridged")
 	}
 }
@@ -546,7 +546,7 @@ func TestRehydrationCacheRefusalErrors(t *testing.T) {
 // strips the value.
 func TestNativeIFieldRecordsMarkerAndIsNotStripped(t *testing.T) {
 	h := newHarness(t)
-	req := &pbv1.ChatRequest{Tools: []*pbv1.ToolDef{{
+	req := &pbv1.ChatRequest{ToranaMetaJson: []byte(`{"_conversation_id":"conv-1"}`), Tools: []*pbv1.ToolDef{{
 		Name:           "read",
 		ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"},"i":{"type":"string","description":"concise intent"}},"required":["path","i"]}`),
 	}}}
@@ -570,7 +570,7 @@ func TestNativeIFieldRecordsMarkerAndIsNotStripped(t *testing.T) {
 	if sig := emittedSig(t, res2); sig != "sig" {
 		t.Fatalf("native pass must keep the signature, got %q", sig)
 	}
-	if got, _ := h.SharedCache("intent:call_1"); got != "native intent" {
+	if got, _ := h.SharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`)); got != "native intent" {
 		t.Fatalf("native intent not captured: %q", got)
 	}
 }
@@ -589,7 +589,7 @@ func TestStreamExtractsIntentStripsAndClearsSignature(t *testing.T) {
 	if _, ok := args[intentField]; ok {
 		t.Fatal("\"i\" was not stripped from the emitted call")
 	}
-	if got, _ := h.SharedCache("intent:call_1"); got != "find the bug" {
+	if got, _ := h.SharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`)); got != "find the bug" {
 		t.Fatalf("intent not captured under intent:call_1: %q", got)
 	}
 	if _, ok := h.Cache(occurrenceKey("conv-1", "call_1", "read", map[string]any{"path": "server.go"})); !ok {
@@ -621,7 +621,7 @@ func TestStreamPassPreservesSignature(t *testing.T) {
 	if sig := emittedSig(t, res); sig != "sig" {
 		t.Fatalf("an unchanged call must keep its signature, got %q", sig)
 	}
-	if _, ok := h.SharedCache("intent:call_1"); ok {
+	if _, ok := h.SharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`)); ok {
 		t.Fatal("nothing to capture, nothing cached")
 	}
 	absent := false
@@ -646,11 +646,9 @@ func TestStreamFailOpenOnCallbackError(t *testing.T) {
 	if res.Err == nil {
 		t.Fatal("callback errors must propagate so failure_mode applies")
 	}
-	// The capture happens before the hadI read, so a failed
-	// strip must not retroactively uncache a valid capture — the block is
-	// what matters, and it is untouched.
-	if got, _ := h.SharedCache("intent:call_1"); got != "find the bug" {
-		t.Fatalf("a valid capture made before the failure must stand, got %q", got)
+	// A refused context read cannot establish a trustworthy shared scope.
+	if _, found := h.SharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`)); found {
+		t.Fatal("capture without a verified conversation must not enter shared cache")
 	}
 	// Context and native-field reads were attempted once each, with no retry.
 	gets := 0

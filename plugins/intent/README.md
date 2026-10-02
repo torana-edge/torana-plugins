@@ -43,6 +43,8 @@ torana plugin config apply intent --file plugin-settings.json --yes
 
 No bound resource slots are required. It requests private cache and separately approved shared-cache writes. The shared cache is visible to other plugins with the corresponding shared-cache grant.
 
+The compactor handoff is scoped to the host conversation ID, call ID, tool name and canonical tool arguments, excluding the injected `i` field. Reusing a call ID in another chat or with different inputs does not borrow that chat's intent. Missing identity uses the compactor's bounded fallback instead.
+
 ## Approve and enable
 
 Save this as `approval.json`. Replace the digest with the exact one you reviewed

@@ -62,6 +62,7 @@ func toolText(t *testing.T, req *pbv1.ChatRequest, mi int) string {
 // consumption gate) and a replayed tool call for name/args lookup.
 func bigToolRequest(content string) *pbv1.ChatRequest {
 	return &pbv1.ChatRequest{
+		ToranaMetaJson: []byte(`{"_conversation_id":"conv-1"}`),
 		Messages: []*pbv1.Message{
 			{Role: "system", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "You are a coding agent."}}}}},
 			{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "find the bug"}}}}},
@@ -386,7 +387,7 @@ func TestDeterministicConsumptionGate(t *testing.T) {
 func TestModelPathAppliesWithNamedService(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
-	h.SeedSharedCache("intent:call_1", "find the bug in server.go")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug in server.go")
 	var modelArgs *pbv1.ModelCompleteArgs
 	h.StubModelComplete(func(args *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
 		modelArgs = args
@@ -441,7 +442,7 @@ func TestModelAdvisoryRefusalSkipsWithoutRetry(t *testing.T) {
 		t.Run(code.String(), func(t *testing.T) {
 			h := newHarness(t)
 			h.SetConfig(modelConfig)
-			h.SeedSharedCache("intent:call_1", "find the bug")
+			h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
 			h.StubModelComplete(func(*pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
 				return nil, &pbv1.HostError{Code: code, Message: "stub refusal"}, nil
 			})
@@ -471,7 +472,7 @@ func TestModelContractRefusalErrors(t *testing.T) {
 		t.Run(code.String(), func(t *testing.T) {
 			h := newHarness(t)
 			h.SetConfig(modelConfig)
-			h.SeedSharedCache("intent:call_1", "find the bug")
+			h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
 			h.StubModelComplete(func(*pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
 				return nil, &pbv1.HostError{Code: code, Message: "stub refusal"}, nil
 			})
@@ -494,7 +495,7 @@ func TestUnusableModelCompletionsSkip(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)
 			h.SetConfig(modelConfig)
-			h.SeedSharedCache("intent:call_1", "find the bug")
+			h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
 			h.StubModelComplete(modelStub(completion))
 			h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 			res := h.BeforeRequest(bigToolRequest(bigContent()))
@@ -513,7 +514,7 @@ func TestUnusableModelCompletionsSkip(t *testing.T) {
 func TestMissingUsageDeclinesEconomicApplication(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
-	h.SeedSharedCache("intent:call_1", "find the bug")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
 	h.StubModelComplete(func(*pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
 		return modelResult("summary", nil), nil, nil
 	})
@@ -529,7 +530,7 @@ func TestMissingUsageDeclinesEconomicApplication(t *testing.T) {
 func TestEconomicGateDeclinesBatch(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
-	h.SeedSharedCache("intent:call_1", "find the bug")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
 	h.StubModelComplete(modelStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(false))
 	res := h.BeforeRequest(bigToolRequest(bigContent()))
@@ -551,8 +552,8 @@ func TestEconomicGateDeclinesBatch(t *testing.T) {
 func TestUncachedBatchEvaluatesTwice(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
-	h.SeedSharedCache("intent:call_1", "find the bug")
-	h.SeedSharedCache("intent:call_2", "second intent")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_2", "read", `{"path":"server.go"}`), "second intent")
 	h.StubModelComplete(modelStub("summary"))
 	var counts []int
 	h.StubHostCall("torana_evaluate_compaction", func(args string) (string, error) {
@@ -584,7 +585,7 @@ func TestUncachedBatchEvaluatesTwice(t *testing.T) {
 func TestAllCachedBatchEvaluatesOnce(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
-	h.SeedSharedCache("intent:call_1", "find the bug")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
 	h.StubModelComplete(modelStub("must-not-run"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	content := bigContent()
@@ -612,7 +613,7 @@ func TestAllCachedBatchEvaluatesOnce(t *testing.T) {
 func TestCachedValueNotShorterLeavesUntouched(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
-	h.SeedSharedCache("intent:call_1", "find the bug")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
 	h.StubModelComplete(modelStub("must-not-run"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	content := bigContent()
@@ -640,8 +641,8 @@ func TestCachedValueNotShorterLeavesUntouched(t *testing.T) {
 func TestTwoCandidatesShareOneBoundService(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
-	h.SeedSharedCache("intent:call_1", "find the bug")
-	h.SeedSharedCache("intent:call_2", "second")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_2", "read", `{"path":"server.go"}`), "second")
 	var calls int
 	h.StubModelComplete(func(args *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
 		calls++
@@ -672,7 +673,7 @@ func TestIntentMissUsesBoundedFallback(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)
 			h.SetConfig(modelConfig)
-			h.SeedSharedCache("intent:call_1", "") // empty value, present key
+			h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "") // empty value, present key
 			if name == "absent" {
 				// Truly absent: the key is removed again (SeedSharedCache
 				// with the empty string stores PRESENCE; a harness with no
@@ -790,7 +791,7 @@ func TestDerivedIntentCacheIdentity(t *testing.T) {
 	t.Run("captured bytes cannot alias derived domain", func(t *testing.T) {
 		h := newHarness(t)
 		h.SetConfig(modelConfig)
-		h.SeedSharedCache("intent:call_1", derived)
+		h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), derived)
 		h.SeedCache(derivedKey, "wrong-domain")
 		h.StubModelComplete(modelStub("fresh-summary"))
 		h.StubHostCall("torana_evaluate_compaction", applyStub(true))
@@ -884,7 +885,7 @@ func TestToolResultMustStayExact(t *testing.T) {
 func TestMinSummarizerCharsBoundary(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
-	h.SeedSharedCache("intent:call_1", "find the bug")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
 	h.StubModelComplete(modelStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	short := strings.Repeat("x", 1999)
@@ -898,7 +899,7 @@ func TestMinSummarizerCharsBoundary(t *testing.T) {
 
 	h2 := newHarness(t)
 	h2.SetConfig(modelConfig)
-	h2.SeedSharedCache("intent:call_1", "find the bug")
+	h2.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
 	h2.StubModelComplete(modelStub("summary"))
 	h2.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	exact := strings.Repeat("x", 2000)
@@ -914,7 +915,7 @@ func TestMinSummarizerCharsBoundary(t *testing.T) {
 func TestTruncationMarkerInSummarizerPayload(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(`{"tool_policies":[{"match":"read*","mode":"model"}],"expected_applications":6,"max_summarizer_input_bytes":100}`)
-	h.SeedSharedCache("intent:call_1", "find the bug")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
 	var modelArgs *pbv1.ModelCompleteArgs
 	h.StubModelComplete(func(args *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
 		modelArgs = args
@@ -937,7 +938,7 @@ func TestTruncationMarkerInSummarizerPayload(t *testing.T) {
 func TestExactModeSkips(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(`{"tool_policies":[{"match":"read*","mode":"exact"}],"expected_applications":6}`)
-	h.SeedSharedCache("intent:call_1", "find the bug")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
 	h.StubModelComplete(modelStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	res := h.BeforeRequest(bigToolRequest(bigContent()))
@@ -955,7 +956,7 @@ func TestExactModeSkips(t *testing.T) {
 func TestCacheSetRefusalIsBestEffort(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
-	h.SeedSharedCache("intent:call_1", "find the bug")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
 	h.StubHostCall("env.cache_set", func(string) (string, error) {
 		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "cache unavailable"), nil
 	})
@@ -978,7 +979,7 @@ func TestCacheSetRefusalIsBestEffort(t *testing.T) {
 func TestSavingsReportRefusalDoesNotChangeReplacement(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
-	h.SeedSharedCache("intent:call_1", "find the bug")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
 	h.StubModelComplete(modelStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	h.StubHostCall("torana_record_savings", func(string) (string, error) {
@@ -998,7 +999,7 @@ func TestSavingsReportRefusalDoesNotChangeReplacement(t *testing.T) {
 func TestNoUnauthorizedCalls(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
-	h.SeedSharedCache("intent:call_1", "find the bug")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
 	h.StubModelComplete(modelStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	h.BeforeRequest(bigToolRequest(bigContent()))
@@ -1029,7 +1030,7 @@ func TestConfigResetPinsIsolation(t *testing.T) {
 	// Row 1: model path with expected_applications=6.
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
-	h.SeedSharedCache("intent:call_1", "find the bug")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
 	h.StubModelComplete(modelStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	res := h.BeforeRequest(bigToolRequest(bigContent()))
@@ -1039,7 +1040,7 @@ func TestConfigResetPinsIsolation(t *testing.T) {
 	// Row 2: expected_applications=0 disables the model path entirely.
 	h2 := newHarness(t)
 	h2.SetConfig(`{"tool_policies":[{"match":"read*","mode":"model"}],"expected_applications":0}`)
-	h2.SeedSharedCache("intent:call_1", "find the bug")
+	h2.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
 	h2.StubModelComplete(modelStub("summary"))
 	h2.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	res2 := h2.BeforeRequest(bigToolRequest(bigContent()))
@@ -1056,7 +1057,7 @@ func TestConfigResetPinsIsolation(t *testing.T) {
 func TestModelPathDisabledByDefault(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(`{"tool_policies":[{"match":"read*","mode":"model"}]}`)
-	h.SeedSharedCache("intent:call_1", "find the bug")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
 	h.StubModelComplete(modelStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	res := h.BeforeRequest(bigToolRequest(bigContent()))
@@ -1076,7 +1077,7 @@ func TestModelPathDisabledByDefault(t *testing.T) {
 func TestModelConsumptionGate(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
-	h.SeedSharedCache("intent:call_1", "find the bug")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
 	h.StubModelComplete(modelStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", applyStub(true))
 	// No assistant message after the tool result.
@@ -1129,7 +1130,7 @@ func mustJSON(t *testing.T, req *pbv1.ChatRequest) []byte {
 func TestModelPresentEmptyReplacementRecomputes(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
-	h.SeedSharedCache("intent:call_1", "find the bug")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
 	content := bigContent()
 	modelKey := sdk.ContentAddressedCacheKey(compactionCache, "v4", "read", `{"path":"server.go"}`, content, "captured", "find the bug", "model")
 	h.SeedCache(modelKey, "") // present, empty
@@ -1188,7 +1189,7 @@ func TestIntentCacheMalformedReplyErrors(t *testing.T) {
 func TestModelCacheMalformedReplyErrors(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
-	h.SeedSharedCache("intent:call_1", "find the bug")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
 	h.StubHostCall("env.cache_get", func(string) (string, error) {
 		return "not a host-call-result frame", nil
 	})
@@ -1223,7 +1224,7 @@ func TestEvaluateAdvisoryRefusalDeclinesWithoutRetry(t *testing.T) {
 		t.Run(code.String(), func(t *testing.T) {
 			h := newHarness(t)
 			h.SetConfig(modelConfig)
-			h.SeedSharedCache("intent:call_1", "find the bug")
+			h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
 			h.StubModelComplete(modelStub("summary"))
 			h.StubHostCall("torana_evaluate_compaction", func(string) (string, error) {
 				return sdktest.HostResultError(code, "stub"), nil
@@ -1250,7 +1251,7 @@ func TestEvaluateAdvisoryRefusalDeclinesWithoutRetry(t *testing.T) {
 func TestEvaluateContractRefusalErrors(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
-	h.SeedSharedCache("intent:call_1", "find the bug")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
 	h.StubModelComplete(modelStub("summary"))
 	h.StubHostCall("torana_evaluate_compaction", func(string) (string, error) {
 		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "stub"), nil
@@ -1267,7 +1268,7 @@ func TestEvaluateContractRefusalErrors(t *testing.T) {
 func TestRealEvaluationDeclinesAfterPreflight(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
-	h.SeedSharedCache("intent:call_1", "find the bug")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
 	h.StubModelComplete(modelStub("summary"))
 	seq := 0
 	h.StubHostCall("torana_evaluate_compaction", func(string) (string, error) {
@@ -1294,7 +1295,7 @@ func TestRealEvaluationDeclinesAfterPreflight(t *testing.T) {
 func TestRealEvaluationRefusalAfterPreflight(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(modelConfig)
-	h.SeedSharedCache("intent:call_1", "find the bug")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug")
 	h.StubModelComplete(modelStub("summary"))
 	seq := 0
 	h.StubHostCall("torana_evaluate_compaction", func(string) (string, error) {
@@ -1496,7 +1497,6 @@ func TestOrderedSeamCarrierRows(t *testing.T) {
 		wantMultiset := map[string]int{
 			"env.plugin_config":          1,
 			"env.cache_get":              2, // model key per candidate
-			"env.shared_cache_get":       2, // intent key per candidate
 			"env.cache_set":              2, // best-effort per transformation
 			"env.model_complete":         2, // one per uncached candidate
 			"torana_evaluate_compaction": 2, // optimistic preflight + real report

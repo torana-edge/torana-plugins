@@ -207,7 +207,18 @@ func compactToolResults(req *pbv1.ChatRequest) (bool, error) {
 			// Retrieve the optional model-authored intent for this tool call.
 			// NOT_FOUND and present-empty both use the bounded fallback; any other
 			// refusal or malformed reply is a contract defect — error the hook.
-			intent, found, err := sdk.SharedCacheGet(intentCacheKey + ":" + view.ToolCallId)
+			var meta struct {
+				Conversation string `json:"_conversation_id"`
+			}
+			_ = json.Unmarshal(req.ToranaMetaJson, &meta)
+			var intent string
+			var found bool
+			var err error
+			if call, present := toolCalls[view.ToolCallId]; present && call.InvocationKind == pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FUNCTION {
+				if key := sharedIntentKey(meta.Conversation, view.ToolCallId, toolName, string(call.Arguments)); key != "" {
+					intent, found, err = sdk.SharedCacheGet(key)
+				}
+			}
 			if err != nil {
 				return false, fmt.Errorf("keyword_compactor: cache_get %s:%s: %w", intentCacheKey, view.ToolCallId, err)
 			}

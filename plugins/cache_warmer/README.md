@@ -117,13 +117,12 @@ same inspect/configure/approve/enable flow. Rebuilds need a new digest approval.
 
 First use the empty conversation list to observe without warming. Run `torana conversations --json`, select one ID, set it in `conversations`, then send another real turn so its eligible prefix is captured. During an idle gap, look for attributed `plugin-egress` refreshes. No explicit marker, unsupported refresh semantics, missing state or exhausted budgets should produce no refresh.
 
-If an opted-in conversation is never refreshed, read the plugin's durable
-entry for that conversation (`plugin-state.json` beside the host
-configuration, under key `warm/<conversation-id>`). Its `stopped` field says
-why — including `replay artifact exceeds the prefix budget` and `durable state
-refused the replay artifact`, the two ways a conversation can be too large to
-store. The plugin holds no logging grant, so the entry is where those reasons
-are recorded.
+If an opted-in conversation is never refreshed, recheck its conversation ID,
+eligible cache marker, cache-policy binding and the replay limits above.
+Torana stores private warming state in its local database, not a
+`plugin-state.json` file. Oversized replay artifacts and refused state writes
+stop warming rather than sending an incomplete prefix. Observe attributed
+egress to confirm a refresh actually happened; enabling alone is not proof.
 
 ## Data and failure behavior
 
