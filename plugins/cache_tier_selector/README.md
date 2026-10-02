@@ -8,6 +8,8 @@ Choose between configured prompt-cache tiers using observed idle gaps, while kee
 
 ## Install and inspect
 
+With [Torana MCP connected](https://torana.sh/docs/mcp/), ask which cache-tier mode is configured. `cache_tier_selector.status` returns mode, idle-gap threshold and activity-retention days. A zero threshold derives from the bound policy; this does not report an active tier, test pricing readiness or change cache markers. Rebuild and approve the new digest including `env.serve_http` to expose the operation.
+
 Start [Torana](https://github.com/torana-edge/torana-edge/blob/main/docs/QUICKSTART.md)
 first. Commands use `torana` on PATH; use `./torana` from a source checkout.
 Run installation from the host checkout or supply its configured plugin
@@ -54,6 +56,7 @@ Permissions must equal the manifest's requested set; budgets can be lower.
 {
   "digest": "sha256:REPLACE_WITH_YOUR_INSPECTED_DIGEST",
   "permissions": [
+    "env.serve_http",
     "env.cache_policy",
     "env.host_call.torana_plugin_counter",
     "env.log",

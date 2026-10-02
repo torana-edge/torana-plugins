@@ -1,0 +1,5 @@
+{
+ "schema_version": 2,
+ "namespace": {"title":"Cache warmer","summary":"Inspect warming opt-in counts and timing settings without reading replay artifacts or spending tokens.","categories":["caching"]},
+ "operations": [{"id":"status","method":"GET","path":"/status","description":"Read distinct configured opt-in count, deadline duration and interval override. This is not a count of active warm entries or proof of a cache hit. No conversation IDs, replay content, model calls or state writes.","risk":"read","idempotent":true,"model_access":"read","conversation_binding":"none","output_schema":{"type":"object","required":["plugin","opted_in_count","warm_for_minutes","interval_seconds_override"],"additionalProperties":false,"properties":{"plugin":{"const":"cache_warmer"},"opted_in_count":{"type":"integer"},"warm_for_minutes":{"type":"integer"},"interval_seconds_override":{"type":"integer"}}}}]
+}

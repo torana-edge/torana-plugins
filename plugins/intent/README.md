@@ -6,6 +6,8 @@ Ask the model to include why it is making a tool call, strip the added field bef
 
 ## Install and inspect
 
+With [Torana MCP connected](https://torana.sh/docs/mcp/), ask which intent convention is active. `intent.status` returns the injected field name (`i`) and history-fill mode (`heuristic` or `off`), without captured intent, tool arguments or cache contents. It does not alter tool schemas. Rebuild and approve the new digest including `env.serve_http` to expose the operation.
+
 Start [Torana](https://github.com/torana-edge/torana-edge/blob/main/docs/QUICKSTART.md)
 first. Commands use `torana` on PATH; use `./torana` from a source checkout.
 Run installation from the host checkout or supply its configured plugin
@@ -52,6 +54,7 @@ Permissions must equal the manifest's requested set; budgets can be lower.
 {
   "digest": "sha256:REPLACE_WITH_YOUR_INSPECTED_DIGEST",
   "permissions": [
+    "env.serve_http",
     "env.cache_get",
     "env.cache_set",
     "env.shared_cache_set",

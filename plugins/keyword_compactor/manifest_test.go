@@ -52,6 +52,7 @@ func TestManifestPermissionSetExact(t *testing.T) {
 		"env.host_call.torana_record_savings",
 		"env.model_pricing",
 		"env.plugin_config",
+		"env.serve_http",
 		"env.shared_cache_get",
 		"ir.tool_results.write",
 	}

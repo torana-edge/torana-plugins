@@ -2,18 +2,20 @@
   "schema_version": 1,
   "id": "torana/cache_tier_selector",
   "name": "cache_tier_selector",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "abi_version": "v1",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "pass",
   "repository": "https://github.com/torana-edge/torana-plugins",
   "description": "Buys the cheapest prompt-cache lifetime for a conversation based on how long it actually goes idle. Keeps each decision fixed until the provider cache tier expires, because changing a live breakpoint marker would invalidate the entry it is protecting.",
   "hooks": [
+    {"name": "run_on_http_request"},
     {
       "name": "run_before_request"
     }
   ],
   "permissions": [
+    {"name": "env.serve_http", "description": "Expose cache-tier mode and timing settings to MCP and the local agent API"},
     {
 	  "name": "env.cache_policy",
 	  "description": "Read the operator-bound prompt-cache policy used to choose a tier"
