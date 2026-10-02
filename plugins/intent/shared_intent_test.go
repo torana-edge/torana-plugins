@@ -5,6 +5,9 @@ import "testing"
 // Every producer/consumer module pins the same protocol, without depending
 // on another plugin binary being installed or trusting call IDs globally.
 func TestSharedIntentContract(t *testing.T) {
+	if sharedIntentKey("conversation","call","read",`{"nested":{"b":9007199254740993,"a":{"x":1}}}`) != sharedIntentKey("conversation","call","read",`{"nested":{"a":{"x":1},"b":9007199254740993}}`) {
+		t.Fatal("nested argument ordering changed shared identity")
+	}
 	if sharedIntentKey("conversation", "call", "read", "") != sharedIntentKey("conversation", "call", "read", "{}") {
 		t.Fatal("omitted parameterless arguments changed shared identity")
 	}

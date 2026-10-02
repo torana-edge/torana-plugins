@@ -240,7 +240,7 @@ func init() {
 			// A sticky prefix still counts as conversation activity. Otherwise
 			// continuous cache hits look like one long idle gap when a later
 			// prefix needs a new decision and auto mode buys the longer tier.
-			if cfg.Mode == "auto" && clockErr == nil {
+			if clockErr == nil {
 				act, err = recordActivity(meta.ConversationID, now)
 				if err != nil && !isAdvisory(err) {
 					return sdk.RequestResult{}, err
