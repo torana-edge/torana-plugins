@@ -1,13 +1,17 @@
-# Check tool output before forwarding it
+# Add a local check before tool output reaches your model
 
-Scan selected tool results with an operator-bound contextual model. Replace a
-finding with a recoverable, value-free tool error
-so the primary model can continue safely. If you want a
-zero-model guard for recognizable values, use [`pii_guard`](../pii_guard/README.md).
+Use a local model to look for credentials and private data in new tool results.
+When the scanner flags a result, Torana withholds it and sends a value-free tool
+error instead, giving your coding agent a chance to continue without that output.
+It is an extra check that can catch some accidental exposures—not complete
+protection. Detection depends on the model: it can miss a secret or flag harmless
+code. For a zero-model check of recognizable formats, use
+[`pii_guard`](../pii_guard/README.md).
 
-This is the recommended first plugin when you already have a local model
-endpoint. Bind the scanner locally so tool output does not make an additional
-trip to a remote model service.
+Already have a local model endpoint? Try it as the scanner and check both
+sensitive and harmless examples from your workflow. Bind it locally so the
+extra scan does not send tool output to another remote model service. Structured
+JSON support makes the response readable; it does not establish detection quality.
 
 [All plugins](../../README.md#choose-a-plugin) · [Source](main.go) · [Manifest](plugin.json) · [Settings schema](schema.json)
 
@@ -113,9 +117,11 @@ same inspect/configure/approve/enable flow. Rebuilds need a new digest approval.
 
 ## Try it and check the result
 
-Try a synthetic credential assignment such as `PAYMENT_API_KEY=sk_test_torana_demo_not_a_real_key_123` in a test configuration file. Ask your harness to read it. A sensitive result becomes a value-free tool error before the primary provider receives it, so the model can skip the affected lines or request a narrower read.
+Try a synthetic credential assignment such as `PAYMENT_API_KEY=sk_test_torana_demo_not_a_real_key_123` in a test configuration file. Ask your harness to read it. If your scanner flags it, Torana replaces that result before forwarding the request to the primary provider. Your agent can skip the result or request other content without the suspected value. Reported locations are lines of the returned tool output, not verified file positions; a model's finding does not establish that every other line is safe.
 
-Also test clean source code, public support addresses, and syntactically redacted placeholders such as `<REDACTED>` or `YOUR_API_KEY`: these should remain readable. Labelling a realistic credential “example” or “not real” is not an exemption. Detection quality depends on the scanner model, so check positive and negative examples before relying on it. An unavailable scanner, oversized request or incomplete scan follows `on_error`, never a cached clean verdict. With the default `block`, the withheld result is remembered for historical replay. The approved input limit counts the complete request, including numbered lines and output schema, not just raw tool text. Only complete clean scans are cached; identical content already cleared by the same scan policy is not sent to the scanner again.
+Also test clean source code, public support addresses, and syntactically redacted placeholders such as `<REDACTED>` or `YOUR_API_KEY`: these should remain readable. Labelling a realistic credential “example” or “not real” is not an exemption. Try a single-line read as well as the whole file: each new result gets its own decision, and a successful whole-file check does not prove narrower reads will be classified correctly. If your model misses the sample or repeatedly flags harmless code, choose another scanner or use the deterministic plugin for its supported formats.
+
+A scanner failure is not a confirmed finding. Check the reported scanner settings, input limits or availability, or skip that result. For a size-limit failure, request a smaller range within the limit; repeatedly splitting reads does not fix model misclassification or invalid replies. An unavailable scanner, oversized request or incomplete scan follows `on_error`, never a cached clean verdict. With the default `block`, the withheld result is remembered for historical replay, and a result exceeding `max_scan_bytes` skips inference entirely. With `allow`, the plugin scans a byte-bounded prefix: a finding still withholds the result, but a clean prefix leaves the uninspected suffix allowed without caching the result as clean. Secrets beyond that prefix can pass through. The host's separate approved input limit counts the complete model request, including numbered lines and output schema, not just raw tool text. Only complete clean scans are cached; identical content already cleared by the same scan policy is not sent to the scanner again.
 
 The policy does not withhold contact details that appear public, such as documentation or support addresses. This reduces noise in ordinary development, but the model can misjudge public versus private context; evaluate it on your own customer-data examples. For recognizable secret formats, run the independent [`pii_guard`](../pii_guard/README.md) before `pii`; neither plugin shares state with the other.
 

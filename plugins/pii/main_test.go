@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"regexp"
 	"strconv"
@@ -752,56 +753,84 @@ func TestExtractJSONCases(t *testing.T) {
 	}
 }
 
-// TestMaxScanBytesTruncation — the byte budget is rune-safe and asserted by
-// BYTE length. A clean prefix verdict remains incomplete for the full result:
-// on_error governs it and it is never cached as clean.
-func TestMaxScanBytesTruncation(t *testing.T) {
-	for _, onError := range []string{"block", "allow"} {
-		t.Run(onError, func(t *testing.T) {
+// Block skips oversized scans; allow retains positive detection in a bounded prefix.
+func TestMaxScanBytesOversizedPolicies(t *testing.T) {
+	for _, tc := range []struct {
+		name, policy, verdict string
+		calls                 int
+		blocked               bool
+	}{
+		{"block", "block", `{"pii":true,"findings":[{"type":"api_key","line":1}]}`, 0, true},
+		{"allow_finding", "allow", `{"pii":true,"findings":[{"type":"api_key","line":1}]}`, 1, true},
+		{"allow_clean_prefix", "allow", `{"pii":false,"findings":[]}`, 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
-			h.SetConfig(`{"max_scan_bytes":100,"on_error":"` + onError + `"}`)
-			var request *pbv1.ModelCompleteArgs
+			h.SetConfig(`{"max_scan_bytes":100,"on_error":"` + tc.policy + `"}`)
 			h.StubModelComplete(func(args *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
-				request = args
-				return modelResult(`{"pii":false,"findings":[]}`), nil, nil
+				text := strings.SplitN(sdk.Text(args.Messages[1]), "Output to scan:\n", 2)[1]
+				prefix := strings.TrimPrefix(text, "1: ")
+				if len(prefix) > 100 || !utf8.ValidString(prefix) || !strings.HasPrefix(prefix, "API_KEY=synthetic_secret ") {
+					t.Fatalf("invalid bounded scan: %q", prefix)
+				}
+				return modelResult(tc.verdict), nil, nil
 			})
-			content := strings.Repeat("日本語", 500)
+			content := "API_KEY=synthetic_secret " + strings.Repeat("日本語", 500)
 			res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm(content))))
 			if !requestCompleted(res) {
 				t.Fatalf("err=%v", res.Err)
 			}
-			if request == nil || len(request.Messages) != 2 {
-				t.Fatalf("model request = %+v, want two messages", request)
-			}
-			const marker = "Output to scan:\n"
-			idx := strings.Index(sdk.Text(request.Messages[1]), marker)
-			if idx < 0 {
-				t.Fatalf("model user message missing scan marker: %q", sdk.Text(request.Messages[1]))
-			}
-			scanned := sdk.Text(request.Messages[1])[idx+len(marker):]
-			lines := strings.Split(scanned, "\n")
-			for i, line := range lines {
-				prefix := strconv.Itoa(i+1) + ": "
-				if !strings.HasPrefix(line, prefix) {
-					t.Fatalf("missing scan line number: %q", line)
-				}
-				lines[i] = strings.TrimPrefix(line, prefix)
-			}
-			scanned = strings.Join(lines, "\n")
-			if len(scanned) > 100 {
-				t.Fatalf("scanned bytes=%d exceed the 100-byte budget", len(scanned))
-			}
-			if !utf8.ValidString(scanned) {
-				t.Fatal("truncation split a rune")
+			if calls := countCommand(h, "env.model_complete"); calls != tc.calls {
+				t.Fatalf("oversized result made %d model calls, want %d", calls, tc.calls)
 			}
 			if n := countCommand(h, "env.cache_set"); n != 0 {
 				t.Fatalf("incomplete scan wrote %d clean cache entries", n)
 			}
-			_, blocked := protectedMessage(t, h)
-			if want := onError == "block"; blocked != want {
-				t.Fatalf("blocked=%v, want %v for on_error=%s", blocked, want, onError)
+			message, blocked := protectedMessage(t, h)
+			if blocked != tc.blocked {
+				t.Fatalf("blocked=%v, want %v", blocked, tc.blocked)
+			}
+			if tc.policy == "block" && !strings.Contains(message, "Request a smaller range within the limit") {
+				t.Fatalf("missing size-specific recovery: %q", message)
 			}
 		})
+	}
+}
+
+func TestMaxScanBytesBoundaryScansCompleteText(t *testing.T) {
+	for _, budget := range []int{0, 9, 10} {
+		t.Run(strconv.Itoa(budget), func(t *testing.T) {
+			h := newHarness(t)
+			h.SetConfig(fmt.Sprintf(`{"max_scan_bytes":%d}`, budget))
+			var seen string
+			h.StubModelComplete(func(args *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
+				seen = sdk.Text(args.Messages[1])
+				return modelResult(`{"pii":false,"findings":[]}`), nil, nil
+			})
+			res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("日本語")))) // nine bytes
+			if !requestCompleted(res) || countCommand(h, "env.model_complete") != 1 || !strings.HasSuffix(seen, "1: 日本語") {
+				t.Fatalf("complete scan failed: result=%+v input=%q", res, seen)
+			}
+		})
+	}
+}
+
+func TestRecoveryDistinguishesScanFailureFromFinding(t *testing.T) {
+	h := newHarness(t)
+	h.StubModelComplete(modelStub(`{"pii":false,"findings":[{"type":"api_key","line":1}]}`))
+	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("synthetic value"))))
+	if !requestCompleted(res) {
+		t.Fatal(res.Err)
+	}
+	message, blocked := protectedMessage(t, h)
+	if !blocked || !strings.Contains(message, "scan failure, not a confirmed finding") || !strings.Contains(message, "Check scanner settings") || strings.Contains(message, "narrower") {
+		t.Fatalf("misleading scanner-failure guidance: %q", message)
+	}
+	positive := blockMessage("Read", []finding{{Type: "api_key", Line: 2}})
+	for _, want := range []string{"flagged possible", "line 2 of this tool output", "not verified file positions", "unreported content is not guaranteed safe"} {
+		if !strings.Contains(positive, want) {
+			t.Fatalf("missing %q in positive guidance: %q", want, positive)
+		}
 	}
 }
 

@@ -27,7 +27,7 @@
       "type": "integer",
       "minimum": 0,
       "default": 0,
-      "description": "Maximum tool-output BYTES sent to the operator-bound scanner service (rune-safe); zero is unbounded. Content beyond the limit is an incomplete scan governed by on_error and is never cached as clean.",
+      "description": "Maximum tool-output bytes scanned; zero is unbounded. Oversized results skip inference with block. With allow, a bounded prefix is scanned: findings still withhold the result, but a clean prefix allows the unscanned remainder. Partial scans are never cached as clean.",
       "x-torana-advanced": true
     }
   }

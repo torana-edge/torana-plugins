@@ -25,8 +25,10 @@ optional context experiments.
 | [`cache_tier_selector`](plugins/cache_tier_selector/README.md) | Choose a cache lifetime for a conversation |
 | [`cache_warmer`](plugins/cache_warmer/README.md) | Keep one conversation's cache warm for a bounded gap |
 
-Already running Ollama or another OpenAI-compatible local model? Start with
-`pii` and bind its scanner to that endpoint. If you do not have a local model
+Already running Ollama or another OpenAI-compatible local model? Try
+`pii` as an extra contextual check and bind its scanner to that endpoint. Test
+both sensitive and harmless examples: it can catch some accidental exposures,
+but a local endpoint alone does not make detection reliable. If you do not have a local model
 ready, start with the deterministic `pii_guard`. For broader protection, run
 both and place `pii_guard` first: obvious matches are withheld without a model
 call, then `pii` scans the remaining tool output, including failed results.
