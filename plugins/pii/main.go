@@ -19,8 +19,8 @@
 //   - A finding replaces only the affected result with an explicit tool error.
 //     The replacement is persisted without retaining the sensitive value and
 //     replayed byte-for-byte on later turns and after restarts.
-//   - max_scan_bytes is a BYTE budget with rune-safe boundary repair (the
-//     old "chars" name was a lie); zero is unbounded.
+//   - max_scan_bytes is a BYTE budget; oversized results fail before calling
+//     the model. No prefix is treated as a scan of the full result. Zero is unbounded.
 //   - The model destination is the required "scanner" resource declared by
 //     the manifest. Provider, URL, model, credentials, and budgets never enter
 //     plugin configuration or guest memory.
@@ -37,7 +37,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"unicode/utf8"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
@@ -205,7 +204,7 @@ func init() {
 					// Incomplete extraction: never model-scanned, never cached;
 					// on_error governs the uninspectable remainder.
 					if failClosed() {
-						replacement := fmt.Sprintf("Tool output withheld because pii could not safely inspect %s. Retry with text-only output, request a narrower read, or skip this result.", toolLabel(toolName))
+						replacement := fmt.Sprintf("Tool output withheld because pii could not fully inspect %s. No clean verdict was obtained. Use inspectable text-only output or skip this result; do not assume uninspected content is safe.", toolLabel(toolName))
 						if err := replaceAndRemember(ctx, msg, view, replacement, outcomeTransient); err != nil {
 							return sdk.RequestResult{}, fmt.Errorf("pii: replace scan failure: %w", err)
 						}
@@ -256,7 +255,7 @@ func init() {
 						}
 						continue
 					}
-					replacement := fmt.Sprintf("Tool output withheld because pii could not complete the safety scan for %s. Reason: %s. Request a narrower result or skip it; this tool output was not sent upstream.", toolLabel(toolName), sf.msg)
+					replacement := fmt.Sprintf("Tool output withheld because pii could not complete the scan for %s. Reason: %s. This is a scan failure, not a confirmed finding. Check scanner settings, input limits or availability before retrying, or skip this result; the original output was not sent upstream.", toolLabel(toolName), sf.msg)
 					if err := replaceAndRemember(ctx, msg, view, replacement, outcomeTransient); err != nil {
 						return sdk.RequestResult{}, fmt.Errorf("pii: replace scan failure: %w", err)
 					}
@@ -328,7 +327,7 @@ func piiCleanCacheKey(view sdk.ToolResultView, toolName string) string {
 		OnError      string   `json:"on_error"`
 		MaxScanBytes int      `json:"max_scan_bytes"`
 	}{
-		Version:      8,
+		Version:      9,
 		Tools:        cfg.Tools,
 		OnError:      cfg.OnError,
 		MaxScanBytes: cfg.MaxScanBytes,
@@ -377,15 +376,12 @@ func numberedScanContent(content string) string {
 }
 
 func modelScan(content, toolName string) ([]finding, error) {
-	scanContent := content
-	truncated := false
-	if cfg.MaxScanBytes > 0 && len(scanContent) > cfg.MaxScanBytes {
-		// Byte budget with rune-safe boundary repair: a mid-rune cut would
-		// silently corrupt the last character of the text a PII detector is
-		// about to read.
-		scanContent = truncHead(scanContent, cfg.MaxScanBytes)
-		truncated = true
+	if cfg.MaxScanBytes > 0 && len(content) > cfg.MaxScanBytes {
+		// A prefix cannot establish a clean verdict for the complete result.
+		// Avoid spending model inference on an intentionally incomplete scan.
+		return nil, &scannerFailure{"tool output exceeds max_scan_bytes; no model scan was performed"}
 	}
+	scanContent := content
 	maxTokens := uint32(512)
 	temperature := 0.0
 	strict := true
@@ -455,13 +451,6 @@ func modelScan(content, toolName string) ([]finding, error) {
 		return nil, &scannerFailure{"pii scan: contradictory verdict (pii false with findings)"}
 	}
 	if !pii {
-		if truncated {
-			// A clean verdict over a prefix is not a clean verdict over the
-			// tool result. Treat the uninspected suffix exactly like any other
-			// incomplete scan: on_error decides, and the caller must never cache
-			// this outcome as authoritative for the full content.
-			return nil, &scannerFailure{"pii scan incomplete: tool output exceeds max_scan_bytes"}
-		}
 		return nil, nil
 	}
 	// Bound the reporting: a hostile but valid model reply can return
@@ -590,14 +579,14 @@ func blockMessage(toolName string, findings []finding) string {
 	for _, f := range findings[:n] {
 		cat := normalizeCategory(f.Type)
 		if f.Line > 0 {
-			parts = append(parts, fmt.Sprintf("%s (line %d)", cat, f.Line))
+			parts = append(parts, fmt.Sprintf("%s (line %d of this tool output)", cat, f.Line))
 		} else {
 			parts = append(parts, cat)
 		}
 	}
 	msg := fmt.Sprintf(
-		"Sensitive output withheld before it reached the model. pii detected %s in %s. "+
-			"Continue without the sensitive value; request a narrower read or skip the affected lines.",
+		"Tool output withheld before forwarding to the primary model. pii flagged possible %s in %s. "+
+			"Reported lines are not verified file positions. Continue by skipping this result or requesting content excluding the suspected locations; unreported content is not guaranteed safe.",
 		strings.Join(parts, ", "), toolLabel(toolName))
 	if len(findings) > maxReportedFindings {
 		msg += " Additional findings omitted."
@@ -617,18 +606,3 @@ func toolLabel(toolName string) string {
 }
 
 var safeNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
-
-// truncHead returns the longest prefix of s that is at most n bytes and does
-// not split a rune.
-func truncHead(s string, n int) string {
-	if n <= 0 {
-		return ""
-	}
-	if n >= len(s) {
-		return s
-	}
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
-	}
-	return s[:n]
-}

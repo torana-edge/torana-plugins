@@ -2,12 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"testing"
-	"unicode/utf8"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
@@ -752,47 +752,20 @@ func TestExtractJSONCases(t *testing.T) {
 	}
 }
 
-// TestMaxScanBytesTruncation — the byte budget is rune-safe and asserted by
-// BYTE length. A clean prefix verdict remains incomplete for the full result:
-// on_error governs it and it is never cached as clean.
-func TestMaxScanBytesTruncation(t *testing.T) {
+// Oversized results never spend inference on a partial scan or cache a clean verdict.
+func TestMaxScanBytesRejectsBeforeModelCall(t *testing.T) {
 	for _, onError := range []string{"block", "allow"} {
 		t.Run(onError, func(t *testing.T) {
 			h := newHarness(t)
 			h.SetConfig(`{"max_scan_bytes":100,"on_error":"` + onError + `"}`)
-			var request *pbv1.ModelCompleteArgs
-			h.StubModelComplete(func(args *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
-				request = args
-				return modelResult(`{"pii":false,"findings":[]}`), nil, nil
-			})
+			h.StubModelComplete(modelStub(`{"pii":true,"findings":[{"type":"api_key","line":1}]}`))
 			content := strings.Repeat("日本語", 500)
 			res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm(content))))
 			if !requestCompleted(res) {
 				t.Fatalf("err=%v", res.Err)
 			}
-			if request == nil || len(request.Messages) != 2 {
-				t.Fatalf("model request = %+v, want two messages", request)
-			}
-			const marker = "Output to scan:\n"
-			idx := strings.Index(sdk.Text(request.Messages[1]), marker)
-			if idx < 0 {
-				t.Fatalf("model user message missing scan marker: %q", sdk.Text(request.Messages[1]))
-			}
-			scanned := sdk.Text(request.Messages[1])[idx+len(marker):]
-			lines := strings.Split(scanned, "\n")
-			for i, line := range lines {
-				prefix := strconv.Itoa(i+1) + ": "
-				if !strings.HasPrefix(line, prefix) {
-					t.Fatalf("missing scan line number: %q", line)
-				}
-				lines[i] = strings.TrimPrefix(line, prefix)
-			}
-			scanned = strings.Join(lines, "\n")
-			if len(scanned) > 100 {
-				t.Fatalf("scanned bytes=%d exceed the 100-byte budget", len(scanned))
-			}
-			if !utf8.ValidString(scanned) {
-				t.Fatal("truncation split a rune")
+			if calls := countCommand(h, "env.model_complete"); calls != 0 {
+				t.Fatalf("oversized result made %d model calls, want zero", calls)
 			}
 			if n := countCommand(h, "env.cache_set"); n != 0 {
 				t.Fatalf("incomplete scan wrote %d clean cache entries", n)
@@ -802,6 +775,43 @@ func TestMaxScanBytesTruncation(t *testing.T) {
 				t.Fatalf("blocked=%v, want %v for on_error=%s", blocked, want, onError)
 			}
 		})
+	}
+}
+
+func TestMaxScanBytesBoundaryScansCompleteText(t *testing.T) {
+	for _, budget := range []int{0, 9, 10} {
+		t.Run(strconv.Itoa(budget), func(t *testing.T) {
+			h := newHarness(t)
+			h.SetConfig(fmt.Sprintf(`{"max_scan_bytes":%d}`, budget))
+			var seen string
+			h.StubModelComplete(func(args *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
+				seen = sdk.Text(args.Messages[1])
+				return modelResult(`{"pii":false,"findings":[]}`), nil, nil
+			})
+			res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("日本語")))) // nine bytes
+			if !requestCompleted(res) || countCommand(h, "env.model_complete") != 1 || !strings.HasSuffix(seen, "1: 日本語") {
+				t.Fatalf("complete scan failed: result=%+v input=%q", res, seen)
+			}
+		})
+	}
+}
+
+func TestRecoveryDistinguishesScanFailureFromFinding(t *testing.T) {
+	h := newHarness(t)
+	h.StubModelComplete(modelStub(`{"pii":false,"findings":[{"type":"api_key","line":1}]}`))
+	res := h.BeforeRequest(reqWith(toolMsg("c1", "read", textArm("synthetic value"))))
+	if !requestCompleted(res) {
+		t.Fatal(res.Err)
+	}
+	message, blocked := protectedMessage(t, h)
+	if !blocked || !strings.Contains(message, "scan failure, not a confirmed finding") || !strings.Contains(message, "Check scanner settings") || strings.Contains(message, "narrower") {
+		t.Fatalf("misleading scanner-failure guidance: %q", message)
+	}
+	positive := blockMessage("Read", []finding{{Type: "api_key", Line: 2}})
+	for _, want := range []string{"flagged possible", "line 2 of this tool output", "not verified file positions", "unreported content is not guaranteed safe"} {
+		if !strings.Contains(positive, want) {
+			t.Fatalf("missing %q in positive guidance: %q", want, positive)
+		}
 	}
 }
 
