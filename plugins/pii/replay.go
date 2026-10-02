@@ -24,9 +24,10 @@ const (
 )
 
 type replayRecord struct {
-	Version     int           `json:"version"`
-	Outcome     replayOutcome `json:"outcome"`
-	Replacement string        `json:"replacement"`
+	Version     int                         `json:"version"`
+	Outcome     replayOutcome               `json:"outcome"`
+	Replacement string                      `json:"replacement"`
+	Reason      sdk.ToolResultReleaseReason `json:"reason"`
 }
 
 func occurrenceDigest(ctx context.Context, msg *pbv1.Message, view sdk.ToolResultView) (string, error) {
@@ -86,70 +87,151 @@ func stableReplayToolCallID(id string) string {
 
 func replayKey(digest string) string { return "replay/occurrence/" + digest }
 
+// Upgrade our own persisted security decisions without changing their keys.
+// Dropping old keys would let already-withheld historical output through.
+func readReplayDecision(key string) (replayRecord, *pbv1.StateValue, bool, error) {
+	for attempt := 0; attempt < 4; attempt++ {
+		value, found, err := sdk.StateGetVersioned(key)
+		if err != nil || !found {
+			return replayRecord{}, value, found, err
+		}
+		var record replayRecord
+		if err := json.Unmarshal([]byte(value.Value), &record); err != nil {
+			return replayRecord{}, nil, false, fmt.Errorf("decode replay record at %q: %w", key, err)
+		}
+		upgrade := record.Version == 2
+		if upgrade {
+			switch record.Outcome {
+			case outcomeTransient:
+				record.Reason = sdk.ToolResultReleaseReason{Kind: "scan_failure"}
+			case outcomeSensitive:
+				record.Reason = sdk.ToolResultReleaseReason{Kind: "findings", Findings: []sdk.ToolResultReleaseFinding{{Type: "unspecified", Line: 0}}}
+			}
+			record.Version = 3
+			// v2 sometimes stored the rendered approval suffix. Regenerate it
+			// from the current host decision, never replay a stale reference.
+			record.Replacement, _, _ = strings.Cut(record.Replacement, " If this seems mistaken, request user review with Torana MCP:")
+			record.Replacement = strings.TrimSuffix(record.Replacement, " This result has no stable tool-call ID for exact-result human review.")
+		}
+		if err := validateReplayRecord(record); err != nil {
+			return replayRecord{}, nil, false, fmt.Errorf("invalid replay record at %q: %w", key, err)
+		}
+		if !upgrade {
+			return record, value, true, nil
+		}
+		raw, err := json.Marshal(record)
+		if err != nil {
+			return replayRecord{}, nil, false, err
+		}
+		result, err := sdk.StateCompareAndSet(key, string(raw), &value.Version)
+		if err != nil {
+			return replayRecord{}, nil, false, err
+		}
+		if result.GetApplied() {
+			return record, &pbv1.StateValue{Value: string(raw), Version: result.GetVersion()}, true, nil
+		}
+	}
+	return replayRecord{}, nil, false, fmt.Errorf("replay decision at %q changed repeatedly", key)
+}
+
 // replayPrior reapplies a durable replacement. A temporary scanner failure is
 // retried while the occurrence remains in the newest tool-result batch, but is
 // replayed once it becomes history so old unscanned bytes cannot leak later.
-func replayPrior(ctx context.Context, msg *pbv1.Message, view sdk.ToolResultView, latest bool) (bool, error) {
+func replayPrior(ctx context.Context, messageIndex int, msg *pbv1.Message, view sdk.ToolResultView, latest bool) (bool, error) {
 	digest, err := occurrenceDigest(ctx, msg, view)
 	if err != nil {
 		return false, err
 	}
 	key := replayKey(digest)
-	var record replayRecord
-	found, err := sdk.StateGetJSON(key, &record)
+	record, _, found, err := readReplayDecision(key)
 	if err != nil {
 		return false, err
 	}
 	if !found {
 		return false, nil
 	}
-	if err := validateReplayRecord(record); err != nil {
-		return false, fmt.Errorf("invalid replay record at %q: %w", key, err)
+	approval, err := sdk.ToolResultRelease(messageIndex, view.Block, nil)
+	if err != nil {
+		return false, err
+	}
+	if approval.Approved {
+		// Handled, but deliberately unchanged: skip replay AND scanning, for
+		// latest results as well as history. Approval is never a clean verdict.
+		return true, nil
 	}
 	if latest && record.Outcome == outcomeTransient {
 		return false, nil
 	}
-	_, err = sdk.ReplaceToolResultWithError(msg, view.Block, record.Replacement)
+	if approval.Reference == "" {
+		approval, err = sdk.ToolResultRelease(messageIndex, view.Block, &record.Reason)
+		if err != nil {
+			return false, err
+		}
+	}
+	_, err = sdk.ReplaceToolResultWithError(msg, view.Block, releaseDiagnostic(record.Replacement, approval))
 	return true, err
 }
 
-func replaceAndRemember(ctx context.Context, msg *pbv1.Message, view sdk.ToolResultView, replacement string, outcome replayOutcome) error {
+func replaceAndRemember(ctx context.Context, messageIndex int, msg *pbv1.Message, view sdk.ToolResultView, replacement string, outcome replayOutcome, findings ...finding) error {
 	digest, err := occurrenceDigest(ctx, msg, view)
 	if err != nil {
 		return err
 	}
-	record := replayRecord{Version: 2, Outcome: outcome, Replacement: replacement}
+	reason := sdk.ToolResultReleaseReason{Kind: "scan_failure"}
+	if outcome == outcomeSensitive {
+		reason.Kind = "findings"
+		for _, finding := range findings[:min(len(findings), maxReportedFindings)] {
+			reason.Findings = append(reason.Findings, sdk.ToolResultReleaseFinding{Type: normalizeCategory(finding.Type), Line: max(0, finding.Line)})
+		}
+	}
+	record := replayRecord{Version: 3, Outcome: outcome, Replacement: replacement, Reason: reason}
 	winner, err := writeReplayDecision(replayKey(digest), record)
 	if err != nil {
 		return err
 	}
-	_, err = sdk.ReplaceToolResultWithError(msg, view.Block, winner.Replacement)
+	approval, err := sdk.ToolResultRelease(messageIndex, view.Block, &winner.Reason)
+	if err != nil {
+		return err
+	}
+	if approval.Approved {
+		return nil
+	}
+	_, err = sdk.ReplaceToolResultWithError(msg, view.Block, releaseDiagnostic(winner.Replacement, approval))
 	return err
+}
+
+func releaseDiagnostic(replacement string, approval sdk.ToolResultReleaseInfo) string {
+	if approval.Reference != "" {
+		replacement += " If this seems mistaken, request user review with Torana MCP: torana_invoke, namespace torana, operation redactions.request_release, input {\"reference\":\"" + approval.Reference + "\"}. Only the user can allow this exact result in Torana's Approvals page or CLI. Do not bypass the scan by re-reading smaller pieces."
+	} else {
+		replacement += " This result has no stable tool-call ID for exact-result human review."
+	}
+	return replacement
 }
 
 // resolveCleanReplay removes a stale transient failure before clean content is
 // forwarded. If a concurrent scan already committed a sensitive verdict, that
 // winner is applied instead and the caller must return a replacement request.
-func resolveCleanReplay(ctx context.Context, msg *pbv1.Message, view sdk.ToolResultView) (bool, error) {
+func resolveCleanReplay(ctx context.Context, messageIndex int, msg *pbv1.Message, view sdk.ToolResultView) (bool, error) {
 	digest, err := occurrenceDigest(ctx, msg, view)
 	if err != nil {
 		return false, err
 	}
 	key := replayKey(digest)
 	for attempt := 0; attempt < 4; attempt++ {
-		value, found, err := sdk.StateGetVersioned(key)
+		record, value, found, err := readReplayDecision(key)
 		if err != nil || !found {
 			return false, err
 		}
-		var record replayRecord
-		if err := json.Unmarshal([]byte(value.Value), &record); err != nil {
-			return false, fmt.Errorf("decode replay record at %q: %w", key, err)
-		}
-		if err := validateReplayRecord(record); err != nil {
-			return false, fmt.Errorf("invalid replay record at %q: %w", key, err)
-		}
 		if record.Outcome == outcomeSensitive {
-			_, err := sdk.ReplaceToolResultWithError(msg, view.Block, record.Replacement)
+			approval, err := sdk.ToolResultRelease(messageIndex, view.Block, &record.Reason)
+			if err != nil {
+				return false, err
+			}
+			if approval.Approved {
+				return false, nil
+			}
+			_, err = sdk.ReplaceToolResultWithError(msg, view.Block, releaseDiagnostic(record.Replacement, approval))
 			return true, err
 		}
 		result, err := sdk.StateCompareAndDelete(key, value.Version)
@@ -164,21 +246,19 @@ func resolveCleanReplay(ctx context.Context, msg *pbv1.Message, view sdk.ToolRes
 }
 
 func writeReplayDecision(key string, proposed replayRecord) (replayRecord, error) {
+	if err := validateReplayRecord(proposed); err != nil {
+		return replayRecord{}, err
+	}
 	for attempt := 0; attempt < 4; attempt++ {
-		value, found, err := sdk.StateGetVersioned(key)
+		current, value, found, err := readReplayDecision(key)
 		if err != nil {
 			return replayRecord{}, err
 		}
 		var expected *string
 		if found {
-			var current replayRecord
-			if err := json.Unmarshal([]byte(value.Value), &current); err != nil {
-				return replayRecord{}, fmt.Errorf("decode replay record at %q: %w", key, err)
-			}
-			if err := validateReplayRecord(current); err != nil {
-				return replayRecord{}, fmt.Errorf("invalid replay record at %q: %w", key, err)
-			}
-			if current.Outcome == outcomeSensitive || current == proposed {
+			currentJSON, _ := json.Marshal(current)
+			proposedJSON, _ := json.Marshal(proposed)
+			if current.Outcome == outcomeSensitive || string(currentJSON) == string(proposedJSON) {
 				return current, nil
 			}
 			expected = &value.Version
@@ -199,8 +279,14 @@ func writeReplayDecision(key string, proposed replayRecord) (replayRecord, error
 }
 
 func validateReplayRecord(record replayRecord) error {
-	if record.Version != 2 || record.Replacement == "" {
+	if record.Version != 3 || record.Replacement == "" {
 		return fmt.Errorf("unsupported record")
+	}
+	if err := record.Reason.Validate(); err != nil {
+		return err
+	}
+	if record.Outcome == outcomeSensitive && record.Reason.Kind != "findings" || record.Outcome == outcomeTransient && record.Reason.Kind != "scan_failure" {
+		return fmt.Errorf("replay reason does not match outcome")
 	}
 	if record.Outcome != outcomeSensitive && record.Outcome != outcomeTransient {
 		return fmt.Errorf("unknown outcome %q", record.Outcome)

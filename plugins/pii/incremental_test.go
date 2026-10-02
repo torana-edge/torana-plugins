@@ -137,12 +137,12 @@ func TestReplaySurvivesMarkerMovement(t *testing.T) {
 func TestSensitiveReplayDecisionSupersedesTransientFailure(t *testing.T) {
 	h := newHarness(t)
 	h.Run(func() {
-		first := replayRecord{Version: 2, Outcome: outcomeTransient, Replacement: "temporary"}
-		second := replayRecord{Version: 2, Outcome: outcomeSensitive, Replacement: "sensitive"}
-		if got, err := writeReplayDecision("replay/occurrence/test", first); err != nil || got != first {
+		first := replayRecord{Version: 3, Outcome: outcomeTransient, Replacement: "temporary", Reason: sdk.ToolResultReleaseReason{Kind: "scan_failure"}}
+		second := replayRecord{Version: 3, Outcome: outcomeSensitive, Replacement: "sensitive", Reason: sdk.ToolResultReleaseReason{Kind: "findings", Findings: []sdk.ToolResultReleaseFinding{{Type: "api_key", Line: 1}}}}
+		if got, err := writeReplayDecision("replay/occurrence/test", first); err != nil || got.Replacement != first.Replacement {
 			t.Fatalf("first write = %+v, %v", got, err)
 		}
-		if got, err := writeReplayDecision("replay/occurrence/test", second); err != nil || got != second {
+		if got, err := writeReplayDecision("replay/occurrence/test", second); err != nil || got.Replacement != second.Replacement {
 			t.Fatalf("sensitive decision did not replace transient failure = %+v, %v", got, err)
 		}
 	})
@@ -183,7 +183,7 @@ func TestCleanScanAppliesConcurrentSensitiveWinner(t *testing.T) {
 	h.StubModelComplete(func(*pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError, error) {
 		var key string
 		for _, call := range h.Calls() {
-			if call.Command != "env.state_get" {
+			if call.Command != "env.state_get_versioned" {
 				continue
 			}
 			var args pbv1.StateGetArgs
@@ -195,7 +195,7 @@ func TestCleanScanAppliesConcurrentSensitiveWinner(t *testing.T) {
 		if key == "" {
 			t.Fatal("replay lookup did not run before model scan")
 		}
-		raw, err := json.Marshal(replayRecord{Version: 2, Outcome: outcomeSensitive, Replacement: "concurrent sensitive winner"})
+		raw, err := json.Marshal(replayRecord{Version: 3, Outcome: outcomeSensitive, Replacement: "concurrent sensitive winner", Reason: sdk.ToolResultReleaseReason{Kind: "findings", Findings: []sdk.ToolResultReleaseFinding{{Type: "api_key", Line: 1}}}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -210,14 +210,14 @@ func TestCleanScanAppliesConcurrentSensitiveWinner(t *testing.T) {
 		t.Fatalf("result = %+v", res)
 	}
 	text, isError := incrementalResultText(t, result)
-	if text != "concurrent sensitive winner" || !isError {
+	if !strings.HasPrefix(text, "concurrent sensitive winner") || !isError {
 		t.Fatalf("concurrent sensitive verdict was ignored: text=%q error=%v", text, isError)
 	}
 }
 
 func TestReplayReadFailureFailsClosed(t *testing.T) {
 	h := newHarness(t)
-	h.StubHostCall("env.state_get", func(string) (string, error) {
+	h.StubHostCall("env.state_get_versioned", func(string) (string, error) {
 		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "state database unavailable"), nil
 	})
 	result := h.BeforeRequest(reqWith(toolMsg("call", "read", textArm("ordinary output"))))

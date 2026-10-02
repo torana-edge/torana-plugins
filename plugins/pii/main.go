@@ -171,7 +171,7 @@ func init() {
 		latest := trailingToolResultMessages(req.Messages)
 		for messageIndex, msg := range req.Messages {
 			for _, view := range sdk.ToolResults(msg) {
-				didReplay, err := replayPrior(ctx, msg, view, latest[messageIndex])
+				didReplay, err := replayPrior(ctx, messageIndex, msg, view, latest[messageIndex])
 				if err != nil {
 					return sdk.RequestResult{}, fmt.Errorf("pii: replay protected result: %w", err)
 				}
@@ -207,7 +207,7 @@ func init() {
 					// on_error governs the uninspectable remainder.
 					if failClosed() {
 						replacement := fmt.Sprintf("Tool output withheld because pii could not fully inspect %s. No clean verdict was obtained. Use inspectable text-only output or skip this result; do not assume uninspected content is safe.", toolLabel(toolName))
-						if err := replaceAndRemember(ctx, msg, view, replacement, outcomeTransient); err != nil {
+						if err := replaceAndRemember(ctx, messageIndex, msg, view, replacement, outcomeTransient); err != nil {
 							return sdk.RequestResult{}, fmt.Errorf("pii: replace scan failure: %w", err)
 						}
 						mutated = true
@@ -228,7 +228,7 @@ func init() {
 					found = false
 				}
 				if found && cached != "" {
-					protected, err := resolveCleanReplay(ctx, msg, view)
+					protected, err := resolveCleanReplay(ctx, messageIndex, msg, view)
 					if err != nil {
 						return sdk.RequestResult{}, fmt.Errorf("pii: clear recovered scan failure: %w", err)
 					}
@@ -248,7 +248,7 @@ func init() {
 					}
 					// Scanner failure. Fail-closed by default.
 					if cfg.OnError == "allow" {
-						protected, resolveErr := resolveCleanReplay(ctx, msg, view)
+						protected, resolveErr := resolveCleanReplay(ctx, messageIndex, msg, view)
 						if resolveErr != nil {
 							return sdk.RequestResult{}, fmt.Errorf("pii: clear allowed scan failure: %w", resolveErr)
 						}
@@ -261,14 +261,14 @@ func init() {
 					if cfg.MaxScanBytes > 0 && len(ex.text) > cfg.MaxScanBytes {
 						replacement = fmt.Sprintf("Tool output withheld because %s is larger than the configured max_scan_bytes limit. No model scan was performed. Request a smaller range within the limit or skip this result; the original output was not sent upstream.", toolLabel(toolName))
 					}
-					if err := replaceAndRemember(ctx, msg, view, replacement, outcomeTransient); err != nil {
+					if err := replaceAndRemember(ctx, messageIndex, msg, view, replacement, outcomeTransient); err != nil {
 						return sdk.RequestResult{}, fmt.Errorf("pii: replace scan failure: %w", err)
 					}
 					mutated = true
 					continue
 				}
 				if len(findings) > 0 {
-					if err := replaceAndRemember(ctx, msg, view, blockMessage(toolName, findings), outcomeSensitive); err != nil {
+					if err := replaceAndRemember(ctx, messageIndex, msg, view, blockMessage(toolName, findings), outcomeSensitive, findings...); err != nil {
 						return sdk.RequestResult{}, fmt.Errorf("pii: replace detected: %w", err)
 					}
 					if err := rememberExplanation(ctx, findings); err != nil {
@@ -277,7 +277,7 @@ func init() {
 					mutated = true
 					continue
 				}
-				protected, err := resolveCleanReplay(ctx, msg, view)
+				protected, err := resolveCleanReplay(ctx, messageIndex, msg, view)
 				if err != nil {
 					return sdk.RequestResult{}, fmt.Errorf("pii: clear recovered scan failure: %w", err)
 				}

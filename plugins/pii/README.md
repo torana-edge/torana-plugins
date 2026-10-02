@@ -36,6 +36,12 @@ and review that revision before proceeding.
 
 ## Configure
 
+For the UI path, run `torana open`, go to **Settings**, add your local model
+as a provider and **Save settings**. Use OpenAI format and No authentication
+for an unauthenticated OpenAI-compatible server; set its default model ID if
+required. Then open **Pipeline → pii → Resource bindings → scanner** and select
+that saved provider. Having a server running does not register it with Torana.
+
 ```bash
 torana plugin config get pii > plugin-settings.json
 ```
@@ -81,6 +87,7 @@ Permissions must equal the manifest's requested set; budgets can be lower.
   "permissions": [
     "env.cache_get",
     "env.cache_set",
+    "env.host_call.torana_tool_result_release",
     "env.model_complete",
     "env.plugin_config",
     "env.serve_http",
@@ -114,6 +121,61 @@ torana plugin status
 A missing required binding or stale digest prevents activation. Status should
 show the intended bundle loaded, not merely installed. The local UI offers the
 same inspect/configure/approve/enable flow. Rebuilds need a new digest approval.
+
+## Allow a result you have checked
+
+When `pii` flags harmless output, it includes an opaque result reference in
+its tool error. With Torana MCP connected, the agent can request review:
+
+```json
+{"namespace":"torana","operation":"redactions.request_release","input":{"reference":"tr_REPLACE_WITH_THE_RESULT_REFERENCE"}}
+```
+
+This calls `torana_invoke`; it does not approve anything. Run `torana open`
+and choose **Approvals**, inspect the original content locally, then **Allow
+upstream** or **Keep withheld**. Make this decision yourself, not through your
+agent. CLI equivalents (interactive terminal required):
+
+The review shows the host-observed tool name, file path for recognized read tools,
+and when the result was first withheld. It also shows the scanner's initial
+categories and returned-output line numbers, or **scan failure** (not a confirmed
+finding). These are model reports, not proof or verified file positions. Torana
+keeps this initial context fixed, stores no original output or arbitrary tool
+arguments, and still needs you to inspect the original locally.
+
+```bash
+torana approvals list
+torana approvals show <reference>
+torana approvals approve <reference>
+torana approvals decline <reference>
+torana approvals revoke <reference>
+```
+
+Allowing permits one exact original result to reach the configured upstream.
+Torana scopes it to the conversation, tool-call ID, content fingerprint and
+PII bundle digest. Changed content or another call needs fresh review. The
+decision persists across Torana restarts, but original content is never stored:
+your harness must resend that matching result. If it cannot, there is no copy
+for Torana to restore. Approval skips both the prior replacement and another
+scan; it is not cached as a clean classification. Revocation restores withholding
+on future requests, but cannot recall content already sent. Approving or revoking
+historical output can change the provider's cached prefix once; later replay is
+stable. This does not override `pii_guard` or any other plugin's decision.
+Exact-result review needs a stable tool-call ID. Where the API omits one,
+scanning and withholding still work, but the error does not offer an allowance
+that could accidentally carry over to another call after compaction.
+Decision commands ask you to type the last eight characters of the reference;
+they reject `--yes` and piped input. The browser requires an explicit review
+checkbox and a short-lived session proof. These safeguards do not isolate an
+agent with unrestricted access to your local shell or control-plane API. Deny
+operator approval commands and control-plane mutations in your harness's
+permissions or sandbox. The agent should request review through MCP, not run
+`torana approvals` decisions itself. Separate operator authorization is tracked
+in [Edge #467](https://github.com/torana-edge/torana-edge/issues/467); this
+human-exception feature must not be released before that blocker is resolved.
+Each conversation can request review of five new results per hour; replaying a
+pending request does not use another slot. Decisions retain a bounded,
+value-free audit history across restarts.
 
 ## Try it and check the result
 
