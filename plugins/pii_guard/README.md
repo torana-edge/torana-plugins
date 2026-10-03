@@ -18,15 +18,16 @@ tool output, including failed commands and tool errors that may contain secrets.
 
 Start [Torana](https://github.com/torana-edge/torana-edge/blob/main/docs/QUICKSTART.md)
 first. Commands use `torana` on PATH; use `./torana` from a source checkout.
-Run installation from the host checkout or supply its configured plugin
-directory with `--dir`.
+The CLI discovers your running instance and its plugin directory. Use `--dir`
+only when deliberately targeting a different plugin directory.
 
 ```bash
-torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii_guard
+torana plugin install pii_guard
 torana plugin inspect pii_guard
 ```
 
-Installation builds the source locally and never approves or enables it.
+Installation downloads a verified release; no Git or Go needed. It never
+approves or enables the bundle.
 Open Torana's local control plane, select **pii_guard**, review the inspected
 digest and permissions, then choose **Approve and enable**. It requests
 only the permissions needed to read its allowlist, replace affected tool

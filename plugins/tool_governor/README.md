@@ -8,15 +8,17 @@ Restrict or replace model-visible tool definitions. For example, expose search a
 
 Start [Torana](https://github.com/torana-edge/torana-edge/blob/main/docs/QUICKSTART.md)
 first. Commands use `torana` on PATH; use `./torana` from a source checkout.
-Run installation from the host checkout or supply its configured plugin
-directory with `--dir`. Keep the same `TORANA_DATA_DIR` for local file commands.
+The CLI discovers your running instance and its plugin directory. Use `--dir`
+only to target a different directory. Keep the same `TORANA_DATA_DIR` if you
+explicitly set it.
 
 ```bash
-torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/tool_governor
+torana plugin install tool_governor
 torana plugin inspect tool_governor
 ```
 
-Installation builds source locally; it does not approve or enable the bundle.
+Installation downloads a verified release; no Git or Go needed. It never
+approves or enables the bundle.
 Review its source, digest and complete permission set. These examples describe
 the manifest beside this guide; if your installed revision differs, inspect
 and review that revision before proceeding.

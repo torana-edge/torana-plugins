@@ -66,11 +66,12 @@ unless you enable it.
 ## Try it
 
 ```bash
-torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/decision_router
+torana plugin install decision_router
 torana plugin inspect decision_router
 ```
 
-Installation builds source locally; it does not enable the plugin. Open the
+Installation downloads a verified release; no Git or Go needed. It does not
+approve or enable the plugin. Open the
 control plane to configure, approve, and enable it. Start with this `config`
 object in its settings:
 

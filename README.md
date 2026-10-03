@@ -29,31 +29,40 @@ Already running Ollama or another OpenAI-compatible local model? Try
 `pii` as an extra contextual check and bind its scanner to that endpoint. Test
 both sensitive and harmless examples: it can catch some accidental exposures,
 but a local endpoint alone does not make detection reliable. If you do not have a local model
-ready, start with the deterministic `pii_guard`. For broader protection, run
+ready, start with `usage_logger` for content-free usage records or the
+deterministic `pii_guard` for recognizable secret shapes. For broader protection, run
 both and place `pii_guard` first: obvious matches are withheld without a model
 call, then `pii` scans the remaining tool output, including failed results.
 
 Every guide includes settings, exact permissions, required resource bindings,
-and a way to check the result. Install your choice from the Torana checkout
-where the proxy is running (use `./torana` for a source build):
+and a way to check the result. Start Torana, then install your choice by name
+with `torana` on PATH (use `./torana` for a source build). No Git or Go is
+needed to install these published bundles.
+
+Name-based installs require Torana 0.1.1 or newer. Already on 0.1.0?
+Re-run the [Torana installer](https://torana.sh/quickstart/) to upgrade.
 
 ```bash
-torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii
+torana plugin install pii
 ```
 
-Or, without a local model:
+Or, without a local model, choose one:
 
 ```bash
-torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii_guard
+torana plugin install usage_logger
+torana plugin install pii_guard
 ```
 
-Installation compiles source locally. It never approves or enables a plugin.
+Installation downloads and verifies a release bundle. It never approves or
+enables a plugin. Source builds remain available through repository URLs or
+local directories and require the plugin’s toolchain.
 Open Torana's local control plane and select the plugin you installed. For
 `pii`, configure the required scanner binding before reviewing its permissions
 and model-call limits. `pii_guard` makes no model or network calls; review its
 requested tool-result and state permissions before enabling it. Follow the
 [PII guide](plugins/pii/README.md) or the deterministic guard's
-[safe walkthrough](plugins/pii_guard/README.md#try-it-safely).
+[safe walkthrough](plugins/pii_guard/README.md#try-it-safely). For usage logging,
+follow the [usage logger guide](plugins/usage_logger/README.md).
 
 Prefer terminal or agent automation? Each plugin guide covers its configuration
 and lifecycle commands. Other plugins may need their own settings or resource
