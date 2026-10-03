@@ -28,6 +28,7 @@ cp "$root/README.md" "$staging/README.md"
 (cd "$staging" && sha256sum "${bundle_files[@]}" > SHA256SUMS)
 go run "$root/scripts/bundle_digest.go" "${digest_args[@]}" > "$staging/BUNDLE_DIGEST"
 archive="$root/dist/$plugin/$plugin-$version.tar.gz"
+cp "$staging/BUNDLE_DIGEST" "$archive.bundle-digest"
 (cd "$staging" && tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner -cf - "${bundle_files[@]}" LICENSE README.md SHA256SUMS BUNDLE_DIGEST | gzip -n > "$archive")
 (cd "$(dirname "$archive")" && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256")
 cat "$archive.sha256"
