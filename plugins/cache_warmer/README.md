@@ -47,6 +47,35 @@ torana plugin config apply cache_warmer --file plugin-settings.json --yes
 
 Bind required `warm-cache` to the warmed provider/model, prices, lifetimes and refresh semantics. The route needs its own host-managed credential (or auth `none` for a compatible local service); a background tick cannot borrow a caller key. Also set a tick interval and per-plugin egress budget as shown below. The example rates are illustrative, not current provider prices.
 
+### Set the background budget before starting Torana
+
+In your Torana `config.json`, merge these fields into `plugins.runtime` while
+keeping your existing plugin settings:
+
+```json
+{
+  "plugins": {
+    "runtime": {
+      "tick_interval_seconds": 10,
+      "egress": {
+        "cache_warmer": {
+          "max_calls_per_minute": 2,
+          "max_tokens_per_hour": 5000
+        }
+      }
+    }
+  }
+}
+```
+
+This is a configuration fragment, not a replacement for your whole file.
+For an existing instance, `torana status` shows its config path: stop Torana
+with `torana stop --yes`, edit that file, then start it again on your chosen
+port. Runtime scheduling is a startup setting; the live CLI pipeline editor
+does not expose it. Zero tick interval disables background work, and a missing
+per-plugin egress budget prevents refresh requests. Choose limits that fit your
+provider, then opt in only the conversation you intend to resume.
+
 ## Approve and enable
 
 Save this as `approval.json`. Replace the digest with the exact one you reviewed
