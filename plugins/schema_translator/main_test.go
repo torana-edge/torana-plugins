@@ -157,6 +157,25 @@ func TestNoArgumentToolIsStillClosed(t *testing.T) {
 	}
 }
 
+// A supported named nested object still gets closed; conservative traversal
+// does not remove the existing strict-provider closure behavior for this shape.
+func TestNamedNestedObjectStillCloses(t *testing.T) {
+	got, mutations := translate(t, `{"type":"object","properties":{"config":{"type":"object","properties":{"label":{"type":"string"}},"required":["label"]}},"required":["config"]}`)
+	if got["additionalProperties"] != false {
+		t.Fatal("root object was not closed")
+	}
+	config := got["properties"].(map[string]any)["config"].(map[string]any)
+	if config["additionalProperties"] != false {
+		t.Fatal("supported named nested object was not closed")
+	}
+	if config["properties"].(map[string]any)["label"].(map[string]any)["type"] != "string" || !reflect.DeepEqual(config["required"], []any{"label"}) {
+		t.Fatal("nested constraints changed")
+	}
+	if len(mutations) != 0 {
+		t.Fatalf("named object recorded a map conversion: %+v", mutations)
+	}
+}
+
 // TestBareObjectArrayItemsAreLeftAlone pins the SITE rule: nothing at an array
 // item may be rewritten, because no rewrite there survives reverseTranslate.
 func TestBareObjectArrayItemsAreLeftAlone(t *testing.T) {
