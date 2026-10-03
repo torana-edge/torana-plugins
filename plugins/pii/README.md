@@ -139,7 +139,14 @@ replay and transient scanner failures do not replace the last explanation.
 `found: false` means no explanation was recorded; it is not a clean verdict.
 Approve the new digest and HTTP permission when upgrading.
 
-The scanner receives eligible tool-output text. If bound remotely, that text leaves your machine before the primary request is allowed. This is a tool-result guard, not a scanner for all user prompts, a comprehensive DLP system or a guarantee of detection. `on_error: allow` permits undecidable scans; the approval's failure mode separately controls hook failures. Defaults are block. Torana durably stores only hashes and safe replacement messages, never the original sensitive output, so the same decisions replay across later turns and restarts. Only the newest tool-result batch is scanned; historical output is changed only when replaying an earlier decision.
+The scanner receives eligible tool-output text. If bound remotely, that text leaves your machine before the primary request is allowed. This is a tool-result guard, not a scanner for all user prompts, a comprehensive DLP system or a guarantee of detection. `on_error: allow` permits undecidable scans; the approval's failure mode separately controls hook failures. Defaults are block. Torana durably stores hashes, completed-clean markers, and safe replacement messages, never the original sensitive output. Both clean and withheld decisions survive restarts. Only the newest tool-result batch is scanned; historical output is changed only when replaying an earlier decision.
+
+A completed decision belongs to the conversation, tool-call identity, and exact
+result content—not the whole conversation. If a harness moves an old result
+beside your new prompt when resuming, it stays completed without another model
+call. A new tool call or changed result is scanned. Changing scanner settings
+affects new work; it does not reclassify already completed history. Clean replay
+leaves the result and its cache markers unchanged.
 
 ## Combine or disable
 

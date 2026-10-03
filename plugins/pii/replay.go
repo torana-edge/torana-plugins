@@ -21,6 +21,7 @@ type replayOutcome string
 const (
 	outcomeSensitive replayOutcome = "sensitive"
 	outcomeTransient replayOutcome = "transient"
+	outcomeClean     replayOutcome = "clean"
 )
 
 type replayRecord struct {
@@ -89,28 +90,54 @@ func replayKey(digest string) string { return "replay/occurrence/" + digest }
 // replayPrior reapplies a durable replacement. A temporary scanner failure is
 // retried while the occurrence remains in the newest tool-result batch, but is
 // replayed once it becomes history so old unscanned bytes cannot leak later.
-func replayPrior(ctx context.Context, msg *pbv1.Message, view sdk.ToolResultView, latest bool) (bool, error) {
+func replayPrior(ctx context.Context, msg *pbv1.Message, view sdk.ToolResultView, latest bool) (handled, changed bool, err error) {
 	digest, err := occurrenceDigest(ctx, msg, view)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	key := replayKey(digest)
 	var record replayRecord
 	found, err := sdk.StateGetJSON(key, &record)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	if !found {
-		return false, nil
+		return false, false, nil
 	}
 	if err := validateReplayRecord(record); err != nil {
-		return false, fmt.Errorf("invalid replay record at %q: %w", key, err)
+		return false, false, fmt.Errorf("invalid replay record at %q: %w", key, err)
+	}
+	if record.Outcome == outcomeClean {
+		// A completed occurrence stays completed when a harness repositions
+		// it into the trailing batch on resume. Do not rewrite any bytes.
+		return true, false, nil
 	}
 	if latest && record.Outcome == outcomeTransient {
-		return false, nil
+		return false, false, nil
 	}
 	_, err = sdk.ReplaceToolResultWithError(msg, view.Block, record.Replacement)
-	return true, err
+	return true, true, err
+}
+
+// Clean is an occurrence decision, not a reusable model verdict: its key
+// includes conversation, tool-call identity and exact content. New calls and
+// changed results must be scanned even if their text resembles old output.
+// As with sensitive decisions, changing scanner policy does not rescan already
+// completed conversation history.
+func rememberClean(ctx context.Context, msg *pbv1.Message, view sdk.ToolResultView) (bool, error) {
+	digest, err := occurrenceDigest(ctx, msg, view)
+	if err != nil {
+		return false, err
+	}
+	winner, err := writeReplayDecision(replayKey(digest), replayRecord{Version: 2, Outcome: outcomeClean})
+	if err != nil {
+		return false, err
+	}
+	if winner.Outcome == outcomeSensitive {
+		_, err = sdk.ReplaceToolResultWithError(msg, view.Block, winner.Replacement)
+		return true, err
+	}
+	return false, nil
 }
 
 func replaceAndRemember(ctx context.Context, msg *pbv1.Message, view sdk.ToolResultView, replacement string, outcome replayOutcome) error {
@@ -199,8 +226,17 @@ func writeReplayDecision(key string, proposed replayRecord) (replayRecord, error
 }
 
 func validateReplayRecord(record replayRecord) error {
-	if record.Version != 2 || record.Replacement == "" {
+	if record.Version != 2 {
 		return fmt.Errorf("unsupported record")
+	}
+	if record.Outcome == outcomeClean {
+		if record.Replacement != "" {
+			return fmt.Errorf("clean record must not replace content")
+		}
+		return nil
+	}
+	if record.Replacement == "" {
+		return fmt.Errorf("missing replacement")
 	}
 	if record.Outcome != outcomeSensitive && record.Outcome != outcomeTransient {
 		return fmt.Errorf("unknown outcome %q", record.Outcome)
