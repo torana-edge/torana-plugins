@@ -47,6 +47,9 @@ torana plugin config apply cache_warmer --file plugin-settings.json --yes
 
 Bind required `warm-cache` to the warmed provider/model, prices, lifetimes and refresh semantics. The route needs its own host-managed credential (or auth `none` for a compatible local service); a background tick cannot borrow a caller key. Also set a tick interval and per-plugin egress budget as shown below. The example rates are illustrative, not current provider prices.
 
+Use one provider/model entry in this background policy binding, as in the
+example. A tick has no active request to select between multiple entries.
+
 ### Set the background budget before starting Torana
 
 In your Torana `config.json`, merge these fields into `plugins.runtime` while
