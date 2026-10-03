@@ -50,6 +50,51 @@ func TestModelScansOnlyTrailingToolResultBatch(t *testing.T) {
 	}
 }
 
+func TestCleanOccurrenceSurvivesRestartAndMergedUserPrompt(t *testing.T) {
+	first := newHarness(t)
+	first.StubModelComplete(modelStub(`{"pii":false,"findings":[]}`))
+	if result := first.BeforeRequest(reqWith(toolMsg("read-1", "read", textArm("ordinary text")))); result.Err != nil || !result.PassedThrough {
+		t.Fatalf("initial scan: %+v", result)
+	}
+	var saved pbv1.StateCompareAndSetArgs
+	for _, call := range first.Calls() {
+		if call.Command == "env.state_compare_and_set" {
+			if err := proto.Unmarshal([]byte(call.Args), &saved); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if saved.Key == "" {
+		t.Fatal("clean occurrence was not persisted")
+	}
+	for _, row := range []struct {
+		name, id, content string
+		scans             int
+	}{
+		{"same occurrence", "read-1", "ordinary text", 0},
+		{"new call", "read-2", "ordinary text", 1},
+		{"changed content", "read-1", "different text", 1},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			// Fresh process: durable state retained, no in-memory clean cache.
+			h := newHarness(t).SeedState(saved.Key, saved.Value)
+			h.StubModelComplete(modelStub(`{"pii":false,"findings":[]}`))
+			msg := toolMsg(row.id, "read", textArm(row.content), markerArm())
+			msg.Role = "user"
+			// Claude can merge a new prompt into the old tool-result message.
+			msg.Blocks = append(msg.Blocks, incrementalTextMessage("continue without reading again").Blocks...)
+			before := proto.Clone(msg)
+			result := h.BeforeRequest(reqWith(msg))
+			if result.Err != nil || !result.PassedThrough || !proto.Equal(msg, before) {
+				t.Fatalf("clean history must pass byte-equivalent with no replacement: %+v", result)
+			}
+			if calls := countCommand(h, "env.model_complete"); calls != row.scans {
+				t.Fatalf("model calls = %d, want %d", calls, row.scans)
+			}
+		})
+	}
+}
+
 func TestOversizedModelInputIsWithheldAndReplayed(t *testing.T) {
 	for _, policy := range []string{"block", "allow"} {
 		t.Run(policy, func(t *testing.T) {

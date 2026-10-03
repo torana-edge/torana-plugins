@@ -171,12 +171,12 @@ func init() {
 		latest := trailingToolResultMessages(req.Messages)
 		for messageIndex, msg := range req.Messages {
 			for _, view := range sdk.ToolResults(msg) {
-				didReplay, err := replayPrior(ctx, msg, view, latest[messageIndex])
+				didReplay, changed, err := replayPrior(ctx, msg, view, latest[messageIndex])
 				if err != nil {
 					return sdk.RequestResult{}, fmt.Errorf("pii: replay protected result: %w", err)
 				}
 				replayed[[2]int{messageIndex, view.Block}] = didReplay
-				mutated = mutated || didReplay
+				mutated = mutated || changed
 			}
 		}
 
@@ -228,7 +228,7 @@ func init() {
 					found = false
 				}
 				if found && cached != "" {
-					protected, err := resolveCleanReplay(ctx, msg, view)
+					protected, err := rememberClean(ctx, msg, view)
 					if err != nil {
 						return sdk.RequestResult{}, fmt.Errorf("pii: clear recovered scan failure: %w", err)
 					}
@@ -277,7 +277,7 @@ func init() {
 					mutated = true
 					continue
 				}
-				protected, err := resolveCleanReplay(ctx, msg, view)
+				protected, err := rememberClean(ctx, msg, view)
 				if err != nil {
 					return sdk.RequestResult{}, fmt.Errorf("pii: clear recovered scan failure: %w", err)
 				}

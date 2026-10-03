@@ -137,7 +137,9 @@ func protectedMessage(t *testing.T, h *sdktest.Harness) (string, bool) {
 		if err := json.Unmarshal([]byte(args.Value), &record); err != nil {
 			t.Fatalf("decode replay record: %v", err)
 		}
-		return record.Replacement, true
+		if record.Outcome != outcomeClean {
+			return record.Replacement, true
+		}
 	}
 	return "", false
 }
@@ -948,6 +950,7 @@ func TestNoUnauthorizedCalls(t *testing.T) {
 		"env.state_get_versioned":      true,
 		"env.state_set":                true,
 		"env.state_compare_and_delete": true,
+		"env.state_compare_and_set":    true,
 		"env.model_complete":           true,
 	}
 	for _, c := range h.Calls() {
