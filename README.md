@@ -37,7 +37,10 @@ call, then `pii` scans the remaining tool output, including failed results.
 Every guide includes settings, exact permissions, required resource bindings,
 and a way to check the result. Start Torana, then install your choice by name
 with `torana` on PATH (use `./torana` for a source build). No Git or Go is
-needed to install these published bundles:
+needed to install these published bundles.
+
+Name-based installs require Torana 0.1.1 or newer. Already on 0.1.0?
+Re-run the [Torana installer](https://torana.sh/quickstart/) to upgrade.
 
 ```bash
 torana plugin install pii
