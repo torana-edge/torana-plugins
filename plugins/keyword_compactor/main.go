@@ -58,14 +58,11 @@ const (
 	contextLines          = 2        // lines of context around keyword matches
 	maxKeepLines          = 200      // HARD cap on kept lines (selection is bounded)
 	maxResultBytes        = 8000     // total output budget, truncation notice included
-	intentCacheKey        = "intent" // cache key for intent (set by the intent plugin)
+	intentCacheKey        = "intent" // diagnostic label; sharedIntentKey owns the handoff key
 	derivedIntentPrefix   = "torana-derived-intent-v1:"
 	maxDerivedIntentBytes = 500
-	// Namespaced by plugin. env.cache_* is a SHARED store — unlike
-	// env.state_*, which the host keys by module name — so two plugins using
-	// the same namespace string read and write each other's entries. These
-	// namespaces are disjoint from compactor's ("compactor/policy_compacted",
-	// "compacted"), so the two alternative compactors never cross-apply.
+	// Transformation caches are plugin-private. The separate shared intent
+	// handoff never makes replacements reusable across compactor modules.
 	policyCompactionCache  = "keyword_compactor/policy_compacted"
 	keywordCompactionCache = "keyword_compacted"
 )
@@ -207,7 +204,18 @@ func compactToolResults(req *pbv1.ChatRequest) (bool, error) {
 			// Retrieve the optional model-authored intent for this tool call.
 			// NOT_FOUND and present-empty both use the bounded fallback; any other
 			// refusal or malformed reply is a contract defect — error the hook.
-			intent, found, err := sdk.SharedCacheGet(intentCacheKey + ":" + view.ToolCallId)
+			var meta struct {
+				Conversation string `json:"_conversation_id"`
+			}
+			_ = json.Unmarshal(req.ToranaMetaJson, &meta)
+			var intent string
+			var found bool
+			var err error
+			if call, present := toolCalls[view.ToolCallId]; present && call.InvocationKind == pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FUNCTION {
+				if key := sharedIntentKey(meta.Conversation, view.ToolCallId, toolName, string(call.Arguments)); key != "" {
+					intent, found, err = sdk.SharedCacheGet(key)
+				}
+			}
 			if err != nil {
 				return false, fmt.Errorf("keyword_compactor: cache_get %s:%s: %w", intentCacheKey, view.ToolCallId, err)
 			}

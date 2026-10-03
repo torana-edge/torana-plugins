@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "torana/cache_tier_selector",
   "name": "cache_tier_selector",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "abi_version": "v1",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "pass",

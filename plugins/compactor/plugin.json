@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "torana/compactor",
   "name": "compactor",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "abi_version": "v1",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "pass",
@@ -34,7 +34,7 @@
     },
     {
       "name": "env.shared_cache_get",
-      "description": "Read optional intent:<tool_call_id> values published by the intent plugin"
+      "description": "Read optional conversation- and invocation-scoped captured intent published by the intent plugin"
     },
     {
       "name": "env.emit_metric",

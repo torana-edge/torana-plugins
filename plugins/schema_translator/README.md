@@ -2,6 +2,8 @@
 
 Convert supported open-map tool parameters into key/value arrays for providers that need a constrained schema, then reverse the recorded conversion on the model's tool calls, streamed or not.
 
+Simple, unconstrained maps are eligible. Maps with object-specific constraints (such as `enum`, `required`, or `patternProperties`) keep their original schema rather than losing validation rules. Subtrees using references or schema composition also stay unchanged.
+
 [All plugins](../../README.md#choose-a-plugin) · [Source](main.go) · [Manifest](plugin.json) · [Settings schema](schema.json)
 
 ## Install and inspect

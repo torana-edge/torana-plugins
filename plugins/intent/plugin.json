@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "torana/intent",
   "name": "intent",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "abi_version": "v1",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "pass",
@@ -32,7 +32,7 @@
     },
     {
       "name": "env.shared_cache_set",
-      "description": "Publish intent:<tool_call_id> values for approved compactor consumers"
+      "description": "Publish conversation- and invocation-scoped captured intent for approved compactor consumers"
     },
     {
       "name": "env.emit_metric",

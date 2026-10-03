@@ -236,6 +236,7 @@ func toolText(t *testing.T, req *pbv1.ChatRequest, mi int) string {
 
 func bigToolRequest(content string) *pbv1.ChatRequest {
 	return &pbv1.ChatRequest{
+		ToranaMetaJson: []byte(`{"_conversation_id":"conv-1"}`),
 		Messages: []*pbv1.Message{
 			{Role: "system", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "You are a coding agent."}}}}},
 			{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "find the bug"}}}}},
@@ -433,7 +434,7 @@ func TestDeterministicUnusableCachesRecompute(t *testing.T) {
 func TestKeywordHappyPath(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(keywordCfg)
-	h.SeedSharedCache("intent:call_1", "find the bug in server")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug in server")
 	res := h.BeforeRequest(bigToolRequest(keywordContent()))
 	if res.Err != nil || res.Request == nil {
 		t.Fatalf("expected a replacement, err=%v", res.Err)
@@ -467,7 +468,7 @@ func TestKeywordHappyPath(t *testing.T) {
 func TestKeywordCacheReuse(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(keywordCfg)
-	h.SeedSharedCache("intent:call_1", "find the bug in server")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug in server")
 	content := keywordContent()
 	key := sdk.ContentAddressedCacheKey(keywordCompactionCache, "v3", "read", `{"path":"server.go"}`, content, "captured", "find the bug in server", "keyword")
 	h.SeedCache(key, "MATCH bug server.go: the failure is in the retry loop")
@@ -495,7 +496,7 @@ func TestKeywordUnusableCachesRecompute(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)
 			h.SetConfig(keywordCfg)
-			h.SeedSharedCache("intent:call_1", "find the bug in server")
+			h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug in server")
 			h.SeedCache(key, seed)
 			res := h.BeforeRequest(bigToolRequest(content))
 			if res.Err != nil || res.Request == nil {
@@ -516,7 +517,7 @@ func TestKeywordUnusableCachesRecompute(t *testing.T) {
 func TestKeywordNoEvidenceUntouched(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(keywordCfg)
-	h.SeedSharedCache("intent:call_1", "the")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "the")
 	res := h.BeforeRequest(bigToolRequest(keywordContent()))
 	if res.Err != nil || !res.PassedThrough {
 		t.Fatalf("stopword-only intent must pass through, err=%v", res.Err)
@@ -525,7 +526,7 @@ func TestKeywordNoEvidenceUntouched(t *testing.T) {
 	// Too few lines.
 	h2 := newHarness(t)
 	h2.SetConfig(keywordCfg)
-	h2.SeedSharedCache("intent:call_1", "find the bug in server")
+	h2.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug in server")
 	short := strings.Repeat("x", 2500)
 	short += "\nMATCH bug here\n"
 	res2 := h2.BeforeRequest(bigToolRequest(short))
@@ -539,7 +540,7 @@ func TestKeywordNoEvidenceUntouched(t *testing.T) {
 func TestKeywordConsumptionGate(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(keywordCfg)
-	h.SeedSharedCache("intent:call_1", "find the bug in server")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug in server")
 	req := bigToolRequest(keywordContent())
 	req.Messages = req.Messages[:5]
 	res := h.BeforeRequest(req)
@@ -560,7 +561,7 @@ func TestIntentMissUsesBoundedFallback(t *testing.T) {
 			h := newHarness(t)
 			h.SetConfig(keywordCfg)
 			if name == "present-empty" {
-				h.SeedSharedCache("intent:call_1", "")
+				h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "")
 			}
 			res := h.BeforeRequest(bigToolRequest(keywordContent()))
 			if res.Err != nil || res.Request == nil {
@@ -661,7 +662,7 @@ func TestDerivedIntentCacheIdentity(t *testing.T) {
 	t.Run("captured bytes cannot alias derived domain", func(t *testing.T) {
 		h := newHarness(t)
 		h.SetConfig(keywordCfg)
-		h.SeedSharedCache("intent:call_1", derived)
+		h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), derived)
 		h.SeedCache(derivedKey, "wrong-domain")
 		res := h.BeforeRequest(bigToolRequest(content))
 		if res.Err != nil {
@@ -730,7 +731,7 @@ func TestCacheRefusalsError(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
 			h.SetConfig(tc.cfg)
-			h.SeedSharedCache("intent:call_1", "find the bug in server")
+			h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug in server")
 			h.DenyPermission(tc.command)
 			res := h.BeforeRequest(bigToolRequest(keywordContent()))
 			if res.Err == nil {
@@ -762,7 +763,7 @@ func TestMalformedRepliesError(t *testing.T) {
 	// Keyword read with a successful intent read.
 	h := newHarness(t)
 	h.SetConfig(keywordCfg)
-	h.SeedSharedCache("intent:call_1", "find the bug in server")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug in server")
 	h.StubHostCall("env.cache_get", func(string) (string, error) {
 		return "not a host-call-result frame", nil
 	})
@@ -777,7 +778,7 @@ func TestMalformedRepliesError(t *testing.T) {
 func TestBestEffortWritesAndSavings(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(keywordCfg)
-	h.SeedSharedCache("intent:call_1", "find the bug in server")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug in server")
 	h.StubHostCall("env.cache_set", func(string) (string, error) {
 		return sdktest.HostResultError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "cache unavailable"), nil
 	})
@@ -841,7 +842,7 @@ func TestOversizedSelectionTruncatesSelected(t *testing.T) {
 
 	h := newHarness(t)
 	h.SetConfig(keywordCfg)
-	h.SeedSharedCache("intent:call_1", "find the bug in server")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug in server")
 	res := h.BeforeRequest(bigToolRequest(content))
 	if res.Err != nil {
 		t.Fatal(res.Err)
@@ -875,7 +876,7 @@ func TestOversizedSelectionTruncatesSelected(t *testing.T) {
 func TestNoUnauthorizedCalls(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(keywordCfg)
-	h.SeedSharedCache("intent:call_1", "find the bug in server")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug in server")
 	h.BeforeRequest(bigToolRequest(keywordContent()))
 
 	allowed := map[string]bool{
@@ -898,7 +899,7 @@ func TestNoUnauthorizedCalls(t *testing.T) {
 func TestConfigResetPinsIsolation(t *testing.T) {
 	h := newHarness(t)
 	h.SetConfig(keywordCfg)
-	h.SeedSharedCache("intent:call_1", "find the bug in server")
+	h.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug in server")
 	res := h.BeforeRequest(bigToolRequest(keywordContent()))
 	if res.Err != nil || res.Request == nil {
 		t.Fatalf("row 1 should apply, err=%v", res.Err)
@@ -952,11 +953,11 @@ func TestSchemaDefaultsMatchRuntimeDefaults(t *testing.T) {
 func TestDeterminismOverIdenticalRequests(t *testing.T) {
 	h1 := newHarness(t)
 	h1.SetConfig(keywordCfg)
-	h1.SeedSharedCache("intent:call_1", "find the bug in server")
+	h1.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug in server")
 	r1 := h1.BeforeRequest(bigToolRequest(keywordContent()))
 	h2 := newHarness(t)
 	h2.SetConfig(keywordCfg)
-	h2.SeedSharedCache("intent:call_1", "find the bug in server")
+	h2.SeedSharedCache(sharedIntentKey("conv-1", "call_1", "read", `{"path":"server.go"}`), "find the bug in server")
 	r2 := h2.BeforeRequest(bigToolRequest(keywordContent()))
 	if r1.Err != nil || r2.Err != nil {
 		t.Fatalf("dispatch errors: %v %v", r1.Err, r2.Err)
@@ -1071,7 +1072,7 @@ func TestKeywordOrderedSeamRows(t *testing.T) {
 		h.SetConfig(keywordCfg)
 		h.SeedSharedCache("intent:c1", "find the bug in server")
 		req := &pbv1.ChatRequest{Messages: []*pbv1.Message{
-			{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "u"}}}, result("c1", content)}},
+			{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "find the bug in server"}}}, result("c1", content)}},
 			assistantAfter(),
 		}}
 		res := h.BeforeRequest(req)
@@ -1082,7 +1083,7 @@ func TestKeywordOrderedSeamRows(t *testing.T) {
 		if !worthwhileReduction(len(content), len(got)) {
 			t.Fatalf("user-role result not compacted: %d -> %d", len(content), len(got))
 		}
-		if res.Request.Messages[0].Blocks[0].GetText().Text != "u" {
+		if res.Request.Messages[0].Blocks[0].GetText().Text != "find the bug in server" {
 			t.Fatal("surrounding text disturbed")
 		}
 	})
@@ -1096,14 +1097,14 @@ func TestKeywordOrderedSeamRows(t *testing.T) {
 		block := result("c1", content)
 		block.GetToolResult().InvocationKind = pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM
 		req := &pbv1.ChatRequest{Messages: []*pbv1.Message{
-			{Role: "user", Blocks: []*pbv1.RequestBlock{block}},
+			{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "find the bug in server"}}}, block}},
 			assistantAfter(),
 		}}
 		res := h.BeforeRequest(req)
 		if res.Err != nil || res.Request == nil {
 			t.Fatalf("err=%v", res.Err)
 		}
-		got := res.Request.Messages[0].Blocks[0].GetToolResult()
+		got := res.Request.Messages[0].Blocks[1].GetToolResult()
 		if got.GetInvocationKind() != pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM || !worthwhileReduction(len(content), len(got.Content[0].GetText().Text)) {
 			t.Fatalf("free-form result not preserved and compacted: %+v", got)
 		}
@@ -1122,7 +1123,7 @@ func TestKeywordOrderedSeamRows(t *testing.T) {
 		h.SeedSharedCache("intent:c1", "find the bug in server")
 		h.SeedSharedCache("intent:c2", "find the bug in server")
 		req := &pbv1.ChatRequest{Messages: []*pbv1.Message{
-			{Role: "user", Blocks: []*pbv1.RequestBlock{result("c1", content), result("c2", content)}},
+			{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "find the bug in server"}}}, result("c1", content), result("c2", content)}},
 			assistantAfter(),
 		}}
 		res := h.BeforeRequest(req)
@@ -1145,7 +1146,6 @@ func TestKeywordOrderedSeamRows(t *testing.T) {
 		wantMultiset := map[string]int{
 			"env.plugin_config":     1,
 			"env.cache_get":         2, // keyword key per candidate
-			"env.shared_cache_get":  2, // intent key per candidate
 			"env.cache_set":         1, // the second candidate reuses the first's stored value
 			"torana_record_savings": 2, // cache_reuse + transformation
 		}

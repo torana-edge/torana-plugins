@@ -235,7 +235,17 @@ func init() {
 			}
 			found = false
 		}
+		var act activity
 		if found {
+			// A sticky prefix still counts as conversation activity. Otherwise
+			// continuous cache hits look like one long idle gap when a later
+			// prefix needs a new decision and auto mode buys the longer tier.
+			if clockErr == nil {
+				act, err = recordActivity(meta.ConversationID, now)
+				if err != nil && !isAdvisory(err) {
+					return sdk.RequestResult{}, err
+				}
+			}
 			switch {
 			case clockErr != nil && !isAdvisory(clockErr):
 				// Contract/protocol clock failure: surface exactly as on the
@@ -287,7 +297,9 @@ func init() {
 			return sdk.RequestResult{}, clockErr
 		}
 		cleanupExpiredState(now, cfg)
-		act, err := recordActivity(meta.ConversationID, now)
+		if !found {
+			act, err = recordActivity(meta.ConversationID, now)
+		}
 		if err != nil {
 			// A failed advisory activity write must not create an
 			// unpersisted/churning mutation: continue with the in-memory

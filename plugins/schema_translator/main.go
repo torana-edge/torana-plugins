@@ -556,7 +556,7 @@ const (
 // Conversion happens only at a property, in the loop, where the recorded path is
 // one reverseTranslate can actually reverse.
 func translateSchema(schema map[string]any, path []pathStep, site schemaSite) []mutationPath {
-	if schema == nil {
+	if schema == nil || !supportedObjectTraversal(schema) {
 		return nil
 	}
 	var mutations []mutationPath
@@ -604,6 +604,9 @@ func translateSchema(schema map[string]any, path []pathStep, site schemaSite) []
 		_, propHasAP := propSchema["additionalProperties"]
 
 		if propType == "object" && !propHasProps && !propHasAP {
+			if !simpleMapSchema(propSchema) {
+				continue
+			}
 			convertToKVArray(propSchema, nil)
 			mutations = append(mutations, mutationPath{steps: currentPath})
 			continue
@@ -619,6 +622,9 @@ func translateSchema(schema map[string]any, path []pathStep, site schemaSite) []
 				mutations = append(mutations, translateSchema(propSchema, currentPath, siteProperty)...)
 				continue
 			}
+			if !simpleMapSchema(propSchema) {
+				continue
+			}
 			valueSchema, _ := propSchema["additionalProperties"].(map[string]any)
 			convertToKVArray(propSchema, valueSchema)
 			mutations = append(mutations, mutationPath{steps: currentPath})
@@ -627,9 +633,11 @@ func translateSchema(schema map[string]any, path []pathStep, site schemaSite) []
 
 		switch propType {
 		case "object":
-			propSchema["additionalProperties"] = false
 			mutations = append(mutations, translateSchema(propSchema, currentPath, siteProperty)...)
 		case "array":
+			if !supportedArrayTraversal(propSchema) {
+				continue
+			}
 			if items, ok := propSchema["items"].(map[string]any); ok {
 				if itemType, _ := items["type"].(string); itemType == "object" {
 					// The each-step REPLACES the just-created scalar step: the
@@ -643,6 +651,53 @@ func translateSchema(schema map[string]any, path []pathStep, site schemaSite) []
 		}
 	}
 	return mutations
+}
+
+// Assertions/applicators outside properties may constrain the ORIGINAL map
+// shape. Rewriting a child would invalidate enum/conditional/ref branches even
+// if those keywords themselves were retained. Stay inside the domain whose
+// constraints we actually understand rather than silently weakening a tool.
+func supportedObjectTraversal(schema map[string]any) bool {
+	if value, exists := schema["type"]; exists && value != "object" {
+		return false
+	}
+	for key := range schema {
+		switch key {
+		case "type", "properties", "additionalProperties", "required", "minProperties", "maxProperties",
+			"description", "title", "default", "examples", "deprecated", "readOnly", "writeOnly", "$comment", "$schema", "$id":
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func supportedArrayTraversal(schema map[string]any) bool {
+	for key := range schema {
+		switch key {
+		case "type", "items", "minItems", "maxItems", "description", "title", "default", "examples", "deprecated", "readOnly", "writeOnly", "$comment", "$schema", "$id":
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// KV rows cannot express object cardinality, required keys, key restrictions,
+// constant values or combinators. Only unconstrained map keys with an optional
+// uniform value schema are reversible; everything else remains as authored.
+func simpleMapSchema(schema map[string]any) bool {
+	if value, exists := schema["type"]; exists && value != "object" {
+		return false
+	}
+	for key := range schema {
+		switch key {
+		case "type", "description", "additionalProperties":
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func hasAdditionalProperties(schema map[string]any) bool {

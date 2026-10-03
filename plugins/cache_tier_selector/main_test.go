@@ -352,9 +352,9 @@ func TestStoredDecisionReappliedByteIdentically(t *testing.T) {
 	if countCommand(h, "torana_plugin_counter") != 0 {
 		t.Fatal("a stored decision must not re-decide (no counter)")
 	}
-	// Refresh the lifetime without changing the tier or recording a new decision.
-	if n := countCommand(h, "env.state_set"); n != 1 {
-		t.Fatalf("a stored decision must refresh its lifetime once, got %d writes", n)
+	// Record activity and refresh lifetime without changing the tier.
+	if n := countCommand(h, "env.state_set"); n != 2 {
+		t.Fatalf("expected activity and lifetime writes, got %d", n)
 	}
 
 	// Byte-identical across fresh clones.

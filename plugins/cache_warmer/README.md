@@ -47,6 +47,38 @@ torana plugin config apply cache_warmer --file plugin-settings.json --yes
 
 Bind required `warm-cache` to the warmed provider/model, prices, lifetimes and refresh semantics. The route needs its own host-managed credential (or auth `none` for a compatible local service); a background tick cannot borrow a caller key. Also set a tick interval and per-plugin egress budget as shown below. The example rates are illustrative, not current provider prices.
 
+Use one provider/model entry in this background policy binding, as in the
+example. A tick has no active request to select between multiple entries.
+
+### Set the background budget before starting Torana
+
+In your Torana `config.json`, merge these fields into `plugins.runtime` while
+keeping your existing plugin settings:
+
+```json
+{
+  "plugins": {
+    "runtime": {
+      "tick_interval_seconds": 10,
+      "egress": {
+        "cache_warmer": {
+          "max_calls_per_minute": 2,
+          "max_tokens_per_hour": 5000
+        }
+      }
+    }
+  }
+}
+```
+
+This is a configuration fragment, not a replacement for your whole file.
+For an existing instance, `torana status` shows its config path: stop Torana
+with `torana stop --yes`, edit that file, then start it again on your chosen
+port. Runtime scheduling is a startup setting; the live CLI pipeline editor
+does not expose it. Zero tick interval disables background work, and a missing
+per-plugin egress budget prevents refresh requests. Choose limits that fit your
+provider, then opt in only the conversation you intend to resume.
+
 ## Approve and enable
 
 Save this as `approval.json`. Replace the digest with the exact one you reviewed
@@ -117,13 +149,12 @@ same inspect/configure/approve/enable flow. Rebuilds need a new digest approval.
 
 First use the empty conversation list to observe without warming. Run `torana conversations --json`, select one ID, set it in `conversations`, then send another real turn so its eligible prefix is captured. During an idle gap, look for attributed `plugin-egress` refreshes. No explicit marker, unsupported refresh semantics, missing state or exhausted budgets should produce no refresh.
 
-If an opted-in conversation is never refreshed, read the plugin's durable
-entry for that conversation (`plugin-state.json` beside the host
-configuration, under key `warm/<conversation-id>`). Its `stopped` field says
-why — including `replay artifact exceeds the prefix budget` and `durable state
-refused the replay artifact`, the two ways a conversation can be too large to
-store. The plugin holds no logging grant, so the entry is where those reasons
-are recorded.
+If an opted-in conversation is never refreshed, recheck its conversation ID,
+eligible cache marker, cache-policy binding and the replay limits above.
+Torana stores private warming state in its local database, not a
+`plugin-state.json` file. Oversized replay artifacts and refused state writes
+stop warming rather than sending an incomplete prefix. Observe attributed
+egress to confirm a refresh actually happened; enabling alone is not proof.
 
 ## Data and failure behavior
 

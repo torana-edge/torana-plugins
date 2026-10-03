@@ -533,7 +533,11 @@ func runAdaptiveShadow(req *pbv1.ChatRequest, raw string) (sdk.RequestResult, er
 		results := shadowNewResultCandidates(req)
 		if len(results) > 0 {
 			start := len(results) // no anchor: historical/compacted batch, baseline it
-			if !fresh && state.LastResultID != "" {
+			if !fresh && state.LastResultID == "" {
+				// We observed the thread before it had any results: its first
+				// result batch is new, not pre-activation history.
+				start = 0
+			} else if !fresh {
 				for i := len(results) - 1; i >= 0; i-- {
 					if results[i].ID == state.LastResultID {
 						start = i + 1

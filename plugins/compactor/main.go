@@ -52,9 +52,8 @@ func isAdvisory(err error) bool {
 const (
 	intentCacheKey  = "intent"
 	compactionCache = "compacted"
-	// Namespaced by plugin. env.cache_* is a SHARED store — unlike
-	// env.state_*, which the host keys by module name — so two plugins using
-	// the same namespace string read and write each other's entries.
+	// Transformation caches are plugin-private; only the explicit shared
+	// intent handoff is readable by another approved plugin.
 	policyCompactionCache = "compactor/policy_compacted"
 	minSummarizerChars    = 2000
 	derivedIntentPrefix   = "torana-derived-intent-v1:"
@@ -220,7 +219,18 @@ func compactToolResults(ctx context.Context, req *pbv1.ChatRequest) (bool, error
 			// Get the optional model-authored intent. NOT_FOUND and present-empty
 			// both use the bounded fallback; any other refusal or malformed reply
 			// is a contract defect — error the hook.
-			intent, found, err := sdk.SharedCacheGet(intentCacheKey + ":" + view.ToolCallId)
+			var meta struct {
+				Conversation string `json:"_conversation_id"`
+			}
+			_ = json.Unmarshal(req.ToranaMetaJson, &meta)
+			var intent string
+			var found bool
+			var err error
+			if call, present := toolCalls[view.ToolCallId]; present && call.InvocationKind == pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FUNCTION {
+				if key := sharedIntentKey(meta.Conversation, view.ToolCallId, toolName, string(call.Arguments)); key != "" {
+					intent, found, err = sdk.SharedCacheGet(key)
+				}
+			}
 			if err != nil {
 				return false, fmt.Errorf("compactor: cache_get %s:%s: %w", intentCacheKey, view.ToolCallId, err)
 			}

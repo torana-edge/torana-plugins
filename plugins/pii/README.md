@@ -56,7 +56,7 @@ Set the snapshot's `config` object to the following, preserving its `revision`:
 torana plugin config apply pii --file plugin-settings.json --yes
 ```
 
-The `pii` plugin is model-backed. Every eligible successful new tool result
+The `pii` plugin is model-backed. Every eligible new tool result
 goes to the required `scanner` model
 service. Historical results are replayed from safe decisions instead of being
 sent to the scanner again. The scanner must support JSON Schema structured

@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"github.com/torana-edge/torana-plugin-sdk/sdktest"
 	"strings"
 	"testing"
 )
@@ -52,12 +53,12 @@ func TestAbsoluteTierLifetimeDoesNotRefresh(t *testing.T) {
 		t.Fatalf("initial decision: %v", res.Err)
 	}
 	h.SetConfig(`{"mode":"short"}`)
-	writes := countCommand(h, "env.state_set")
+	writes := countDecisionWrites(h)
 	h.SetNow(4000000)
 	if res := h.BeforeRequest(reqWith(t, h)); res.Err != nil || res.Request == nil {
 		t.Fatalf("unexpired decision: %v", res.Err)
 	}
-	if got := countCommand(h, "env.state_set"); got != writes {
+	if got := countDecisionWrites(h); got != writes {
 		t.Fatal("absolute TTL use rewrote state")
 	}
 	h.SetNow(4600001)
@@ -78,14 +79,14 @@ func TestRefreshWritesCoalesceWithoutEarlyExpiry(t *testing.T) {
 	h.BeforeRequest(reqWith(t, h))
 	h.SetNow(1100000)
 	h.BeforeRequest(reqWith(t, h))
-	writes := countCommand(h, "env.state_set")
+	writes := countDecisionWrites(h)
 	for _, now := range []int64{1100001, 1200000, 1459999} {
 		h.SetNow(now)
 		if res := h.BeforeRequest(reqWith(t, h)); res.Err != nil {
 			t.Fatal(res.Err)
 		}
 	}
-	if got := countCommand(h, "env.state_set"); got != writes {
+	if got := countDecisionWrites(h); got != writes {
 		t.Fatalf("burst added %d durable writes", got-writes)
 	}
 	h.SetConfig(`{"mode":"short"}`)
@@ -102,11 +103,26 @@ func TestRefreshPersistenceFailureKeepsStickyMarker(t *testing.T) {
 	h.SetNow(1000000)
 	h.BeforeRequest(reqWith(t, h))
 	h.SetNow(1100000)
-	h.StubHostCall("env.state_set", func(string) (string, error) { return "", errors.New("state transport failed") })
+	h.StubHostCall("env.state_set", func(args string) (string, error) {
+		if strings.Contains(args, "decision/") {
+			return "", errors.New("state transport failed")
+		}
+		return sdktest.HostResultValue(nil), nil
+	})
 	res := h.BeforeRequest(reqWith(t, h))
 	if res.Err != nil || res.Request == nil || !strings.Contains(string(carrierMarkerAt(t, res.Request, 1, 1)), `"ttl":"1h"`) {
 		t.Fatalf("refresh failure discarded marker: %v", res.Err)
 	}
+}
+
+func countDecisionWrites(h *sdktest.Harness) int {
+	n := 0
+	for _, call := range h.Calls() {
+		if call.Command == "env.state_set" && strings.Contains(call.Args, "decision/") {
+			n++
+		}
+	}
+	return n
 }
 func TestRefreshPolicyChangeUsesNewDecisionScope(t *testing.T) {
 	h := newHarness(t)
